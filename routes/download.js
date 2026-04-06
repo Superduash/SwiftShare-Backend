@@ -8,11 +8,22 @@ const {
 
 const Transfer = require("../models/Transfer");
 const { r2Client, r2Bucket } = require("../config/r2");
+const { emitToRoom, clearTransferCountdown } = require("../config/socket");
 const { validateCode } = require("../middleware/validateCode");
 const { sanitizeFilename } = require("../utils/fileHelpers");
+const { parseDeviceName } = require("../utils/helpers");
 const { ERROR_CODES } = require("../utils/constants");
 
 const router = express.Router();
+
+function logEvent(message, data) {
+	const timestamp = new Date().toISOString();
+	if (data) {
+		console.log(`[${timestamp}] ${message}`, data);
+	} else {
+		console.log(`[${timestamp}] ${message}`);
+	}
+}
 
 function isExpired(transfer) {
 	return transfer.expiresAt && new Date(transfer.expiresAt).getTime() < Date.now();
@@ -83,6 +94,8 @@ async function streamSingleFile(res, file) {
 
 	const stream = await toReadable(objectResponse.Body);
 	const downloadName = sanitizeFilename(file.originalName || "download");
+	const totalBytes = Number(objectResponse.ContentLength || file.size || 0);
+	let processedBytes = 0;
 
 	res.setHeader("Content-Type", file.mimeType || "application/octet-stream");
 	res.setHeader("Content-Disposition", `attachment; filename="${downloadName}"`);
@@ -90,6 +103,16 @@ async function streamSingleFile(res, file) {
 	if (objectResponse.ContentLength != null) {
 		res.setHeader("Content-Length", objectResponse.ContentLength);
 	}
+
+	stream.on("data", (chunk) => {
+		if (totalBytes <= 0) {
+			return;
+		}
+
+		processedBytes += chunk.length;
+		const percent = Math.min(100, Math.round((processedBytes / totalBytes) * 100));
+		emitToRoom(file.transferCode, "download-progress", { percent });
+	});
 
 	await new Promise((resolve, reject) => {
 		stream.on("error", reject);
@@ -108,6 +131,8 @@ async function streamZip(res, code, files) {
 
 	const archive = archiver("zip", { zlib: { level: 9 } });
 	archive.pipe(res);
+	const totalBytes = files.reduce((sum, file) => sum + Number(file.size || 0), 0);
+	let processedBytes = 0;
 
 	for (const file of files) {
 		const objectResponse = await r2Client.send(
@@ -118,6 +143,15 @@ async function streamZip(res, code, files) {
 		);
 
 		const stream = await toReadable(objectResponse.Body);
+		stream.on("data", (chunk) => {
+			if (totalBytes <= 0) {
+				return;
+			}
+
+			processedBytes += chunk.length;
+			const percent = Math.min(100, Math.round((processedBytes / totalBytes) * 100));
+			emitToRoom(code, "download-progress", { percent });
+		});
 		archive.append(stream, { name: sanitizeFilename(file.originalName || "file") });
 	}
 
@@ -152,17 +186,22 @@ async function incrementDownloadCount(transferId) {
 async function finalizeBurnDownload(transfer) {
 	await deleteTransferFilesFromR2(transfer.files);
 	await Transfer.updateOne({ _id: transfer._id }, { $set: { isDeleted: true } });
+	clearTransferCountdown(transfer.code);
 }
 
 router.get("/:code", validateCode, async (req, res, next) => {
 	try {
 		const { code } = req.params;
 		let transfer = await Transfer.findOne({ code });
+		const receiverDevice = parseDeviceName(req.get("user-agent") || "");
 
 		const unavailableResponse = sendUnavailableTransferResponse(res, transfer);
 		if (unavailableResponse) {
 			return unavailableResponse;
 		}
+
+		emitToRoom(code, "download-started", { receiverDevice });
+		logEvent("Download started", { code, receiverDevice });
 
 		let isBurnFlow = false;
 		if (transfer.burnAfterDownload) {
@@ -185,7 +224,10 @@ router.get("/:code", validateCode, async (req, res, next) => {
 		}
 
 		if (transfer.files.length === 1) {
-			await streamSingleFile(res, transfer.files[0]);
+			await streamSingleFile(res, {
+				...transfer.files[0].toObject(),
+				transferCode: code,
+			});
 		} else {
 			await streamZip(res, transfer.code, transfer.files);
 		}
@@ -195,6 +237,9 @@ router.get("/:code", validateCode, async (req, res, next) => {
 		} else {
 			await incrementDownloadCount(transfer._id);
 		}
+
+		emitToRoom(code, "download-complete", { receiverDevice });
+		logEvent("Download complete", { code, receiverDevice });
 		return null;
 	} catch (error) {
 		if (res.headersSent) {
@@ -209,11 +254,15 @@ router.get("/:code/single/:index", validateCode, async (req, res, next) => {
 	try {
 		const { code, index } = req.params;
 		let transfer = await Transfer.findOne({ code });
+		const receiverDevice = parseDeviceName(req.get("user-agent") || "");
 
 		const unavailableResponse = sendUnavailableTransferResponse(res, transfer);
 		if (unavailableResponse) {
 			return unavailableResponse;
 		}
+
+		emitToRoom(code, "download-started", { receiverDevice });
+		logEvent("Download started", { code, receiverDevice, singleFile: true });
 
 		let isBurnFlow = false;
 		if (transfer.burnAfterDownload) {
@@ -236,12 +285,18 @@ router.get("/:code/single/:index", validateCode, async (req, res, next) => {
 			});
 		}
 
-		await streamSingleFile(res, transfer.files[fileIndex]);
+		await streamSingleFile(res, {
+			...transfer.files[fileIndex].toObject(),
+			transferCode: code,
+		});
 		if (isBurnFlow) {
 			await finalizeBurnDownload(transfer);
 		} else {
 			await incrementDownloadCount(transfer._id);
 		}
+
+		emitToRoom(code, "download-complete", { receiverDevice });
+		logEvent("Download complete", { code, receiverDevice, singleFile: true });
 		return null;
 	} catch (error) {
 		if (res.headersSent) {

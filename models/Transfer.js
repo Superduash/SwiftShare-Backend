@@ -78,9 +78,22 @@ const transferSchema = new mongoose.Schema(
 			type: String,
 			default: "",
 		},
+		senderSocketId: {
+			type: String,
+			default: "",
+		},
 		qrDataUri: {
 			type: String,
 			default: "",
+		},
+		ai: {
+			type: {
+				summary: { type: String, default: null },
+				suggestedName: { type: String, default: null },
+				category: { type: String, default: null },
+				imageDescription: { type: String, default: null },
+			},
+			default: null,
 		},
 	},
 	{

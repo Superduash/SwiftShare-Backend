@@ -3,6 +3,7 @@ const { DeleteObjectCommand } = require("@aws-sdk/client-s3");
 
 const Transfer = require("../models/Transfer");
 const { r2Client, r2Bucket } = require("../config/r2");
+const { emitToRoom, clearTransferCountdown } = require("../config/socket");
 const { validateCode } = require("../middleware/validateCode");
 const { ERROR_CODES } = require("../utils/constants");
 
@@ -41,6 +42,8 @@ router.delete("/:code", validateCode, async (req, res, next) => {
 			await deleteFilesFromR2(transfer.files);
 			transfer.isDeleted = true;
 			await transfer.save();
+			clearTransferCountdown(code);
+			emitToRoom(code, "transfer-cancelled", { code });
 		}
 
 		return res.status(200).json({

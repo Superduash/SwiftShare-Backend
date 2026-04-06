@@ -58,6 +58,7 @@ router.get("/:code", validateCode, async (req, res, next) => {
 			expiresAt: transfer.expiresAt,
 			burnAfterDownload: transfer.burnAfterDownload,
 			senderDeviceName: transfer.senderDeviceName,
+			ai: transfer.ai || null,
 		});
 	} catch (error) {
 		return next(error);
