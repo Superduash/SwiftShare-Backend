@@ -4,9 +4,16 @@ const { PutObjectCommand } = require("@aws-sdk/client-s3");
 
 const Transfer = require("../models/Transfer");
 const { r2Client, r2Bucket } = require("../config/r2");
+const {
+	emitToRoom,
+	scheduleTransferCountdown,
+	bindSocketToRoom,
+} = require("../config/socket");
 const { generateUniqueCode } = require("../services/codeGenerator");
 const { generateQR } = require("../services/qrGenerator");
+const { analyzeFile } = require("../services/aiAnalyzer");
 const { validateUpload } = require("../middleware/validateUpload");
+const { extractClientIp, parseDeviceName } = require("../utils/helpers");
 const {
 	getFileIcon,
 	sanitizeFilename,
@@ -45,18 +52,13 @@ function parseBurnAfterDownload(value) {
 	return false;
 }
 
-function getSenderIp(req) {
-	const forwarded = req.headers["x-forwarded-for"];
-
-	if (typeof forwarded === "string" && forwarded.length > 0) {
-		return forwarded.split(",")[0].trim();
+function logEvent(message, data) {
+	const timestamp = new Date().toISOString();
+	if (data) {
+		console.log(`[${timestamp}] ${message}`, data);
+	} else {
+		console.log(`[${timestamp}] ${message}`);
 	}
-
-	if (Array.isArray(forwarded) && forwarded.length > 0) {
-		return String(forwarded[0]).trim();
-	}
-
-	return req.ip || "";
 }
 
 const upload = multer({
@@ -97,6 +99,21 @@ router.post("/", multerHandler, validateUpload, async (req, res) => {
 		const code = await generateUniqueCode();
 		const incomingFiles = req.files || [];
 		const uploadedFiles = [];
+		const senderSocketId =
+			typeof req.body?.senderSocketId === "string" ? req.body.senderSocketId : "";
+
+		if (senderSocketId) {
+			bindSocketToRoom(code, senderSocketId);
+		}
+
+		const totalSize = getTotalSize(incomingFiles);
+		let uploadedSize = 0;
+		const uploadStartedAt = Date.now();
+		logEvent("Upload started", {
+			code,
+			fileCount: incomingFiles.length,
+			totalSize,
+		});
 
 		for (const file of incomingFiles) {
 			const safeName = sanitizeFilename(file.originalname);
@@ -119,9 +136,19 @@ router.post("/", multerHandler, validateUpload, async (req, res) => {
 				mimeType,
 				icon: getFileIcon(mimeType),
 			});
+
+			uploadedSize += file.size;
+			const elapsedSeconds = Math.max((Date.now() - uploadStartedAt) / 1000, 0.001);
+			const percent = Math.min(100, Math.round((uploadedSize / totalSize) * 100));
+			const speed = Number(((uploadedSize / (1024 * 1024)) / elapsedSeconds).toFixed(2));
+
+			emitToRoom(code, "upload-progress", {
+				percent,
+				speed,
+				elapsed: Number(elapsedSeconds.toFixed(2)),
+			});
 		}
 
-		const totalSize = getTotalSize(incomingFiles);
 		const fileCount = incomingFiles.length;
 		const burnAfterDownload = parseBurnAfterDownload(req.body?.burnAfterDownload);
 		const expiresAt = new Date(
@@ -139,12 +166,52 @@ router.post("/", multerHandler, validateUpload, async (req, res) => {
 			downloadCount: 0,
 			expiresAt,
 			isDeleted: false,
-			senderIp: getSenderIp(req),
-			senderDeviceName: req.get("user-agent") || "Unknown Device",
+			senderIp: extractClientIp(req),
+			senderDeviceName: parseDeviceName(req.get("user-agent") || ""),
+			senderSocketId,
 			qrDataUri: qr,
+			ai: null,
 		});
 
 		const shareLink = `${shareBaseUrl}/g/${code}`;
+
+		emitToRoom(code, "upload-complete", {
+			code,
+			qr,
+			shareLink,
+			expiresAt,
+		});
+		scheduleTransferCountdown(code, expiresAt);
+		logEvent("Upload complete", { code, expiresAt });
+
+		const primaryFile = incomingFiles[0];
+		void (async () => {
+			if (!primaryFile) {
+				return;
+			}
+
+			const aiResult = await analyzeFile(
+				primaryFile.buffer,
+				primaryFile.originalname,
+				primaryFile.mimetype || "application/octet-stream",
+			);
+
+			await Transfer.updateOne(
+				{ code },
+				{ $set: { ai: aiResult || null } },
+			);
+
+			emitToRoom(code, "ai-ready", {
+				summary: aiResult?.summary || null,
+				category: aiResult?.category || null,
+				suggestedName: aiResult?.suggestedName || null,
+			});
+
+			logEvent("AI complete", {
+				code,
+				aiReady: Boolean(aiResult),
+			});
+		})();
 
 		return res.status(200).json({
 			success: true,

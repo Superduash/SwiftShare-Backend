@@ -41,5 +41,8 @@
     "qrcode": "^1.5.4",
     "socket.io": "^4.8.3",
     "uuid": "^13.0.0"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.3"
   }
 }
