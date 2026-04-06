@@ -1,0 +1,2 @@
+﻿// Gemini AI client
+
