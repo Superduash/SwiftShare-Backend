@@ -2,6 +2,7 @@
 
 const Transfer = require("../models/Transfer");
 const { getClientIp, getSubnet } = require("../utils/helpers");
+const { logEvent } = require("../utils/logger");
 
 const router = express.Router();
 
@@ -9,6 +10,7 @@ router.get("/", async (req, res, next) => {
 	try {
 		const clientIp = getClientIp(req);
 		const subnet = getSubnet(clientIp);
+		logEvent("Nearby request", `IP: ${clientIp || "unknown"}`, `SUBNET: ${subnet || "n/a"}`);
 
 		if (!subnet) {
 			return res.status(200).json({ transfers: [] });

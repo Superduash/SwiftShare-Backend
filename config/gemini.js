@@ -1,13 +1,16 @@
 ﻿const { GoogleGenerativeAI } = require("@google/generative-ai");
 
-if (!process.env.GEMINI_API_KEY) {
-	throw new Error("GEMINI_API_KEY is not set in environment variables");
-}
-
-const geminiClient = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = geminiClient.getGenerativeModel({ model: "gemini-2.5-flash" });
+const geminiApiKey = process.env.GEMINI_API_KEY;
+const geminiClient = geminiApiKey ? new GoogleGenerativeAI(geminiApiKey) : null;
+const model = geminiClient
+	? geminiClient.getGenerativeModel({ model: "gemini-2.5-flash" })
+	: null;
 
 async function generateAIResponse(prompt, fileBuffer, mimeType) {
+	if (!model) {
+		return null;
+	}
+
 	let result;
 
 	if (fileBuffer && mimeType && /^image\//i.test(mimeType)) {
@@ -26,7 +29,12 @@ async function generateAIResponse(prompt, fileBuffer, mimeType) {
 	return result.response.text();
 }
 
+function checkGeminiConnection() {
+	return Boolean(model);
+}
+
 module.exports = {
 	generateAIResponse,
+	checkGeminiConnection,
 };
 

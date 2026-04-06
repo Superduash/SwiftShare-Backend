@@ -1,15 +1,8 @@
 ﻿const crypto = require("crypto");
 const Transfer = require("../models/Transfer");
 
-const CODE_CHARACTERS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-
-function getCodeLength() {
-	const parsed = Number(process.env.CODE_LENGTH);
-	if (Number.isInteger(parsed) && parsed > 0) {
-		return parsed;
-	}
-	return 6;
-}
+const CODE_CHARACTERS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+const CODE_LENGTH = 6;
 
 function createCode(length) {
 	let code = "";
@@ -22,10 +15,8 @@ function createCode(length) {
 }
 
 async function generateUniqueCode() {
-	const codeLength = getCodeLength();
-
 	while (true) {
-		const code = createCode(codeLength);
+		const code = createCode(CODE_LENGTH);
 		const exists = await Transfer.exists({ code });
 
 		if (!exists) {

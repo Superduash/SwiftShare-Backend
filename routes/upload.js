@@ -21,6 +21,7 @@ const {
 	mimeToIcon,
 	sanitizeFilename,
 } = require("../utils/helpers");
+const { logEvent, logError, formatSizeMB } = require("../utils/logger");
 const {
 	getTotalSize,
 } = require("../utils/fileHelpers");
@@ -90,15 +91,6 @@ function validateIncomingFiles(files) {
 	}
 }
 
-function logEvent(message, data) {
-	const timestamp = new Date().toISOString();
-	if (data) {
-		console.log(`[${timestamp}] ${message}`, data);
-	} else {
-		console.log(`[${timestamp}] ${message}`);
-	}
-}
-
 async function processUploadFlow({ req, incomingFiles, burnAfterDownload, senderSocketId }) {
 	const shareBaseUrl = process.env.SHARE_BASE_URL;
 	if (!shareBaseUrl) {
@@ -117,11 +109,7 @@ async function processUploadFlow({ req, incomingFiles, burnAfterDownload, sender
 	const totalSize = getTotalSize(incomingFiles);
 	let uploadedSize = 0;
 	const uploadStartedAt = Date.now();
-	logEvent("Upload started", {
-		code,
-		fileCount: incomingFiles.length,
-		totalSize,
-	});
+	logEvent("Upload started", `CODE: ${code}`, `FILES: ${incomingFiles.length}`, formatSizeMB(totalSize));
 
 	for (const file of incomingFiles) {
 		const safeName = sanitizeFilename(file.originalname);
@@ -190,7 +178,7 @@ async function processUploadFlow({ req, incomingFiles, burnAfterDownload, sender
 		expiresAt,
 	});
 	scheduleTransferCountdown(code, expiresAt);
-	logEvent("Upload complete", { code, expiresAt });
+	logEvent("Upload complete", `CODE: ${code}`, formatSizeMB(totalSize));
 
 	const primaryFile = incomingFiles[0];
 	void (async () => {
@@ -198,24 +186,26 @@ async function processUploadFlow({ req, incomingFiles, burnAfterDownload, sender
 			return;
 		}
 
-		const aiResult = await analyzeFile(
-			primaryFile.buffer,
-			primaryFile.originalname,
-			primaryFile.mimetype || "application/octet-stream",
-		);
+		try {
+			logEvent("AI analysis started", `CODE: ${code}`, `FILE: ${primaryFile.originalname}`);
+			const aiResult = await analyzeFile(
+				primaryFile.buffer,
+				primaryFile.originalname,
+				primaryFile.mimetype || "application/octet-stream",
+			);
 
-		await Transfer.updateOne({ code }, { $set: { ai: aiResult || null } });
+			await Transfer.updateOne({ code }, { $set: { ai: aiResult || null } });
 
-		emitToRoom(code, "ai-ready", {
-			summary: aiResult?.summary || null,
-			category: aiResult?.category || null,
-			suggestedName: aiResult?.suggestedName || null,
-		});
+			emitToRoom(code, "ai-ready", {
+				summary: aiResult?.summary || null,
+				category: aiResult?.category || null,
+				suggestedName: aiResult?.suggestedName || null,
+			});
 
-		logEvent("AI complete", {
-			code,
-			aiReady: Boolean(aiResult),
-		});
+			logEvent("AI analysis completed", `CODE: ${code}`, `READY: ${Boolean(aiResult)}`);
+		} catch (aiError) {
+			logError("AI analysis completed", aiError, `CODE: ${code}`, "READY: false");
+		}
 	})();
 
 	return {
@@ -278,7 +268,7 @@ router.post("/", rateLimitUpload, multerHandler, validateUpload, async (req, res
 
 		return res.status(200).json(response);
 	} catch (error) {
-		console.error("Upload failed:", error.message);
+		logError("Upload failed", error);
 		const status = error?.status || 500;
 		const errorCode = error?.errorCode || ERROR_CODES.SERVER_ERROR;
 		return res.status(status).json(buildErrorResponse(errorCode, error.message));
@@ -287,6 +277,7 @@ router.post("/", rateLimitUpload, multerHandler, validateUpload, async (req, res
 
 router.post("/clipboard", rateLimitUpload, async (req, res) => {
 	try {
+		logEvent("Clipboard upload", "REQUEST_RECEIVED");
 		const { imageBase64, burnAfterDownload, senderSocketId } = req.body || {};
 
 		if (typeof imageBase64 !== "string") {
@@ -326,7 +317,7 @@ router.post("/clipboard", rateLimitUpload, async (req, res) => {
 
 		return res.status(200).json(response);
 	} catch (error) {
-		console.error("Clipboard upload failed:", error.message);
+		logError("Clipboard upload failed", error);
 		const status = error?.status || 500;
 		const errorCode = error?.errorCode || ERROR_CODES.SERVER_ERROR;
 		return res.status(status).json(buildErrorResponse(errorCode, error.message));

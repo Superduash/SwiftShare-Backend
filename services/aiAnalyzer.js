@@ -2,6 +2,7 @@
 const pdfParse = require("pdf-parse");
 const mammoth = require("mammoth");
 const { generateAIResponse } = require("../config/gemini");
+const { logEvent } = require("../utils/logger");
 
 const ALLOWED_CATEGORIES = new Set([
 	"Assignment",
@@ -116,6 +117,7 @@ ${contentPreview}`;
 async function analyzeFile(buffer, filename, mimeType) {
 	try {
 		if (!canUseAI()) {
+			logEvent("AI analysis skipped", "local rate safety limit reached");
 			return null;
 		}
 
@@ -134,6 +136,10 @@ async function analyzeFile(buffer, filename, mimeType) {
 			const contentPreview = await buildPreviewFromFile(buffer, filename, mimeType);
 			const prompt = createPrompt({ filename, mimeType, contentPreview });
 			responseText = await generateAIResponse(prompt);
+		}
+
+		if (!responseText) {
+			return null;
 		}
 
 		const jsonString = extractJsonBlock(responseText);

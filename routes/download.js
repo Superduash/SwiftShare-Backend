@@ -13,17 +13,9 @@ const { rateLimitDownload } = require("../middleware/rateLimiter");
 const { validateCode } = require("../middleware/validateCode");
 const { sanitizeFilename, getDeviceName } = require("../utils/helpers");
 const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
+const { logEvent } = require("../utils/logger");
 
 const router = express.Router();
-
-function logEvent(message, data) {
-	const timestamp = new Date().toISOString();
-	if (data) {
-		console.log(`[${timestamp}] ${message}`, data);
-	} else {
-		console.log(`[${timestamp}] ${message}`);
-	}
-}
 
 function isExpired(transfer) {
 	return transfer.expiresAt && new Date(transfer.expiresAt).getTime() < Date.now();
@@ -168,7 +160,7 @@ router.get("/:code", rateLimitDownload, validateCode, async (req, res, next) => 
 		}
 
 		emitToRoom(code, "download-started", { receiverDevice });
-		logEvent("Download started", { code, receiverDevice });
+		logEvent("Download started", `CODE: ${code}`, `DEVICE: ${receiverDevice}`);
 
 		let isBurnFlow = false;
 		if (transfer.burnAfterDownload) {
@@ -200,7 +192,7 @@ router.get("/:code", rateLimitDownload, validateCode, async (req, res, next) => 
 		}
 
 		emitToRoom(code, "download-complete", { receiverDevice });
-		logEvent("Download complete", { code, receiverDevice });
+		logEvent("Download completed", `CODE: ${code}`, `DEVICE: ${receiverDevice}`);
 		return null;
 	} catch (error) {
 		if (res.headersSent) {
@@ -223,7 +215,7 @@ router.get("/:code/single/:index", rateLimitDownload, validateCode, async (req, 
 		}
 
 		emitToRoom(code, "download-started", { receiverDevice });
-		logEvent("Download started", { code, receiverDevice, singleFile: true });
+		logEvent("Download started", `CODE: ${code}`, `DEVICE: ${receiverDevice}`, "MODE: single");
 
 		let isBurnFlow = false;
 		if (transfer.burnAfterDownload) {
@@ -251,7 +243,7 @@ router.get("/:code/single/:index", rateLimitDownload, validateCode, async (req, 
 		}
 
 		emitToRoom(code, "download-complete", { receiverDevice });
-		logEvent("Download complete", { code, receiverDevice, singleFile: true });
+		logEvent("Download completed", `CODE: ${code}`, `DEVICE: ${receiverDevice}`, "MODE: single");
 		return null;
 	} catch (error) {
 		if (res.headersSent) {

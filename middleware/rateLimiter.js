@@ -3,6 +3,7 @@ const { Redis } = require("@upstash/redis");
 
 const { getClientIp } = require("../utils/helpers");
 const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
+const { logEvent } = require("../utils/logger");
 
 function createRedisClient() {
 	const url = process.env.UPSTASH_REDIS_REST_URL;
@@ -50,6 +51,11 @@ function createRateLimitMiddleware(limiter) {
 			const result = await limiter.limit(ip);
 
 			if (!result.success) {
+				logEvent(
+					"Rate limit triggered",
+					`IP: ${ip}`,
+					`PATH: ${req.method} ${req.originalUrl}`,
+				);
 				return res
 					.status(429)
 					.json(buildErrorResponse(ERROR_CODES.RATE_LIMIT_EXCEEDED));

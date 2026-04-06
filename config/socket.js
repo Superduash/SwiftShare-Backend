@@ -1,20 +1,12 @@
 ﻿const { Server } = require("socket.io");
 const Transfer = require("../models/Transfer");
+const { logEvent } = require("../utils/logger");
 
 let ioInstance;
 const countdownMap = new Map();
 
 function roomName(code) {
 	return `room:${code}`;
-}
-
-function logEvent(message, data) {
-	const timestamp = new Date().toISOString();
-	if (data) {
-		console.log(`[${timestamp}] ${message}`, data);
-	} else {
-		console.log(`[${timestamp}] ${message}`);
-	}
 }
 
 function emitToRoom(code, event, data = {}) {
@@ -64,7 +56,7 @@ function scheduleTransferCountdown(code, expiresAt) {
 		if (secondsRemaining <= 0) {
 			clearTransferCountdown(code);
 			emitToRoom(code, "transfer-expired", { code });
-			logEvent("Transfer expired", { code });
+			logEvent("Transfer expired", `CODE: ${code}`);
 		}
 	}, 1000);
 
@@ -74,7 +66,7 @@ function scheduleTransferCountdown(code, expiresAt) {
 function initSocket(server) {
 	ioInstance = new Server(server, {
 		cors: {
-			origin: process.env.FRONTEND_URL || "*",
+			origin: process.env.FRONTEND_URL || true,
 			methods: ["GET", "POST"],
 		},
 	});

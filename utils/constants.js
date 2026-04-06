@@ -13,6 +13,7 @@ const ERROR_CODES = {
 	ALREADY_DOWNLOADED: "ALREADY_DOWNLOADED",
 	INVALID_CODE: "INVALID_CODE",
 	RATE_LIMIT_EXCEEDED: "RATE_LIMIT_EXCEEDED",
+	ROUTE_NOT_FOUND: "ROUTE_NOT_FOUND",
 	SERVER_ERROR: "SERVER_ERROR",
 	// Backward compatibility aliases for already-written route logic.
 	BLOCKED_FILE_TYPE: "INVALID_FILE_TYPE",
@@ -29,6 +30,7 @@ const ERROR_MESSAGES = {
 	[ERROR_CODES.ALREADY_DOWNLOADED]: "Transfer already downloaded",
 	[ERROR_CODES.INVALID_CODE]: "Invalid transfer code",
 	[ERROR_CODES.RATE_LIMIT_EXCEEDED]: "Rate limit exceeded",
+	[ERROR_CODES.ROUTE_NOT_FOUND]: "Route not found",
 	[ERROR_CODES.SERVER_ERROR]: "Internal server error",
 };
 

@@ -1,4 +1,4 @@
-﻿const { S3Client } = require("@aws-sdk/client-s3");
+﻿const { S3Client, HeadBucketCommand } = require("@aws-sdk/client-s3");
 
 const required = [
 	"R2_ACCOUNT_ID",
@@ -24,8 +24,22 @@ const r2Client = new S3Client({
 	},
 });
 
+async function checkR2Connection() {
+	try {
+		await r2Client.send(
+			new HeadBucketCommand({
+				Bucket: process.env.R2_BUCKET_NAME,
+			}),
+		);
+		return true;
+	} catch (error) {
+		return false;
+	}
+}
+
 module.exports = {
 	r2Client,
 	r2Bucket: process.env.R2_BUCKET_NAME,
+	checkR2Connection,
 };
 

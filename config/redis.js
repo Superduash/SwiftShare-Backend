@@ -1,20 +1,26 @@
 ﻿const { Redis } = require("@upstash/redis");
 
-if (!process.env.UPSTASH_REDIS_REST_URL) {
-	throw new Error("UPSTASH_REDIS_REST_URL is not set in environment variables");
-}
+const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
+const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
 
-if (!process.env.UPSTASH_REDIS_REST_TOKEN) {
-	throw new Error("UPSTASH_REDIS_REST_TOKEN is not set in environment variables");
-}
-
-const redis = new Redis({
-	url: process.env.UPSTASH_REDIS_REST_URL,
-	token: process.env.UPSTASH_REDIS_REST_TOKEN,
-});
+const redis = redisUrl && redisToken
+	? new Redis({
+		url: redisUrl,
+		token: redisToken,
+	})
+	: null;
 
 async function checkRedisConnection() {
-	await redis.ping();
+	if (!redis) {
+		return false;
+	}
+
+	try {
+		await redis.ping();
+		return true;
+	} catch (error) {
+		return false;
+	}
 }
 
 module.exports = {

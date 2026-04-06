@@ -102,6 +102,8 @@ const transferSchema = new mongoose.Schema(
 );
 
 transferSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+transferSchema.index({ createdAt: -1 });
+transferSchema.index({ senderIp: 1 });
 
 module.exports = mongoose.model("Transfer", transferSchema);
 
