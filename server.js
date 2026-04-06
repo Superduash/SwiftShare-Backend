@@ -9,6 +9,11 @@ const morgan = require("morgan");
 const { connectDB } = require("./config/db");
 const { initSocket } = require("./config/socket");
 const uploadRoutes = require("./routes/upload");
+const fileRoutes = require("./routes/file");
+const downloadRoutes = require("./routes/download");
+const transferRoutes = require("./routes/transfer");
+const { startCleanupJob } = require("./services/cleanupService");
+const { errorHandler } = require("./middleware/errorHandler");
 
 const app = express();
 const server = http.createServer(app);
@@ -19,10 +24,15 @@ app.use(morgan("dev"));
 app.use(express.json({ limit: "10mb" }));
 
 app.use("/api/upload", uploadRoutes);
+app.use("/api/file", fileRoutes);
+app.use("/api/download", downloadRoutes);
+app.use("/api/transfer", transferRoutes);
 
 app.get("/api/health", (req, res) => {
 	res.json({ status: "ok" });
 });
+
+app.use(errorHandler);
 
 function connectMongoWithRetry() {
 	const retryDelayMs = 5000;
@@ -48,6 +58,7 @@ function startServer() {
 		server.listen(port, () => {
 			console.log(`Server listening on port ${port}`);
 			connectMongoWithRetry();
+			startCleanupJob();
 		});
 	} catch (error) {
 		console.error("Server failed to start:", error.message);
