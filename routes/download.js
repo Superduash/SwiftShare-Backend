@@ -132,25 +132,49 @@ async function streamZip(res, code, files) {
 	});
 }
 
-async function markDownloadAndBurnIfNeeded(transfer) {
-	transfer.downloadCount += 1;
-	await transfer.save();
+async function claimBurnDownload(transferId) {
+	return Transfer.findOneAndUpdate(
+		{
+			_id: transferId,
+			isDeleted: false,
+			burnAfterDownload: true,
+			downloadCount: 0,
+		},
+		{ $inc: { downloadCount: 1 } },
+		{ new: true },
+	);
+}
 
-	if (transfer.burnAfterDownload) {
-		await deleteTransferFilesFromR2(transfer.files);
-		transfer.isDeleted = true;
-		await transfer.save();
-	}
+async function incrementDownloadCount(transferId) {
+	await Transfer.updateOne({ _id: transferId }, { $inc: { downloadCount: 1 } });
+}
+
+async function finalizeBurnDownload(transfer) {
+	await deleteTransferFilesFromR2(transfer.files);
+	await Transfer.updateOne({ _id: transfer._id }, { $set: { isDeleted: true } });
 }
 
 router.get("/:code", validateCode, async (req, res, next) => {
 	try {
 		const { code } = req.params;
-		const transfer = await Transfer.findOne({ code });
+		let transfer = await Transfer.findOne({ code });
 
 		const unavailableResponse = sendUnavailableTransferResponse(res, transfer);
 		if (unavailableResponse) {
 			return unavailableResponse;
+		}
+
+		let isBurnFlow = false;
+		if (transfer.burnAfterDownload) {
+			const claimedTransfer = await claimBurnDownload(transfer._id);
+			if (!claimedTransfer) {
+				return res.status(410).json({
+					success: false,
+					error: ERROR_CODES.ALREADY_DOWNLOADED,
+				});
+			}
+			transfer = claimedTransfer;
+			isBurnFlow = true;
 		}
 
 		if (!transfer.files || transfer.files.length === 0) {
@@ -166,7 +190,11 @@ router.get("/:code", validateCode, async (req, res, next) => {
 			await streamZip(res, transfer.code, transfer.files);
 		}
 
-		await markDownloadAndBurnIfNeeded(transfer);
+		if (isBurnFlow) {
+			await finalizeBurnDownload(transfer);
+		} else {
+			await incrementDownloadCount(transfer._id);
+		}
 		return null;
 	} catch (error) {
 		if (res.headersSent) {
@@ -180,11 +208,24 @@ router.get("/:code", validateCode, async (req, res, next) => {
 router.get("/:code/single/:index", validateCode, async (req, res, next) => {
 	try {
 		const { code, index } = req.params;
-		const transfer = await Transfer.findOne({ code });
+		let transfer = await Transfer.findOne({ code });
 
 		const unavailableResponse = sendUnavailableTransferResponse(res, transfer);
 		if (unavailableResponse) {
 			return unavailableResponse;
+		}
+
+		let isBurnFlow = false;
+		if (transfer.burnAfterDownload) {
+			const claimedTransfer = await claimBurnDownload(transfer._id);
+			if (!claimedTransfer) {
+				return res.status(410).json({
+					success: false,
+					error: ERROR_CODES.ALREADY_DOWNLOADED,
+				});
+			}
+			transfer = claimedTransfer;
+			isBurnFlow = true;
 		}
 
 		const fileIndex = Number(index);
@@ -196,7 +237,11 @@ router.get("/:code/single/:index", validateCode, async (req, res, next) => {
 		}
 
 		await streamSingleFile(res, transfer.files[fileIndex]);
-		await markDownloadAndBurnIfNeeded(transfer);
+		if (isBurnFlow) {
+			await finalizeBurnDownload(transfer);
+		} else {
+			await incrementDownloadCount(transfer._id);
+		}
 		return null;
 	} catch (error) {
 		if (res.headersSent) {
