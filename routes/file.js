@@ -15,7 +15,23 @@ router.get("/:code", validateCode, async (req, res, next) => {
 		const { code } = req.params;
 		const transfer = await Transfer.findOne({ code }).lean();
 
-		if (!transfer || transfer.isDeleted) {
+		if (!transfer) {
+			return res.status(404).json({
+				success: false,
+				error: ERROR_CODES.CODE_NOT_FOUND,
+			});
+		}
+
+		// Check burn-before-isDeleted so we return ALREADY_DOWNLOADED (not CODE_NOT_FOUND)
+		// even after finalizeBurnDownload has set isDeleted: true.
+		if (transfer.burnAfterDownload && transfer.downloadCount >= 1) {
+			return res.status(410).json({
+				success: false,
+				error: ERROR_CODES.ALREADY_DOWNLOADED,
+			});
+		}
+
+		if (transfer.isDeleted) {
 			return res.status(404).json({
 				success: false,
 				error: ERROR_CODES.CODE_NOT_FOUND,
@@ -26,13 +42,6 @@ router.get("/:code", validateCode, async (req, res, next) => {
 			return res.status(410).json({
 				success: false,
 				error: ERROR_CODES.TRANSFER_EXPIRED,
-			});
-		}
-
-		if (transfer.burnAfterDownload && transfer.downloadCount >= 1) {
-			return res.status(410).json({
-				success: false,
-				error: ERROR_CODES.ALREADY_DOWNLOADED,
 			});
 		}
 
