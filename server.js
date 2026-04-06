@@ -2,11 +2,15 @@
 
 const http = require("http");
 const express = require("express");
+const mongoose = require("mongoose");
 const cors = require("cors");
 const helmet = require("helmet");
 const morgan = require("morgan");
 
 const { connectDB } = require("./config/db");
+const { checkRedisConnection } = require("./config/redis");
+const { checkR2Connection } = require("./config/r2");
+const { checkGeminiConnection } = require("./config/gemini");
 const { initSocket } = require("./config/socket");
 const uploadRoutes = require("./routes/upload");
 const fileRoutes = require("./routes/file");
@@ -16,11 +20,15 @@ const nearbyRoutes = require("./routes/nearby");
 const statsRoutes = require("./routes/stats");
 const { startCleanupJob } = require("./services/cleanupService");
 const { errorHandler } = require("./middleware/errorHandler");
+const { ERROR_CODES, buildErrorResponse } = require("./utils/constants");
+const { logEvent, logError } = require("./utils/logger");
 
 const app = express();
 const server = http.createServer(app);
 
-app.use(cors({ origin: process.env.FRONTEND_URL || "*" }));
+app.set("trust proxy", 1);
+
+app.use(cors({ origin: process.env.FRONTEND_URL || true }));
 app.use(helmet());
 app.use(morgan("dev"));
 app.use(express.json({ limit: "10mb" }));
@@ -32,8 +40,36 @@ app.use("/api/transfer", transferRoutes);
 app.use("/api/nearby", nearbyRoutes);
 app.use("/api/stats", statsRoutes);
 
-app.get("/api/health", (req, res) => {
-	res.json({ status: "ok" });
+function getMongoStatus() {
+	return mongoose.connection.readyState === 1 ? "connected" : "disconnected";
+}
+
+async function getRedisStatus() {
+	return (await checkRedisConnection()) ? "connected" : "disconnected";
+}
+
+async function getR2Status() {
+	return (await checkR2Connection()) ? "connected" : "disconnected";
+}
+
+app.get("/api/health", async (req, res) => {
+	const [redisStatus, r2Status] = await Promise.all([
+		getRedisStatus(),
+		getR2Status(),
+	]);
+
+	res.json({
+		status: "ok",
+		mongodb: getMongoStatus(),
+		redis: redisStatus,
+		r2: r2Status,
+		uptime: process.uptime(),
+		timestamp: Date.now(),
+	});
+});
+
+app.use((req, res) => {
+	res.status(404).json(buildErrorResponse(ERROR_CODES.ROUTE_NOT_FOUND));
 });
 
 app.use(errorHandler);
@@ -44,9 +80,10 @@ function connectMongoWithRetry() {
 	const tryConnect = async () => {
 		try {
 			await connectDB();
-			console.log("MongoDB connected");
+			logEvent("MongoDB connected");
+			console.log("MongoDB Connected");
 		} catch (error) {
-			console.error(`MongoDB connection failed: ${error.message}`);
+			logError("MongoDB connection failed", error);
 			setTimeout(tryConnect, retryDelayMs);
 		}
 	};
@@ -54,18 +91,37 @@ function connectMongoWithRetry() {
 	void tryConnect();
 }
 
+async function printStartupStatus(port) {
+	const [redisStatus, r2Status] = await Promise.all([
+		getRedisStatus(),
+		getR2Status(),
+	]);
+	const geminiStatus = checkGeminiConnection() ? "connected" : "disconnected";
+
+	logEvent("Server started", `PORT: ${port}`, `BACKEND_URL: ${process.env.BACKEND_URL || "not-set"}`);
+	logEvent("Diagnostics", `MONGODB: ${getMongoStatus()}`, `REDIS: ${redisStatus}`, `R2: ${r2Status}`, `GEMINI: ${geminiStatus}`);
+
+	console.log("SwiftShare Server Running");
+	console.log(redisStatus === "connected" ? "Redis Connected" : "Redis Disconnected");
+	console.log(r2Status === "connected" ? "R2 Connected" : "R2 Disconnected");
+	console.log(geminiStatus === "connected" ? "Gemini Connected" : "Gemini Disconnected");
+	console.log("Cleanup Job Running");
+	console.log("Ready for Transfers");
+}
+
 function startServer() {
 	try {
 		initSocket(server);
 
 		const port = Number(process.env.PORT) || 3001;
-		server.listen(port, () => {
-			console.log(`Server listening on port ${port}`);
+		server.listen(port, async () => {
+			logEvent("Server listening", `PORT: ${port}`);
 			connectMongoWithRetry();
 			startCleanupJob();
+			await printStartupStatus(port);
 		});
 	} catch (error) {
-		console.error("Server failed to start:", error.message);
+		logError("Server failed to start", error);
 	}
 }
 
