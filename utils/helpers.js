@@ -1,18 +1,42 @@
-﻿function extractClientIp(req) {
+﻿const path = require("path");
+
+function getClientIp(req) {
 	const forwarded = req.headers["x-forwarded-for"];
 
 	if (typeof forwarded === "string" && forwarded.length > 0) {
-		return forwarded.split(",")[0].trim();
+		return normalizeIp(forwarded.split(",")[0].trim());
 	}
 
 	if (Array.isArray(forwarded) && forwarded.length > 0) {
-		return String(forwarded[0]).trim();
+		return normalizeIp(String(forwarded[0]).trim());
 	}
 
-	return req.ip || "";
+	return normalizeIp(req.socket?.remoteAddress || req.ip || "");
 }
 
-function parseDeviceName(userAgent = "") {
+function normalizeIp(ip) {
+	const raw = String(ip || "").trim();
+	if (raw.startsWith("::ffff:")) {
+		return raw.replace("::ffff:", "");
+	}
+	return raw;
+}
+
+function getSubnet(ip) {
+	const normalized = normalizeIp(ip);
+	if (!normalized.includes(".")) {
+		return "";
+	}
+
+	const octets = normalized.split(".");
+	if (octets.length < 3) {
+		return "";
+	}
+
+	return `${octets[0]}.${octets[1]}.${octets[2]}`;
+}
+
+function getDeviceName(userAgent = "") {
 	const ua = String(userAgent || "");
 
 	let browser = "Browser";
@@ -46,8 +70,63 @@ function parseDeviceName(userAgent = "") {
 	return `${browser} on ${platform}`;
 }
 
+function mimeToIcon(mimeType = "") {
+	const mime = String(mimeType || "").toLowerCase();
+
+	if (mime.includes("pdf")) {
+		return "pdf";
+	}
+	if (mime.startsWith("image/")) {
+		return "image";
+	}
+	if (mime.startsWith("video/")) {
+		return "video";
+	}
+	if (mime.includes("zip") || mime.includes("compressed")) {
+		return "zip";
+	}
+	if (mime.includes("word") || mime.includes("msword") || mime.includes("officedocument.wordprocessingml")) {
+		return "doc";
+	}
+
+	return "file";
+}
+
+function formatBytes(bytes) {
+	const value = Number(bytes || 0);
+	if (value <= 0) {
+		return "0 B";
+	}
+
+	const units = ["B", "KB", "MB", "GB", "TB"];
+	const exponent = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
+	const size = value / Math.pow(1024, exponent);
+	return `${size.toFixed(exponent === 0 ? 0 : 2)} ${units[exponent]}`;
+}
+
+function sanitizeFilename(name = "file") {
+	const baseName = path.basename(String(name));
+	const sanitized = baseName
+		.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
+		.replace(/\s+/g, " ")
+		.trim();
+
+	if (!sanitized) {
+		return `file_${Date.now()}`;
+	}
+
+	return sanitized;
+}
+
 module.exports = {
-	extractClientIp,
-	parseDeviceName,
+	getClientIp,
+	getSubnet,
+	getDeviceName,
+	mimeToIcon,
+	formatBytes,
+	sanitizeFilename,
+	// Backward-compatible aliases used by existing Hour 1-3 code.
+	extractClientIp: getClientIp,
+	parseDeviceName: getDeviceName,
 };
 

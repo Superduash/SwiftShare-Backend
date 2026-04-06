@@ -1,5 +1,4 @@
 ﻿const express = require("express");
-const archiver = require("archiver");
 const { Readable } = require("stream");
 const {
 	GetObjectCommand,
@@ -9,10 +8,11 @@ const {
 const Transfer = require("../models/Transfer");
 const { r2Client, r2Bucket } = require("../config/r2");
 const { emitToRoom, clearTransferCountdown } = require("../config/socket");
+const { streamZipFromR2 } = require("../services/zipService");
+const { rateLimitDownload } = require("../middleware/rateLimiter");
 const { validateCode } = require("../middleware/validateCode");
-const { sanitizeFilename } = require("../utils/fileHelpers");
-const { parseDeviceName } = require("../utils/helpers");
-const { ERROR_CODES } = require("../utils/constants");
+const { sanitizeFilename, getDeviceName } = require("../utils/helpers");
+const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
 
 const router = express.Router();
 
@@ -31,24 +31,15 @@ function isExpired(transfer) {
 
 function sendUnavailableTransferResponse(res, transfer) {
 	if (!transfer) {
-		return res.status(404).json({
-			success: false,
-			error: ERROR_CODES.CODE_NOT_FOUND,
-		});
+		return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
 	}
 
 	if (isExpired(transfer)) {
-		return res.status(410).json({
-			success: false,
-			error: ERROR_CODES.TRANSFER_EXPIRED,
-		});
+		return res.status(410).json(buildErrorResponse(ERROR_CODES.TRANSFER_EXPIRED));
 	}
 
 	if (transfer.isDeleted || (transfer.burnAfterDownload && transfer.downloadCount >= 1)) {
-		return res.status(410).json({
-			success: false,
-			error: ERROR_CODES.ALREADY_DOWNLOADED,
-		});
+		return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
 	}
 
 	return null;
@@ -123,46 +114,22 @@ async function streamSingleFile(res, file) {
 }
 
 async function streamZip(res, code, files) {
-	res.setHeader("Content-Type", "application/zip");
-	res.setHeader(
-		"Content-Disposition",
-		`attachment; filename="swiftshare-${code}.zip"`,
-	);
-
-	const archive = archiver("zip", { zlib: { level: 9 } });
-	archive.pipe(res);
 	const totalBytes = files.reduce((sum, file) => sum + Number(file.size || 0), 0);
 	let processedBytes = 0;
 
-	for (const file of files) {
-		const objectResponse = await r2Client.send(
-			new GetObjectCommand({
-				Bucket: r2Bucket,
-				Key: file.storedKey,
-			}),
-		);
-
-		const stream = await toReadable(objectResponse.Body);
-		stream.on("data", (chunk) => {
+	await streamZipFromR2({
+		code,
+		files,
+		res,
+		onChunk: (chunkLength) => {
 			if (totalBytes <= 0) {
 				return;
 			}
 
-			processedBytes += chunk.length;
+			processedBytes += chunkLength;
 			const percent = Math.min(100, Math.round((processedBytes / totalBytes) * 100));
 			emitToRoom(code, "download-progress", { percent });
-		});
-		archive.append(stream, { name: sanitizeFilename(file.originalName || "file") });
-	}
-
-	await new Promise((resolve, reject) => {
-		archive.on("error", reject);
-		res.on("finish", resolve);
-		res.on("error", reject);
-		const finalizeResult = archive.finalize();
-		if (finalizeResult && typeof finalizeResult.catch === "function") {
-			finalizeResult.catch(reject);
-		}
+		},
 	});
 }
 
@@ -189,11 +156,11 @@ async function finalizeBurnDownload(transfer) {
 	clearTransferCountdown(transfer.code);
 }
 
-router.get("/:code", validateCode, async (req, res, next) => {
+router.get("/:code", rateLimitDownload, validateCode, async (req, res, next) => {
 	try {
 		const { code } = req.params;
 		let transfer = await Transfer.findOne({ code });
-		const receiverDevice = parseDeviceName(req.get("user-agent") || "");
+		const receiverDevice = getDeviceName(req.get("user-agent") || "");
 
 		const unavailableResponse = sendUnavailableTransferResponse(res, transfer);
 		if (unavailableResponse) {
@@ -207,20 +174,14 @@ router.get("/:code", validateCode, async (req, res, next) => {
 		if (transfer.burnAfterDownload) {
 			const claimedTransfer = await claimBurnDownload(transfer._id);
 			if (!claimedTransfer) {
-				return res.status(410).json({
-					success: false,
-					error: ERROR_CODES.ALREADY_DOWNLOADED,
-				});
+				return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
 			}
 			transfer = claimedTransfer;
 			isBurnFlow = true;
 		}
 
 		if (!transfer.files || transfer.files.length === 0) {
-			return res.status(404).json({
-				success: false,
-				error: ERROR_CODES.CODE_NOT_FOUND,
-			});
+			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
 		}
 
 		if (transfer.files.length === 1) {
@@ -250,11 +211,11 @@ router.get("/:code", validateCode, async (req, res, next) => {
 	}
 });
 
-router.get("/:code/single/:index", validateCode, async (req, res, next) => {
+router.get("/:code/single/:index", rateLimitDownload, validateCode, async (req, res, next) => {
 	try {
 		const { code, index } = req.params;
 		let transfer = await Transfer.findOne({ code });
-		const receiverDevice = parseDeviceName(req.get("user-agent") || "");
+		const receiverDevice = getDeviceName(req.get("user-agent") || "");
 
 		const unavailableResponse = sendUnavailableTransferResponse(res, transfer);
 		if (unavailableResponse) {
@@ -268,10 +229,7 @@ router.get("/:code/single/:index", validateCode, async (req, res, next) => {
 		if (transfer.burnAfterDownload) {
 			const claimedTransfer = await claimBurnDownload(transfer._id);
 			if (!claimedTransfer) {
-				return res.status(410).json({
-					success: false,
-					error: ERROR_CODES.ALREADY_DOWNLOADED,
-				});
+				return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
 			}
 			transfer = claimedTransfer;
 			isBurnFlow = true;
@@ -279,10 +237,7 @@ router.get("/:code/single/:index", validateCode, async (req, res, next) => {
 
 		const fileIndex = Number(index);
 		if (!Number.isInteger(fileIndex) || fileIndex < 0 || fileIndex >= transfer.files.length) {
-			return res.status(404).json({
-				success: false,
-				error: ERROR_CODES.CODE_NOT_FOUND,
-			});
+			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
 		}
 
 		await streamSingleFile(res, {

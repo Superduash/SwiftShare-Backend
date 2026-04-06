@@ -5,7 +5,7 @@ const Transfer = require("../models/Transfer");
 const { r2Client, r2Bucket } = require("../config/r2");
 const { emitToRoom, clearTransferCountdown } = require("../config/socket");
 const { validateCode } = require("../middleware/validateCode");
-const { ERROR_CODES } = require("../utils/constants");
+const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
 
 const router = express.Router();
 
@@ -32,10 +32,7 @@ router.delete("/:code", validateCode, async (req, res, next) => {
 		const transfer = await Transfer.findOne({ code });
 
 		if (!transfer) {
-			return res.status(404).json({
-				success: false,
-				error: ERROR_CODES.CODE_NOT_FOUND,
-			});
+			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
 		}
 
 		if (!transfer.isDeleted) {
