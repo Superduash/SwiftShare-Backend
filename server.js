@@ -12,6 +12,8 @@ const uploadRoutes = require("./routes/upload");
 const fileRoutes = require("./routes/file");
 const downloadRoutes = require("./routes/download");
 const transferRoutes = require("./routes/transfer");
+const nearbyRoutes = require("./routes/nearby");
+const statsRoutes = require("./routes/stats");
 const { startCleanupJob } = require("./services/cleanupService");
 const { errorHandler } = require("./middleware/errorHandler");
 
@@ -27,6 +29,8 @@ app.use("/api/upload", uploadRoutes);
 app.use("/api/file", fileRoutes);
 app.use("/api/download", downloadRoutes);
 app.use("/api/transfer", transferRoutes);
+app.use("/api/nearby", nearbyRoutes);
+app.use("/api/stats", statsRoutes);
 
 app.get("/api/health", (req, res) => {
 	res.json({ status: "ok" });

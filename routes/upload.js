@@ -1,6 +1,7 @@
 ﻿const express = require("express");
 const multer = require("multer");
 const { PutObjectCommand } = require("@aws-sdk/client-s3");
+const path = require("path");
 
 const Transfer = require("../models/Transfer");
 const { r2Client, r2Bucket } = require("../config/r2");
@@ -12,15 +13,21 @@ const {
 const { generateUniqueCode } = require("../services/codeGenerator");
 const { generateQR } = require("../services/qrGenerator");
 const { analyzeFile } = require("../services/aiAnalyzer");
+const { rateLimitUpload } = require("../middleware/rateLimiter");
 const { validateUpload } = require("../middleware/validateUpload");
-const { extractClientIp, parseDeviceName } = require("../utils/helpers");
 const {
-	getFileIcon,
+	getClientIp,
+	getDeviceName,
+	mimeToIcon,
 	sanitizeFilename,
+} = require("../utils/helpers");
+const {
 	getTotalSize,
 } = require("../utils/fileHelpers");
+const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
 
 const router = express.Router();
+const BLOCKED_EXTENSIONS = new Set([".exe", ".bat", ".sh", ".cmd"]);
 
 function getMaxFileCount() {
 	const maxCount = Number(process.env.MAX_FILE_COUNT);
@@ -52,6 +59,37 @@ function parseBurnAfterDownload(value) {
 	return false;
 }
 
+function createAppError(status, errorCode, message) {
+	const error = new Error(message);
+	error.status = status;
+	error.errorCode = errorCode;
+	return error;
+}
+
+function validateIncomingFiles(files) {
+	if (!Array.isArray(files) || files.length === 0) {
+		throw createAppError(400, ERROR_CODES.NO_FILE_UPLOADED, "No file uploaded");
+	}
+
+	if (files.length > getMaxFileCount()) {
+		throw createAppError(400, ERROR_CODES.TOO_MANY_FILES, "Too many files");
+	}
+
+	const totalSize = getTotalSize(files);
+	if (totalSize > getMaxFileSizeBytes()) {
+		throw createAppError(400, ERROR_CODES.FILE_TOO_LARGE, "File exceeds size limit");
+	}
+
+	const hasBlockedExt = files.some((file) => {
+		const extension = path.extname(file.originalname || "").toLowerCase();
+		return BLOCKED_EXTENSIONS.has(extension);
+	});
+
+	if (hasBlockedExt) {
+		throw createAppError(400, ERROR_CODES.INVALID_FILE_TYPE, "Invalid file type");
+	}
+}
+
 function logEvent(message, data) {
 	const timestamp = new Date().toISOString();
 	if (data) {
@@ -59,6 +97,142 @@ function logEvent(message, data) {
 	} else {
 		console.log(`[${timestamp}] ${message}`);
 	}
+}
+
+async function processUploadFlow({ req, incomingFiles, burnAfterDownload, senderSocketId }) {
+	const shareBaseUrl = process.env.SHARE_BASE_URL;
+	if (!shareBaseUrl) {
+		throw createAppError(500, ERROR_CODES.SERVER_ERROR, "SHARE_BASE_URL is not set in environment variables");
+	}
+
+	validateIncomingFiles(incomingFiles);
+
+	const code = await generateUniqueCode();
+	const uploadedFiles = [];
+
+	if (senderSocketId) {
+		bindSocketToRoom(code, senderSocketId);
+	}
+
+	const totalSize = getTotalSize(incomingFiles);
+	let uploadedSize = 0;
+	const uploadStartedAt = Date.now();
+	logEvent("Upload started", {
+		code,
+		fileCount: incomingFiles.length,
+		totalSize,
+	});
+
+	for (const file of incomingFiles) {
+		const safeName = sanitizeFilename(file.originalname);
+		const storedKey = `transfers/${code}/${safeName}`;
+		const mimeType = file.mimetype || "application/octet-stream";
+
+		await r2Client.send(
+			new PutObjectCommand({
+				Bucket: r2Bucket,
+				Key: storedKey,
+				Body: file.buffer,
+				ContentType: mimeType,
+			}),
+		);
+
+		uploadedFiles.push({
+			originalName: file.originalname,
+			storedKey,
+			size: file.size,
+			mimeType,
+			icon: mimeToIcon(mimeType),
+		});
+
+		uploadedSize += file.size;
+		const elapsedSeconds = Math.max((Date.now() - uploadStartedAt) / 1000, 0.001);
+		const denominator = Math.max(totalSize, 1);
+		const percent = Math.min(100, Math.round((uploadedSize / denominator) * 100));
+		const speed = Number(((uploadedSize / (1024 * 1024)) / elapsedSeconds).toFixed(2));
+
+		emitToRoom(code, "upload-progress", {
+			percent,
+			speed,
+			elapsed: Number(elapsedSeconds.toFixed(2)),
+		});
+	}
+
+	const fileCount = incomingFiles.length;
+	const expiresAt = new Date(
+		Date.now() + getSessionExpiryMinutes() * 60 * 1000,
+	);
+	const qr = await generateQR(code);
+
+	await Transfer.create({
+		code,
+		files: uploadedFiles,
+		totalSize,
+		fileCount,
+		isZipped: false,
+		burnAfterDownload,
+		downloadCount: 0,
+		expiresAt,
+		isDeleted: false,
+		senderIp: getClientIp(req),
+		senderDeviceName: getDeviceName(req.get("user-agent") || ""),
+		senderSocketId,
+		qrDataUri: qr,
+		ai: null,
+	});
+
+	const shareLink = `${shareBaseUrl}/g/${code}`;
+
+	emitToRoom(code, "upload-complete", {
+		code,
+		qr,
+		shareLink,
+		expiresAt,
+	});
+	scheduleTransferCountdown(code, expiresAt);
+	logEvent("Upload complete", { code, expiresAt });
+
+	const primaryFile = incomingFiles[0];
+	void (async () => {
+		if (!primaryFile) {
+			return;
+		}
+
+		const aiResult = await analyzeFile(
+			primaryFile.buffer,
+			primaryFile.originalname,
+			primaryFile.mimetype || "application/octet-stream",
+		);
+
+		await Transfer.updateOne({ code }, { $set: { ai: aiResult || null } });
+
+		emitToRoom(code, "ai-ready", {
+			summary: aiResult?.summary || null,
+			category: aiResult?.category || null,
+			suggestedName: aiResult?.suggestedName || null,
+		});
+
+		logEvent("AI complete", {
+			code,
+			aiReady: Boolean(aiResult),
+		});
+	})();
+
+	return {
+		success: true,
+		code,
+		shareLink,
+		qr,
+		expiresAt,
+		files: uploadedFiles.map((file) => ({
+			name: file.originalName,
+			size: file.size,
+			type: file.mimeType,
+			icon: file.icon,
+		})),
+		totalSize,
+		burnAfterDownload,
+	};
 }
 
 const upload = multer({
@@ -77,163 +251,85 @@ function multerHandler(req, res, next) {
 
 		if (error instanceof multer.MulterError) {
 			if (error.code === "LIMIT_FILE_SIZE") {
-				return res.status(400).json({ success: false, error: "FILE_TOO_LARGE" });
+				return res.status(400).json(buildErrorResponse(ERROR_CODES.FILE_TOO_LARGE));
 			}
 
 			if (error.code === "LIMIT_FILE_COUNT") {
-				return res.status(400).json({ success: false, error: "TOO_MANY_FILES" });
+				return res.status(400).json(buildErrorResponse(ERROR_CODES.TOO_MANY_FILES));
 			}
 		}
 
-		return res.status(400).json({ success: false, error: "NO_FILE_UPLOADED" });
+		return res.status(400).json(buildErrorResponse(ERROR_CODES.NO_FILE_UPLOADED));
 	});
 }
 
-router.post("/", multerHandler, validateUpload, async (req, res) => {
+router.post("/", rateLimitUpload, multerHandler, validateUpload, async (req, res) => {
 	try {
-		const shareBaseUrl = process.env.SHARE_BASE_URL;
-		if (!shareBaseUrl) {
-			throw new Error("SHARE_BASE_URL is not set in environment variables");
-		}
-
-		const code = await generateUniqueCode();
 		const incomingFiles = req.files || [];
-		const uploadedFiles = [];
 		const senderSocketId =
 			typeof req.body?.senderSocketId === "string" ? req.body.senderSocketId : "";
-
-		if (senderSocketId) {
-			bindSocketToRoom(code, senderSocketId);
-		}
-
-		const totalSize = getTotalSize(incomingFiles);
-		let uploadedSize = 0;
-		const uploadStartedAt = Date.now();
-		logEvent("Upload started", {
-			code,
-			fileCount: incomingFiles.length,
-			totalSize,
-		});
-
-		for (const file of incomingFiles) {
-			const safeName = sanitizeFilename(file.originalname);
-			const storedKey = `transfers/${code}/${safeName}`;
-			const mimeType = file.mimetype || "application/octet-stream";
-
-			await r2Client.send(
-				new PutObjectCommand({
-					Bucket: r2Bucket,
-					Key: storedKey,
-					Body: file.buffer,
-					ContentType: mimeType,
-				}),
-			);
-
-			uploadedFiles.push({
-				originalName: file.originalname,
-				storedKey,
-				size: file.size,
-				mimeType,
-				icon: getFileIcon(mimeType),
-			});
-
-			uploadedSize += file.size;
-			const elapsedSeconds = Math.max((Date.now() - uploadStartedAt) / 1000, 0.001);
-			const percent = Math.min(100, Math.round((uploadedSize / totalSize) * 100));
-			const speed = Number(((uploadedSize / (1024 * 1024)) / elapsedSeconds).toFixed(2));
-
-			emitToRoom(code, "upload-progress", {
-				percent,
-				speed,
-				elapsed: Number(elapsedSeconds.toFixed(2)),
-			});
-		}
-
-		const fileCount = incomingFiles.length;
 		const burnAfterDownload = parseBurnAfterDownload(req.body?.burnAfterDownload);
-		const expiresAt = new Date(
-			Date.now() + getSessionExpiryMinutes() * 60 * 1000,
-		);
-		const qr = await generateQR(code);
-
-		await Transfer.create({
-			code,
-			files: uploadedFiles,
-			totalSize,
-			fileCount,
-			isZipped: false,
+		const response = await processUploadFlow({
+			req,
+			incomingFiles,
 			burnAfterDownload,
-			downloadCount: 0,
-			expiresAt,
-			isDeleted: false,
-			senderIp: extractClientIp(req),
-			senderDeviceName: parseDeviceName(req.get("user-agent") || ""),
 			senderSocketId,
-			qrDataUri: qr,
-			ai: null,
 		});
 
-		const shareLink = `${shareBaseUrl}/g/${code}`;
-
-		emitToRoom(code, "upload-complete", {
-			code,
-			qr,
-			shareLink,
-			expiresAt,
-		});
-		scheduleTransferCountdown(code, expiresAt);
-		logEvent("Upload complete", { code, expiresAt });
-
-		const primaryFile = incomingFiles[0];
-		void (async () => {
-			if (!primaryFile) {
-				return;
-			}
-
-			const aiResult = await analyzeFile(
-				primaryFile.buffer,
-				primaryFile.originalname,
-				primaryFile.mimetype || "application/octet-stream",
-			);
-
-			await Transfer.updateOne(
-				{ code },
-				{ $set: { ai: aiResult || null } },
-			);
-
-			emitToRoom(code, "ai-ready", {
-				summary: aiResult?.summary || null,
-				category: aiResult?.category || null,
-				suggestedName: aiResult?.suggestedName || null,
-			});
-
-			logEvent("AI complete", {
-				code,
-				aiReady: Boolean(aiResult),
-			});
-		})();
-
-		return res.status(200).json({
-			success: true,
-			code,
-			shareLink,
-			qr,
-			expiresAt,
-			files: uploadedFiles.map((file) => ({
-				name: file.originalName,
-				size: file.size,
-				type: file.mimeType,
-				icon: file.icon,
-			})),
-			totalSize,
-			burnAfterDownload,
-		});
+		return res.status(200).json(response);
 	} catch (error) {
 		console.error("Upload failed:", error.message);
-		return res.status(500).json({
-			success: false,
-			error: "UPLOAD_FAILED",
+		const status = error?.status || 500;
+		const errorCode = error?.errorCode || ERROR_CODES.SERVER_ERROR;
+		return res.status(status).json(buildErrorResponse(errorCode, error.message));
+	}
+});
+
+router.post("/clipboard", rateLimitUpload, async (req, res) => {
+	try {
+		const { imageBase64, burnAfterDownload, senderSocketId } = req.body || {};
+
+		if (typeof imageBase64 !== "string") {
+			return res.status(400).json(buildErrorResponse(ERROR_CODES.INVALID_FILE_TYPE));
+		}
+
+		const match = imageBase64.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
+		if (!match) {
+			return res.status(400).json(buildErrorResponse(ERROR_CODES.INVALID_FILE_TYPE));
+		}
+
+		const mimeType = match[1];
+		const base64Payload = match[2];
+		const buffer = Buffer.from(base64Payload, "base64");
+
+		if (!buffer.length) {
+			return res.status(400).json(buildErrorResponse(ERROR_CODES.NO_FILE_UPLOADED));
+		}
+
+		const extension = mimeType.split("/")[1]?.split("+")[0] || "png";
+		const filename = `clipboard-${Date.now()}.${extension}`;
+		const incomingFiles = [
+			{
+				originalname: filename,
+				mimetype: mimeType,
+				size: buffer.length,
+				buffer,
+			},
+		];
+
+		const response = await processUploadFlow({
+			req,
+			incomingFiles,
+			burnAfterDownload: parseBurnAfterDownload(burnAfterDownload),
+			senderSocketId: typeof senderSocketId === "string" ? senderSocketId : "",
 		});
+
+		return res.status(200).json(response);
+	} catch (error) {
+		console.error("Clipboard upload failed:", error.message);
+		const status = error?.status || 500;
+		const errorCode = error?.errorCode || ERROR_CODES.SERVER_ERROR;
+		return res.status(status).json(buildErrorResponse(errorCode, error.message));
 	}
 });
 
