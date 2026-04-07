@@ -1,5 +1,12 @@
-﻿const MAX_FILE_SIZE_MB = Number(process.env.MAX_FILE_SIZE_MB) || 500;
-const MAX_FILE_COUNT = Number(process.env.MAX_FILE_COUNT) || 10;
+﻿const rawMaxFileSizeMb = Number(process.env.MAX_FILE_SIZE_MB);
+const rawMaxFileCount = Number(process.env.MAX_FILE_COUNT);
+
+const MAX_FILE_SIZE_MB = Number.isFinite(rawMaxFileSizeMb) && rawMaxFileSizeMb > 0
+	? Math.min(rawMaxFileSizeMb, 100)
+	: 100;
+const MAX_FILE_COUNT = Number.isInteger(rawMaxFileCount) && rawMaxFileCount > 0
+	? rawMaxFileCount
+	: 5;
 const SESSION_EXPIRY_MINUTES = Number(process.env.SESSION_EXPIRY_MINUTES) || 10;
 const CODE_LENGTH = Number(process.env.CODE_LENGTH) || 6;
 

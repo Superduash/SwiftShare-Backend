@@ -30,13 +30,13 @@ const router = express.Router();
 
 function getMaxFileCount() {
 	const maxCount = Number(process.env.MAX_FILE_COUNT);
-	return Number.isInteger(maxCount) && maxCount > 0 ? maxCount : 10;
+	return Number.isInteger(maxCount) && maxCount > 0 ? maxCount : 5;
 }
 
 function getMaxFileSizeBytes() {
 	const maxSizeMb = Number(process.env.MAX_FILE_SIZE_MB);
-	const safeMb = Number.isFinite(maxSizeMb) && maxSizeMb > 0 ? maxSizeMb : 500;
-	const cappedMb = Math.min(safeMb, 50);
+	const safeMb = Number.isFinite(maxSizeMb) && maxSizeMb > 0 ? maxSizeMb : 100;
+	const cappedMb = Math.min(safeMb, 100);
 	return cappedMb * 1024 * 1024;
 }
 
@@ -69,6 +69,22 @@ function parsePassword(value) {
 	}
 
 	return value.trim();
+}
+
+function getMaxSessionExpiryMinutes() {
+	const maxMinutes = Number(process.env.MAX_SESSION_EXPIRY_MINUTES);
+	return Number.isFinite(maxMinutes) && maxMinutes > 0
+		? Math.floor(maxMinutes)
+		: 24 * 60;
+}
+
+function parseExpiryMinutes(value) {
+	const parsed = Number(value);
+	if (!Number.isFinite(parsed) || parsed <= 0) {
+		return null;
+	}
+
+	return Math.min(Math.floor(parsed), getMaxSessionExpiryMinutes());
 }
 
 function createAppError(status, errorCode, message) {
@@ -111,6 +127,7 @@ async function processUploadFlow({
 	senderSocketId,
 	password,
 	passwordProtected,
+	expiryMinutes,
 }) {
 	const shareBaseUrl = process.env.SHARE_BASE_URL;
 	if (!shareBaseUrl) {
@@ -166,8 +183,11 @@ async function processUploadFlow({
 	}
 
 	const fileCount = incomingFiles.length;
+	const effectiveExpiryMinutes = Number.isFinite(expiryMinutes) && expiryMinutes > 0
+		? expiryMinutes
+		: getSessionExpiryMinutes();
 	const expiresAt = new Date(
-		Date.now() + getSessionExpiryMinutes() * 60 * 1000,
+		Date.now() + effectiveExpiryMinutes * 60 * 1000,
 	);
 	const shouldProtectWithPassword = Boolean(passwordProtected && password);
 	const passwordHash = shouldProtectWithPassword
@@ -182,6 +202,7 @@ async function processUploadFlow({
 		code,
 		shareLink,
 		qr,
+		expiryMinutes: effectiveExpiryMinutes,
 		expiresAt,
 		files: uploadedFiles.map((file) => ({
 			name: file.originalName,
@@ -274,14 +295,14 @@ function multerHandler(req, res, next) {
 
 		const code = error?.code;
 		if (code === "LIMIT_FILE_SIZE") {
-			const maxMb = Math.min(Number(process.env.MAX_FILE_SIZE_MB) || 500, 50);
+			const maxMb = Math.round(getMaxFileSizeBytes() / (1024 * 1024));
 			return res
 				.status(400)
 				.json(buildErrorResponse(ERROR_CODES.FILE_TOO_LARGE, `This file is too large. Maximum size is ${maxMb}MB.`));
 		}
 
 		if (code === "LIMIT_FILE_COUNT") {
-			const maxCount = Number(process.env.MAX_FILE_COUNT) || 10;
+			const maxCount = getMaxFileCount();
 			return res
 				.status(400)
 				.json(buildErrorResponse(ERROR_CODES.TOO_MANY_FILES, `Too many files. You can upload up to ${maxCount} files at once.`));
@@ -300,11 +321,13 @@ function multerHandler(req, res, next) {
 router.post("/", rateLimitUpload, multerHandler, validateUpload, async (req, res) => {
 	try {
 		const incomingFiles = req.files || [];
-		const senderSocketId =
-			typeof req.body?.senderSocketId === "string" ? req.body.senderSocketId : "";
+		const senderSocketId = typeof req.body?.senderSocketId === "string"
+			? req.body.senderSocketId
+			: (typeof req.body?.socketId === "string" ? req.body.socketId : "");
 		const burnAfterDownload = parseBurnAfterDownload(req.body?.burnAfterDownload);
 		const passwordProtected = parseBooleanFlag(req.body?.passwordProtected);
 		const password = parsePassword(req.body?.password);
+		const expiryMinutes = parseExpiryMinutes(req.body?.expiryMinutes);
 		const response = await processUploadFlow({
 			req,
 			incomingFiles,
@@ -312,6 +335,7 @@ router.post("/", rateLimitUpload, multerHandler, validateUpload, async (req, res
 			senderSocketId,
 			password,
 			passwordProtected,
+			expiryMinutes,
 		});
 
 		return res.status(200).json(response);
@@ -328,17 +352,27 @@ router.post("/clipboard", rateLimitUpload, async (req, res) => {
 		logEvent("Clipboard upload", "REQUEST_RECEIVED");
 		const {
 			imageBase64,
+			base64,
 			burnAfterDownload,
 			senderSocketId,
+			socketId,
 			passwordProtected,
 			password,
+			expiryMinutes,
 		} = req.body || {};
+		const imagePayload = typeof imageBase64 === "string"
+			? imageBase64
+			: (typeof base64 === "string" ? base64 : "");
 
-		if (typeof imageBase64 !== "string") {
+		if (!imagePayload) {
 			return res.status(400).json(buildErrorResponse(ERROR_CODES.INVALID_FILE_TYPE));
 		}
 
-		const match = imageBase64.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
+		const normalizedImageBase64 = imagePayload.startsWith("data:")
+			? imagePayload
+			: `data:image/png;base64,${imagePayload}`;
+
+		const match = normalizedImageBase64.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
 		if (!match) {
 			return res.status(400).json(buildErrorResponse(ERROR_CODES.INVALID_FILE_TYPE));
 		}
@@ -366,9 +400,12 @@ router.post("/clipboard", rateLimitUpload, async (req, res) => {
 			req,
 			incomingFiles,
 			burnAfterDownload: parseBurnAfterDownload(burnAfterDownload),
-			senderSocketId: typeof senderSocketId === "string" ? senderSocketId : "",
+			senderSocketId: typeof senderSocketId === "string"
+				? senderSocketId
+				: (typeof socketId === "string" ? socketId : ""),
 			passwordProtected: parseBooleanFlag(passwordProtected),
 			password: parsePassword(password),
+			expiryMinutes: parseExpiryMinutes(expiryMinutes),
 		});
 
 		return res.status(200).json(response);

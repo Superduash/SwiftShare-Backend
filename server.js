@@ -35,11 +35,33 @@ const { version } = require("./package.json");
 
 const app = express();
 const server = http.createServer(app);
-const frontendOrigin = process.env.FRONTEND_URL;
+
+function getAllowedFrontendOrigins() {
+	return String(process.env.FRONTEND_URL || "")
+		.split(",")
+		.map((origin) => origin.trim())
+		.filter(Boolean);
+}
+
+const allowedFrontendOrigins = getAllowedFrontendOrigins();
+
+function corsOrigin(origin, callback) {
+	if (!origin) {
+		callback(null, true);
+		return;
+	}
+
+	if (allowedFrontendOrigins.length === 0 || allowedFrontendOrigins.includes(origin)) {
+		callback(null, true);
+		return;
+	}
+
+	callback(null, false);
+}
 
 app.set("trust proxy", 1);
 
-app.use(cors({ origin: frontendOrigin, maxAge: 86400 }));
+app.use(cors({ origin: corsOrigin, maxAge: 86400 }));
 app.use(helmet());
 app.use(morgan("dev"));
 app.use(express.json({ limit: "10mb" }));

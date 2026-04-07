@@ -5,20 +5,27 @@ const { logEvent } = require("../utils/logger");
 let ioInstance;
 const countdownMap = new Map();
 
+function normalizeCode(code) {
+	return String(code || "").trim().toUpperCase();
+}
+
 function roomName(code) {
-	return `room:${code}`;
+	const normalizedCode = normalizeCode(code);
+	return normalizedCode ? `room:${normalizedCode}` : "";
 }
 
 function emitToRoom(code, event, data = {}) {
-	if (!ioInstance || !code) {
+	const room = roomName(code);
+	if (!ioInstance || !room) {
 		return;
 	}
 
-	ioInstance.to(roomName(code)).emit(event, data);
+	ioInstance.to(room).emit(event, data);
 }
 
 function bindSocketToRoom(code, socketId) {
-	if (!ioInstance || !code || !socketId) {
+	const room = roomName(code);
+	if (!ioInstance || !room || !socketId) {
 		return false;
 	}
 
@@ -27,37 +34,43 @@ function bindSocketToRoom(code, socketId) {
 		return false;
 	}
 
-	socket.join(roomName(code));
+	socket.join(room);
 	return true;
 }
 
 function clearTransferCountdown(code) {
-	const existing = countdownMap.get(code);
+	const normalizedCode = normalizeCode(code);
+	if (!normalizedCode) {
+		return;
+	}
+
+	const existing = countdownMap.get(normalizedCode);
 	if (!existing) {
 		return;
 	}
 
 	clearInterval(existing.intervalId);
-	countdownMap.delete(code);
+	countdownMap.delete(normalizedCode);
 }
 
 function scheduleTransferCountdown(code, expiresAt) {
-	if (!code || !expiresAt) {
+	const normalizedCode = normalizeCode(code);
+	if (!normalizedCode || !expiresAt) {
 		return;
 	}
 
-	clearTransferCountdown(code);
+	clearTransferCountdown(normalizedCode);
 
 	const end = new Date(expiresAt).getTime();
 	const intervalId = setInterval(() => {
 		const secondsRemaining = Math.max(0, Math.ceil((end - Date.now()) / 1000));
-		emitToRoom(code, "countdown-tick", { secondsRemaining });
+		emitToRoom(normalizedCode, "countdown-tick", { secondsRemaining });
 
 		if (secondsRemaining <= 0) {
-			clearTransferCountdown(code);
-			emitToRoom(code, "transfer-expired", { code });
+			clearTransferCountdown(normalizedCode);
+			emitToRoom(normalizedCode, "transfer-expired", { code: normalizedCode });
 			void Transfer.updateOne(
-				{ code },
+				{ code: normalizedCode },
 				{
 					$push: {
 						activity: {
@@ -69,39 +82,55 @@ function scheduleTransferCountdown(code, expiresAt) {
 					},
 				},
 			);
-			logEvent("Transfer expired", `CODE: ${code}`);
+			logEvent("Transfer expired", `CODE: ${normalizedCode}`);
 		}
 	}, 1000);
 
-	countdownMap.set(code, { intervalId });
+	countdownMap.set(normalizedCode, { intervalId });
 }
 
 function initSocket(server) {
+	const allowedOrigins = String(process.env.FRONTEND_URL || "")
+		.split(",")
+		.map((origin) => origin.trim())
+		.filter(Boolean);
+
 	ioInstance = new Server(server, {
 		cors: {
-			origin: process.env.FRONTEND_URL,
+			origin: allowedOrigins.length > 0 ? allowedOrigins : true,
 			methods: ["GET", "POST"],
 		},
 	});
 
 	ioInstance.on("connection", (socket) => {
 		socket.on("join-room", ({ code } = {}) => {
-			if (!code) {
+			const normalizedCode = normalizeCode(code);
+			if (!normalizedCode) {
 				return;
 			}
 
-			socket.join(roomName(code));
+			socket.join(roomName(normalizedCode));
+		});
+
+		socket.on("leave-room", ({ code } = {}) => {
+			const normalizedCode = normalizeCode(code);
+			if (!normalizedCode) {
+				return;
+			}
+
+			socket.leave(roomName(normalizedCode));
 		});
 
 		socket.on("rejoin-room", async ({ code } = {}) => {
-			if (!code) {
+			const normalizedCode = normalizeCode(code);
+			if (!normalizedCode) {
 				return;
 			}
 
-			socket.join(roomName(code));
+			socket.join(roomName(normalizedCode));
 
 			try {
-				const transfer = await Transfer.findOne({ code }).lean();
+				const transfer = await Transfer.findOne({ code: normalizedCode }).lean();
 				if (!transfer || transfer.isDeleted || !transfer.expiresAt) {
 					return;
 				}
@@ -113,24 +142,25 @@ function initSocket(server) {
 
 				socket.emit("countdown-tick", { secondsRemaining });
 			} catch (error) {
-				console.error(`Failed to rejoin room for ${code}: ${error.message}`);
+				console.error(`Failed to rejoin room for ${normalizedCode}: ${error.message}`);
 			}
 		});
 
 		socket.on("register-sender", async ({ code } = {}) => {
-			if (!code) {
+			const normalizedCode = normalizeCode(code);
+			if (!normalizedCode) {
 				return;
 			}
 
-			socket.join(roomName(code));
+			socket.join(roomName(normalizedCode));
 
 			try {
 				await Transfer.updateOne(
-					{ code },
+					{ code: normalizedCode },
 					{ $set: { senderSocketId: socket.id } },
 				);
 			} catch (error) {
-				console.error(`Failed to register sender socket for ${code}: ${error.message}`);
+				console.error(`Failed to register sender socket for ${normalizedCode}: ${error.message}`);
 			}
 		});
 
