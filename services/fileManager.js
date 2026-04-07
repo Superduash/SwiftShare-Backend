@@ -18,20 +18,20 @@ function assertR2Configured() {
 	throw error;
 }
 
-async function uploadBufferToR2({ key, body, contentType }) {
+async function uploadFileToR2(buffer, key, mimeType) {
 	assertR2Configured();
 
 	await r2Client.send(
 		new PutObjectCommand({
 			Bucket: r2Bucket,
 			Key: key,
-			Body: body,
-			ContentType: contentType,
+			Body: buffer,
+			ContentType: mimeType,
 		}),
 	);
 }
 
-async function getObjectFromR2(key) {
+async function streamFileFromR2(key) {
 	assertR2Configured();
 
 	return r2Client.send(
@@ -42,7 +42,7 @@ async function getObjectFromR2(key) {
 	);
 }
 
-async function deleteObjectFromR2(key) {
+async function deleteFileFromR2(key) {
 	assertR2Configured();
 
 	await r2Client.send(
@@ -53,22 +53,21 @@ async function deleteObjectFromR2(key) {
 	);
 }
 
-async function deleteFilesFromR2(files = []) {
-	if (!Array.isArray(files) || files.length === 0) {
+async function deleteMultipleFilesFromR2(keys = []) {
+	if (!Array.isArray(keys) || keys.length === 0) {
 		return;
 	}
 
 	assertR2Configured();
 
 	await Promise.all(
-		files.map(async (file) => {
-			const key = file?.storedKey;
+		keys.map(async (key) => {
 			if (!key) {
 				return;
 			}
 
 			try {
-				await deleteObjectFromR2(key);
+				await deleteFileFromR2(key);
 			} catch (error) {
 				logError("R2 delete failed", error, `KEY: ${key}`);
 			}
@@ -76,7 +75,32 @@ async function deleteFilesFromR2(files = []) {
 	);
 }
 
+async function deleteFilesFromR2(files = []) {
+	if (!Array.isArray(files) || files.length === 0) {
+		return;
+	}
+
+	const keys = files.map((file) => file?.storedKey).filter(Boolean);
+	await deleteMultipleFilesFromR2(keys);
+}
+
+async function uploadBufferToR2({ key, body, contentType }) {
+	return uploadFileToR2(body, key, contentType);
+}
+
+async function getObjectFromR2(key) {
+	return streamFileFromR2(key);
+}
+
+async function deleteObjectFromR2(key) {
+	return deleteFileFromR2(key);
+}
+
 module.exports = {
+	uploadFileToR2,
+	streamFileFromR2,
+	deleteFileFromR2,
+	deleteMultipleFilesFromR2,
 	uploadBufferToR2,
 	getObjectFromR2,
 	deleteObjectFromR2,

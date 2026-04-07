@@ -1,8 +1,9 @@
-﻿const path = require("path");
-const { getTotalSize } = require("../utils/helpers");
+﻿const {
+	getTotalSize,
+	isBlockedExtension,
+	hasDangerousSignature,
+} = require("../utils/helpers");
 const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
-
-const BLOCKED_EXTENSIONS = new Set([".exe", ".bat", ".sh", ".cmd"]);
 
 function getMaxFileSizeBytes() {
 	const maxSizeMb = Number(process.env.MAX_FILE_SIZE_MB);
@@ -36,13 +37,17 @@ function validateUpload(req, res, next) {
 			return sendUploadError(res, ERROR_CODES.FILE_TOO_LARGE);
 		}
 
-		const hasBlockedFileType = files.some((file) => {
-			const extension = path.extname(file.originalname || "").toLowerCase();
-			return BLOCKED_EXTENSIONS.has(extension);
-		});
+		const hasBlockedFileType = files.some((file) => isBlockedExtension(file.originalname));
 
 		if (hasBlockedFileType) {
 			return sendUploadError(res, ERROR_CODES.INVALID_FILE_TYPE);
+		}
+
+		const hasDangerousFileSignature = files.some((file) => hasDangerousSignature(file.buffer));
+		if (hasDangerousFileSignature) {
+			return res
+				.status(400)
+				.json(buildErrorResponse(ERROR_CODES.INVALID_FILE_TYPE, "Executable file signatures are not allowed"));
 		}
 
 		return next();

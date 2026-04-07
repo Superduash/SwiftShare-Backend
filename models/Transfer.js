@@ -27,6 +27,28 @@ const transferFileSchema = new mongoose.Schema(
 	{ _id: false },
 );
 
+const transferActivitySchema = new mongoose.Schema(
+	{
+		event: {
+			type: String,
+			required: true,
+		},
+		device: {
+			type: String,
+			default: "Unknown Device",
+		},
+		ip: {
+			type: String,
+			default: "",
+		},
+		timestamp: {
+			type: Date,
+			default: Date.now,
+		},
+	},
+	{ _id: false },
+);
+
 const transferSchema = new mongoose.Schema(
 	{
 		code: {
@@ -57,7 +79,31 @@ const transferSchema = new mongoose.Schema(
 			type: Boolean,
 			default: false,
 		},
+		extendedOnce: {
+			type: Boolean,
+			default: false,
+		},
 		downloadCount: {
+			type: Number,
+			default: 0,
+			min: 0,
+		},
+		uploadSpeed: {
+			type: Number,
+			default: 0,
+			min: 0,
+		},
+		uploadDuration: {
+			type: Number,
+			default: 0,
+			min: 0,
+		},
+		downloadSpeed: {
+			type: Number,
+			default: 0,
+			min: 0,
+		},
+		downloadDuration: {
 			type: Number,
 			default: 0,
 			min: 0,
@@ -94,6 +140,10 @@ const transferSchema = new mongoose.Schema(
 				imageDescription: { type: String, default: null },
 			},
 			default: null,
+		},
+		activity: {
+			type: [transferActivitySchema],
+			default: [],
 		},
 	},
 	{

@@ -3,7 +3,7 @@ const Transfer = require("../models/Transfer");
 
 const CODE_CHARACTERS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 const CODE_LENGTH = 6;
-const MAX_GENERATION_RETRIES = 5;
+const MAX_GENERATION_RETRIES = 10;
 
 function createCode(length) {
 	let code = "";
@@ -25,7 +25,7 @@ async function generateUniqueCode() {
 		}
 	}
 
-	throw new Error("Failed to generate a unique transfer code after 5 attempts");
+	throw new Error("Failed to generate a unique transfer code after max retries");
 }
 
 module.exports = {

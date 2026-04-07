@@ -1,6 +1,5 @@
 ﻿const express = require("express");
 const multer = require("multer");
-const path = require("path");
 
 const Transfer = require("../models/Transfer");
 const { uploadBufferToR2 } = require("../services/fileManager");
@@ -19,13 +18,14 @@ const {
 	getDeviceName,
 	mimeToIcon,
 	sanitizeFilename,
- 	getTotalSize,
+	getTotalSize,
+	isBlockedExtension,
+	hasDangerousSignature,
 } = require("../utils/helpers");
 const { logEvent, logError, formatSizeMB } = require("../utils/logger");
 const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
 
 const router = express.Router();
-const BLOCKED_EXTENSIONS = new Set([".exe", ".bat", ".sh", ".cmd"]);
 
 function getMaxFileCount() {
 	const maxCount = Number(process.env.MAX_FILE_COUNT);
@@ -78,13 +78,15 @@ function validateIncomingFiles(files) {
 		throw createAppError(400, ERROR_CODES.FILE_TOO_LARGE, "File exceeds size limit");
 	}
 
-	const hasBlockedExt = files.some((file) => {
-		const extension = path.extname(file.originalname || "").toLowerCase();
-		return BLOCKED_EXTENSIONS.has(extension);
-	});
+	const hasBlockedExt = files.some((file) => isBlockedExtension(file.originalname));
 
 	if (hasBlockedExt) {
 		throw createAppError(400, ERROR_CODES.INVALID_FILE_TYPE, "Invalid file type");
+	}
+
+	const hasDangerousFileSignature = files.some((file) => hasDangerousSignature(file.buffer));
+	if (hasDangerousFileSignature) {
+		throw createAppError(400, ERROR_CODES.INVALID_FILE_TYPE, "Executable file signatures are not allowed");
 	}
 }
 
@@ -106,6 +108,8 @@ async function processUploadFlow({ req, incomingFiles, burnAfterDownload, sender
 	const totalSize = getTotalSize(incomingFiles);
 	let uploadedSize = 0;
 	const uploadStartedAt = Date.now();
+	const senderIp = getClientIp(req);
+	const senderDevice = getDeviceName(req.get("user-agent") || "");
 	logEvent("Upload started", `CODE: ${code}`, `FILES: ${incomingFiles.length}`, formatSizeMB(totalSize));
 
 	for (const file of incomingFiles) {
@@ -144,6 +148,8 @@ async function processUploadFlow({ req, incomingFiles, burnAfterDownload, sender
 	const expiresAt = new Date(
 		Date.now() + getSessionExpiryMinutes() * 60 * 1000,
 	);
+	const uploadDurationMs = Math.max(Date.now() - uploadStartedAt, 1);
+	const uploadSpeed = Math.round(totalSize / (uploadDurationMs / 1000));
 	const qr = await generateQR(code);
 
 	await Transfer.create({
@@ -154,13 +160,25 @@ async function processUploadFlow({ req, incomingFiles, burnAfterDownload, sender
 		isZipped: false,
 		burnAfterDownload,
 		downloadCount: 0,
+		uploadSpeed,
+		uploadDuration: uploadDurationMs,
+		downloadSpeed: 0,
+		downloadDuration: 0,
 		expiresAt,
 		isDeleted: false,
-		senderIp: getClientIp(req),
-		senderDeviceName: getDeviceName(req.get("user-agent") || ""),
+		senderIp,
+		senderDeviceName: senderDevice,
 		senderSocketId,
 		qrDataUri: qr,
 		ai: null,
+		activity: [
+			{
+				event: "uploaded",
+				device: senderDevice,
+				ip: senderIp,
+				timestamp: new Date(),
+			},
+		],
 	});
 
 	const shareLink = `${shareBaseUrl}/g/${code}`;
@@ -235,11 +253,17 @@ function multerHandler(req, res, next) {
 
 		const code = error?.code;
 		if (code === "LIMIT_FILE_SIZE") {
-			return res.status(400).json(buildErrorResponse(ERROR_CODES.FILE_TOO_LARGE));
+			const maxMb = Number(process.env.MAX_FILE_SIZE_MB) || 500;
+			return res
+				.status(400)
+				.json(buildErrorResponse(ERROR_CODES.FILE_TOO_LARGE, `This file is too large. Maximum size is ${maxMb}MB.`));
 		}
 
 		if (code === "LIMIT_FILE_COUNT") {
-			return res.status(400).json(buildErrorResponse(ERROR_CODES.TOO_MANY_FILES));
+			const maxCount = Number(process.env.MAX_FILE_COUNT) || 10;
+			return res
+				.status(400)
+				.json(buildErrorResponse(ERROR_CODES.TOO_MANY_FILES, `Too many files. You can upload up to ${maxCount} files at once.`));
 		}
 
 		if (code === "LIMIT_UNEXPECTED_FILE") {
