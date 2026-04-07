@@ -10,6 +10,14 @@ function withTimestamp(message) {
 	return `[${getTimestamp()}] ${message}`;
 }
 
+function writeStdout(line) {
+	process.stdout.write(`${line}\n`);
+}
+
+function writeStderr(line) {
+	process.stderr.write(`${line}\n`);
+}
+
 function buildSuffix(parts) {
 	const clean = (parts || [])
 		.filter((part) => part !== undefined && part !== null && String(part).length > 0)
@@ -24,12 +32,12 @@ function buildSuffix(parts) {
 
 function logSuccess(message, useTimestamp = false) {
 	const line = `[✓] ${message}`;
-	console.log(useTimestamp ? withTimestamp(line) : line);
+	writeStdout(useTimestamp ? withTimestamp(line) : line);
 }
 
 function logInfo(message, useTimestamp = false) {
 	const line = `[•] ${message}`;
-	console.log(useTimestamp ? withTimestamp(line) : line);
+	writeStdout(useTimestamp ? withTimestamp(line) : line);
 }
 
 function logEvent(event, ...parts) {
@@ -37,8 +45,12 @@ function logEvent(event, ...parts) {
 }
 
 function logError(event, error, ...parts) {
-	const message = error && error.message ? error.message : String(error || "Unknown error");
-	console.error(withTimestamp(`[✗] ${event}${buildSuffix([...parts, `ERROR: ${message}`])}`));
+	const hasError = error !== undefined && error !== null;
+	const message = hasError
+		? (error.message ? error.message : String(error))
+		: "";
+	const suffixParts = hasError ? [...parts, `ERROR: ${message}`] : parts;
+	writeStderr(withTimestamp(`[✗] ${event}${buildSuffix(suffixParts)}`));
 }
 
 function formatSizeMB(bytes) {

@@ -3,7 +3,7 @@ const { Readable } = require("stream");
 const bcrypt = require("bcrypt");
 
 const Transfer = require("../models/Transfer");
-const { getObjectFromR2, deleteFilesFromR2 } = require("../services/fileManager");
+const { getObjectFromR2, getObjectHeadFromR2, deleteFilesFromR2 } = require("../services/fileManager");
 const { emitToRoom, clearTransferCountdown } = require("../config/socket");
 const { streamZipFromR2 } = require("../services/zipService");
 const { rateLimitDownload } = require("../middleware/rateLimiter");
@@ -15,7 +15,7 @@ const {
 	formatBytes,
 } = require("../utils/helpers");
 const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
-const { logEvent } = require("../utils/logger");
+const { logEvent, logError } = require("../utils/logger");
 
 const router = express.Router();
 
@@ -103,6 +103,67 @@ async function toReadable(body) {
 	}
 
 	throw new Error("Unable to read object stream");
+}
+
+function parseRangeHeader(rangeHeader, totalBytes) {
+	const rawRange = typeof rangeHeader === "string" ? rangeHeader.trim() : "";
+	if (!rawRange) {
+		return { ok: true, value: null };
+	}
+
+	if (!Number.isFinite(totalBytes) || totalBytes <= 0) {
+		return { ok: false, error: "Range requests are not supported for this file" };
+	}
+
+	const match = /^bytes=(\d*)-(\d*)$/i.exec(rawRange);
+	if (!match) {
+		return { ok: false, error: "Invalid range format" };
+	}
+
+	const startRaw = match[1];
+	const endRaw = match[2];
+
+	let start;
+	let end;
+
+	if (!startRaw && !endRaw) {
+		return { ok: false, error: "Invalid range bounds" };
+	}
+
+	if (!startRaw) {
+		const suffixLength = Number(endRaw);
+		if (!Number.isInteger(suffixLength) || suffixLength <= 0) {
+			return { ok: false, error: "Invalid suffix range" };
+		}
+
+		const actualLength = Math.min(suffixLength, totalBytes);
+		start = totalBytes - actualLength;
+		end = totalBytes - 1;
+	} else {
+		start = Number(startRaw);
+		end = endRaw ? Number(endRaw) : totalBytes - 1;
+
+		if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < 0) {
+			return { ok: false, error: "Range must contain non-negative integers" };
+		}
+	}
+
+	if (start >= totalBytes || end < start) {
+		return { ok: false, error: "Range is outside file bounds" };
+	}
+
+	const clampedEnd = Math.min(end, totalBytes - 1);
+	const length = (clampedEnd - start) + 1;
+
+	return {
+		ok: true,
+		value: {
+			start,
+			end: clampedEnd,
+			length,
+			r2Range: `bytes=${start}-${clampedEnd}`,
+		},
+	};
 }
 
 async function streamSingleFile(res, file, code) {
@@ -334,7 +395,7 @@ router.get("/:code", rateLimitDownload, validateCode, async (req, res, next) => 
 		return null;
 	} catch (error) {
 		if (res.headersSent) {
-			console.error(`Download post-stream error: ${error.message}`);
+			logError("Download post-stream error", error, `CODE: ${req.params?.code || ""}`);
 			return null;
 		}
 		return next(error);
@@ -408,7 +469,7 @@ router.get("/:code/single/:index", rateLimitDownload, validateCode, async (req, 
 		return null;
 	} catch (error) {
 		if (res.headersSent) {
-			console.error(`Single download post-stream error: ${error.message}`);
+			logError("Single download post-stream error", error, `CODE: ${req.params?.code || ""}`);
 			return null;
 		}
 		return next(error);
@@ -436,29 +497,41 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 		}
 
 		const file = transfer.files[fileIndex];
-		const objectResponse = await getObjectFromR2(file.storedKey);
-		const stream = await toReadable(objectResponse.Body);
+		const objectHead = await getObjectHeadFromR2(file.storedKey);
+		const totalBytes = Number(objectHead.ContentLength || file.size || 0);
+		const parsedRange = parseRangeHeader(req.headers.range, totalBytes);
 
-		res.setHeader("Content-Type", file.mimeType || "application/octet-stream");
-		res.setHeader("Content-Disposition", `inline; filename="${sanitizeFilename(file.originalName || "preview")}"`);
-		res.setHeader("Cache-Control", "private, max-age=300");
-		
-		if (objectResponse.ContentLength != null) {
-			res.setHeader("Content-Length", objectResponse.ContentLength);
+		if (!parsedRange.ok) {
+			if (totalBytes > 0) {
+				res.setHeader("Content-Range", `bytes */${totalBytes}`);
+			}
+
+			return res
+				.status(416)
+				.json(buildErrorResponse(ERROR_CODES.SERVER_ERROR, parsedRange.error));
 		}
 
-		// Support range requests for video/pdf
-		const range = req.headers.range;
-		if (range && objectResponse.ContentLength) {
-			const parts = range.replace(/bytes=/, "").split("-");
-			const start = parseInt(parts[0], 10);
-			const end = parts[1] ? parseInt(parts[1], 10) : objectResponse.ContentLength - 1;
-			const chunksize = (end - start) + 1;
+		const objectResponse = await getObjectFromR2(
+			file.storedKey,
+			parsedRange.value ? { range: parsedRange.value.r2Range } : {},
+		);
+		const stream = await toReadable(objectResponse.Body);
 
+		const contentType = objectResponse.ContentType || file.mimeType || "application/octet-stream";
+		res.setHeader("Content-Type", contentType);
+		res.setHeader("Content-Disposition", `inline; filename="${sanitizeFilename(file.originalName || "preview")}"`);
+		res.setHeader("Cache-Control", "private, max-age=300");
+		res.setHeader("Accept-Ranges", "bytes");
+
+		if (parsedRange.value) {
 			res.status(206);
-			res.setHeader("Content-Range", `bytes ${start}-${end}/${objectResponse.ContentLength}`);
-			res.setHeader("Content-Length", chunksize);
-			res.setHeader("Accept-Ranges", "bytes");
+			res.setHeader("Content-Range", `bytes ${parsedRange.value.start}-${parsedRange.value.end}/${totalBytes}`);
+			res.setHeader("Content-Length", String(parsedRange.value.length));
+		} else {
+			const fullLength = Number(objectResponse.ContentLength || totalBytes || 0);
+			if (fullLength > 0) {
+				res.setHeader("Content-Length", String(fullLength));
+			}
 		}
 
 		await new Promise((resolve, reject) => {
@@ -472,7 +545,7 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 		return null;
 	} catch (error) {
 		if (res.headersSent) {
-			console.error(`Preview stream error: ${error.message}`);
+			logError("Preview stream error", error, `CODE: ${req.params?.code || ""}`, `FILE: ${req.params?.index || ""}`);
 			return null;
 		}
 		return next(error);

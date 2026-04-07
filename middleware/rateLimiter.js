@@ -3,7 +3,7 @@ const { Redis } = require("@upstash/redis");
 
 const { getClientIp } = require("../utils/helpers");
 const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
-const { logEvent } = require("../utils/logger");
+const { logEvent, logError } = require("../utils/logger");
 
 function createRedisClient() {
 	const url = process.env.UPSTASH_REDIS_REST_URL;
@@ -16,7 +16,7 @@ function createRedisClient() {
 	try {
 		return new Redis({ url, token });
 	} catch (error) {
-		console.error(`Redis client init failed: ${error.message}`);
+		logError("Redis client init failed", error);
 		return null;
 	}
 }
@@ -63,7 +63,7 @@ function createRateLimitMiddleware(limiter) {
 
 			return next();
 		} catch (error) {
-			console.error(`Rate limiter fallback (allow request): ${error.message}`);
+			logError("Rate limiter fallback (allow request)", error);
 			return next();
 		}
 	};

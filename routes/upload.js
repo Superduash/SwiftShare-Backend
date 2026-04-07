@@ -13,7 +13,7 @@ const { generateUniqueCode } = require("../services/codeGenerator");
 const { generateQR } = require("../services/qrGenerator");
 const { analyzeTransfer } = require("../services/aiAnalyzer");
 const { rateLimitUpload } = require("../middleware/rateLimiter");
-const { validateUpload } = require("../middleware/validateUpload");
+const { validateUpload, validateMimeIntegrity } = require("../middleware/validateUpload");
 const {
 	getClientIp,
 	getDeviceName,
@@ -94,7 +94,7 @@ function createAppError(status, errorCode, message) {
 	return error;
 }
 
-function validateIncomingFiles(files) {
+async function validateIncomingFiles(files) {
 	if (!Array.isArray(files) || files.length === 0) {
 		throw createAppError(400, ERROR_CODES.NO_FILE_UPLOADED, "No file uploaded");
 	}
@@ -118,6 +118,11 @@ function validateIncomingFiles(files) {
 	if (hasDangerousFileSignature) {
 		throw createAppError(400, ERROR_CODES.INVALID_FILE_TYPE, "Executable file signatures are not allowed");
 	}
+
+	const mimeIntegrity = await validateMimeIntegrity(files);
+	if (!mimeIntegrity.valid) {
+		throw createAppError(400, ERROR_CODES.INVALID_FILE_TYPE, mimeIntegrity.message || "Invalid file type");
+	}
 }
 
 async function processUploadFlow({
@@ -134,7 +139,7 @@ async function processUploadFlow({
 		throw createAppError(500, ERROR_CODES.SERVER_ERROR, "SHARE_BASE_URL is not set in environment variables");
 	}
 
-	validateIncomingFiles(incomingFiles);
+	await validateIncomingFiles(incomingFiles);
 
 	const code = await generateUniqueCode();
 	const uploadedFiles = [];
