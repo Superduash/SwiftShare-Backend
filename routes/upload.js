@@ -11,7 +11,7 @@ const {
 } = require("../config/socket");
 const { generateUniqueCode } = require("../services/codeGenerator");
 const { generateQR } = require("../services/qrGenerator");
-const { analyzeFile } = require("../services/aiAnalyzer");
+const { analyzeTransfer } = require("../services/aiAnalyzer");
 const { rateLimitUpload } = require("../middleware/rateLimiter");
 const { validateUpload } = require("../middleware/validateUpload");
 const {
@@ -176,6 +176,23 @@ async function processUploadFlow({
 	const uploadDurationMs = Math.max(Date.now() - uploadStartedAt, 1);
 	const uploadSpeed = Math.round(totalSize / (uploadDurationMs / 1000));
 	const qr = await generateQR(code);
+	const shareLink = `${shareBaseUrl}/g/${code}`;
+	const responsePayload = {
+		success: true,
+		code,
+		shareLink,
+		qr,
+		expiresAt,
+		files: uploadedFiles.map((file) => ({
+			name: file.originalName,
+			size: file.size,
+			type: file.mimeType,
+			icon: file.icon,
+		})),
+		totalSize,
+		burnAfterDownload,
+		passwordProtected: shouldProtectWithPassword,
+	};
 
 	await Transfer.create({
 		code,
@@ -209,14 +226,7 @@ async function processUploadFlow({
 		],
 	});
 
-	const shareLink = `${shareBaseUrl}/g/${code}`;
-
-	emitToRoom(code, "upload-complete", {
-		code,
-		qr,
-		shareLink,
-		expiresAt,
-	});
+	emitToRoom(code, "upload-complete", responsePayload);
 	scheduleTransferCountdown(code, expiresAt);
 	logEvent("Upload complete", `CODE: ${code}`, formatSizeMB(totalSize));
 
@@ -227,12 +237,8 @@ async function processUploadFlow({
 		}
 
 		try {
-			logEvent("AI analysis started", `CODE: ${code}`, `FILE: ${primaryFile.originalname}`);
-			const aiResult = await analyzeFile(
-				primaryFile.buffer,
-				primaryFile.originalname,
-				primaryFile.mimetype || "application/octet-stream",
-			);
+			logEvent("AI analysis started", `CODE: ${code}`, `FILES: ${incomingFiles.length}`);
+			const aiResult = await analyzeTransfer(incomingFiles);
 
 			await Transfer.updateOne({ code }, { $set: { ai: aiResult || null } });
 
@@ -240,6 +246,7 @@ async function processUploadFlow({
 				summary: aiResult?.summary || null,
 				category: aiResult?.category || null,
 				suggestedName: aiResult?.suggestedName || null,
+				imageDescription: aiResult?.imageDescription || null,
 			});
 
 			logEvent("AI analysis completed", `CODE: ${code}`, `READY: ${Boolean(aiResult)}`);
@@ -248,22 +255,7 @@ async function processUploadFlow({
 		}
 	})();
 
-	return {
-		success: true,
-		code,
-		shareLink,
-		qr,
-		expiresAt,
-		files: uploadedFiles.map((file) => ({
-			name: file.originalName,
-			size: file.size,
-			type: file.mimeType,
-			icon: file.icon,
-		})),
-		totalSize,
-		burnAfterDownload,
-		passwordProtected: shouldProtectWithPassword,
-	};
+	return responsePayload;
 }
 
 const upload = multer({

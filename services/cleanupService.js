@@ -35,8 +35,6 @@ function startCleanupJob() {
 		void runCleanup();
 	});
 
-	logEvent("Cleanup job running", "schedule: every 5 minutes");
-
 	return cleanupTask;
 }
 
