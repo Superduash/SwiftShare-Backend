@@ -1,5 +1,5 @@
 ﻿require("./instrument");
-require("dotenv").config();
+require("dotenv").config({ quiet: true });
 
 const http = require("http");
 const Sentry = require("@sentry/node");
@@ -30,7 +30,7 @@ const statsRoutes = require("./routes/stats");
 const { startCleanupJob } = require("./services/cleanupService");
 const { errorHandler } = require("./middleware/errorHandler");
 const { ERROR_CODES, buildErrorResponse } = require("./utils/constants");
-const { logEvent, logError } = require("./utils/logger");
+const { logSuccess, logEvent, logError } = require("./utils/logger");
 const { version } = require("./package.json");
 
 const app = express();
@@ -177,37 +177,69 @@ app.use(errorHandler);
 
 function connectMongoWithRetry() {
 	const retryDelayMs = 5000;
+	let hasConnected = false;
+	let hasAttempted = false;
 
 	const tryConnect = async () => {
 		try {
 			await connectDB();
-			logEvent("MongoDB connected");
-			console.log("MongoDB Connected");
+			if (!hasConnected) {
+				hasConnected = true;
+				logSuccess("MongoDB Connected");
+			}
+			return true;
 		} catch (error) {
-			logError("MongoDB connection failed", error);
+			if (hasAttempted) {
+				logError("MongoDB Failed", error);
+			}
+			hasAttempted = true;
 			setTimeout(tryConnect, retryDelayMs);
+			return false;
 		}
 	};
 
-	void tryConnect();
+	return tryConnect();
 }
 
 async function printStartupStatus(port) {
+	console.log(`[${new Date().toTimeString().slice(0, 8)}] SwiftShare Server Starting...`);
+	console.log("");
+
+	const mongoConnected = await connectMongoWithRetry();
 	const [redisStatus, r2Status] = await Promise.all([
 		getRedisStatus(),
 		getR2Status(),
 	]);
 	const geminiStatus = checkGeminiConnection() ? "connected" : "disconnected";
+	const sentryEnabled = Boolean(process.env.SENTRY_DSN);
 
-	logEvent("Server started", `PORT: ${port}`, `BACKEND_URL: ${process.env.BACKEND_URL || "not-set"}`);
-	logEvent("Diagnostics", `MONGODB: ${getMongoStatus()}`, `REDIS: ${redisStatus}`, `R2: ${r2Status}`, `GEMINI: ${geminiStatus}`);
+	if (!mongoConnected) {
+		console.log("[✗] MongoDB Failed");
+	}
 
-	console.log("SwiftShare Server Running");
-	console.log(redisStatus === "connected" ? "Redis Connected" : "Redis Disconnected");
-	console.log(r2Status === "connected" ? "R2 Connected" : "R2 Disconnected");
-	console.log(geminiStatus === "connected" ? "Gemini Connected" : "Gemini Disconnected");
-	console.log("Cleanup Job Running");
-	console.log("Ready for Transfers");
+	if (redisStatus === "connected") {
+		logSuccess("Redis Connected");
+	} else {
+		console.log("[✗] Redis Failed");
+	}
+
+	if (r2Status === "connected") {
+		logSuccess("R2 Connected");
+	} else {
+		console.log("[✗] R2 Failed");
+	}
+
+	if (geminiStatus === "connected") {
+		logSuccess("Gemini Connected");
+	} else {
+		console.log("[✗] Gemini Failed");
+	}
+
+	logSuccess(`Sentry ${sentryEnabled ? "Enabled" : "Disabled"}`);
+	console.log("");
+
+	logSuccess("Cleanup Job Running");
+	logSuccess(`Server Running on PORT ${port}`);
 }
 
 function startServer() {
@@ -216,8 +248,6 @@ function startServer() {
 
 		const port = Number(process.env.PORT) || 3001;
 		server.listen(port, async () => {
-			logEvent("Server listening", `PORT: ${port}`);
-			connectMongoWithRetry();
 			startCleanupJob();
 			await printStartupStatus(port);
 		});

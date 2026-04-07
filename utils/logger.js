@@ -6,6 +6,10 @@
 	return `${hh}:${mm}:${ss}`;
 }
 
+function withTimestamp(message) {
+	return `[${getTimestamp()}] ${message}`;
+}
+
 function buildSuffix(parts) {
 	const clean = (parts || [])
 		.filter((part) => part !== undefined && part !== null && String(part).length > 0)
@@ -18,13 +22,23 @@ function buildSuffix(parts) {
 	return ` - ${clean.join(" - ")}`;
 }
 
+function logSuccess(message, useTimestamp = false) {
+	const line = `[✓] ${message}`;
+	console.log(useTimestamp ? withTimestamp(line) : line);
+}
+
+function logInfo(message, useTimestamp = false) {
+	const line = `[•] ${message}`;
+	console.log(useTimestamp ? withTimestamp(line) : line);
+}
+
 function logEvent(event, ...parts) {
-	console.log(`[${getTimestamp()}] ${event}${buildSuffix(parts)}`);
+	logInfo(`${event}${buildSuffix(parts)}`, true);
 }
 
 function logError(event, error, ...parts) {
 	const message = error && error.message ? error.message : String(error || "Unknown error");
-	console.error(`[${getTimestamp()}] ${event}${buildSuffix([...parts, `ERROR: ${message}`])}`);
+	console.error(withTimestamp(`[✗] ${event}${buildSuffix([...parts, `ERROR: ${message}`])}`));
 }
 
 function formatSizeMB(bytes) {
@@ -38,6 +52,8 @@ function formatSizeMB(bytes) {
 }
 
 module.exports = {
+	logSuccess,
+	logInfo,
 	logEvent,
 	logError,
 	formatSizeMB,
