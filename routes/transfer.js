@@ -146,6 +146,9 @@ router.post("/:code/extend", validateCode, async (req, res, next) => {
 			: 10;
 		const expiresAt = new Date(Date.now() + extensionMinutes * 60 * 1000);
 
+		// Clear old countdown BEFORE saving to prevent race condition
+		clearTransferCountdown(code);
+
 		transfer.expiresAt = expiresAt;
 		transfer.extendedOnce = true;
 		transfer.activity.push({
@@ -156,6 +159,7 @@ router.post("/:code/extend", validateCode, async (req, res, next) => {
 		});
 		await transfer.save();
 
+		// Schedule new countdown AFTER save
 		scheduleTransferCountdown(code, expiresAt);
 		emitToRoom(code, "transfer-extended", { code, expiresAt });
 		logEvent("Transfer extended", `CODE: ${code}`, `EXPIRES_AT: ${expiresAt.toISOString()}`);
