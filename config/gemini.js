@@ -2,7 +2,10 @@
 
 const geminiApiKey = process.env.GEMINI_API_KEY;
 const geminiClient = geminiApiKey ? new GoogleGenerativeAI(geminiApiKey) : null;
-const modelName = process.env.GEMINI_MODEL || "gemini-2.0-flash-exp";
+const requestedModel = String(process.env.GEMINI_MODEL || "").trim();
+const modelName = requestedModel && requestedModel !== "gemini-2.0-flash-exp"
+	? requestedModel
+	: "gemini-2.5-flash";
 const model = geminiClient
 	? geminiClient.getGenerativeModel({ model: modelName })
 	: null;
