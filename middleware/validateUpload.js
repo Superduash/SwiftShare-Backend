@@ -8,7 +8,8 @@ const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
 function getMaxFileSizeBytes() {
 	const maxSizeMb = Number(process.env.MAX_FILE_SIZE_MB);
 	const safeMb = Number.isFinite(maxSizeMb) && maxSizeMb > 0 ? maxSizeMb : 500;
-	return safeMb * 1024 * 1024;
+	const cappedMb = Math.min(safeMb, 50);
+	return cappedMb * 1024 * 1024;
 }
 
 function getMaxFileCount() {

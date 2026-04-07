@@ -35,10 +35,11 @@ const { version } = require("./package.json");
 
 const app = express();
 const server = http.createServer(app);
+const frontendOrigin = process.env.FRONTEND_URL;
 
 app.set("trust proxy", 1);
 
-app.use(cors({ origin: process.env.FRONTEND_URL || true, maxAge: 86400 }));
+app.use(cors({ origin: frontendOrigin, maxAge: 86400 }));
 app.use(helmet());
 app.use(morgan("dev"));
 app.use(express.json({ limit: "10mb" }));

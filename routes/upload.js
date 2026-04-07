@@ -35,7 +35,8 @@ function getMaxFileCount() {
 function getMaxFileSizeBytes() {
 	const maxSizeMb = Number(process.env.MAX_FILE_SIZE_MB);
 	const safeMb = Number.isFinite(maxSizeMb) && maxSizeMb > 0 ? maxSizeMb : 500;
-	return safeMb * 1024 * 1024;
+	const cappedMb = Math.min(safeMb, 50);
+	return cappedMb * 1024 * 1024;
 }
 
 function getSessionExpiryMinutes() {
@@ -253,7 +254,7 @@ function multerHandler(req, res, next) {
 
 		const code = error?.code;
 		if (code === "LIMIT_FILE_SIZE") {
-			const maxMb = Number(process.env.MAX_FILE_SIZE_MB) || 500;
+			const maxMb = Math.min(Number(process.env.MAX_FILE_SIZE_MB) || 500, 50);
 			return res
 				.status(400)
 				.json(buildErrorResponse(ERROR_CODES.FILE_TOO_LARGE, `This file is too large. Maximum size is ${maxMb}MB.`));
