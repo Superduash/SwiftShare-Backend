@@ -79,7 +79,7 @@ function scheduleTransferCountdown(code, expiresAt) {
 function initSocket(server) {
 	ioInstance = new Server(server, {
 		cors: {
-			origin: process.env.FRONTEND_URL || true,
+			origin: process.env.FRONTEND_URL,
 			methods: ["GET", "POST"],
 		},
 	});

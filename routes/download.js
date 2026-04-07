@@ -51,7 +51,7 @@ async function toReadable(body) {
 	throw new Error("Unable to read object stream");
 }
 
-async function streamSingleFile(res, file) {
+async function streamSingleFile(res, file, code) {
 	const objectResponse = await getObjectFromR2(file.storedKey);
 
 	const stream = await toReadable(objectResponse.Body);
@@ -73,7 +73,7 @@ async function streamSingleFile(res, file) {
 
 		processedBytes += chunk.length;
 		const percent = Math.min(100, Math.round((processedBytes / totalBytes) * 100));
-		emitToRoom(file.transferCode, "download-progress", { percent });
+		emitToRoom(code, "download-progress", { percent });
 	});
 
 	await new Promise((resolve, reject) => {
@@ -232,8 +232,7 @@ router.get("/:code", rateLimitDownload, validateCode, async (req, res, next) => 
 			receiptFileName = transfer.files[0].originalName || receiptFileName;
 			streamedBytes = await streamSingleFile(res, {
 				...transfer.files[0].toObject(),
-				transferCode: code,
-			});
+			}, code);
 		} else {
 			streamedBytes = await streamZip(res, transfer.code, transfer.files);
 		}
@@ -306,8 +305,7 @@ router.get("/:code/single/:index", rateLimitDownload, validateCode, async (req, 
 		const streamStart = Date.now();
 		const streamedBytes = await streamSingleFile(res, {
 			...transfer.files[fileIndex].toObject(),
-			transferCode: code,
-		});
+		}, code);
 		const downloadDuration = Math.max(Date.now() - streamStart, 1);
 		const downloadSpeed = Math.round(streamedBytes / (downloadDuration / 1000));
 
