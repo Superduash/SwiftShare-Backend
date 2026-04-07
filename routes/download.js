@@ -415,5 +415,69 @@ router.get("/:code/single/:index", rateLimitDownload, validateCode, async (req, 
 	}
 });
 
+router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
+	try {
+		const { code, index } = req.params;
+		const transfer = await Transfer.findOne({ code });
+
+		const unavailableResponse = sendUnavailableTransferResponse(res, transfer);
+		if (unavailableResponse) {
+			return unavailableResponse;
+		}
+
+		const passwordError = await getPasswordErrorResponse(req, transfer);
+		if (passwordError) {
+			return res.status(passwordError.status).json(passwordError.body);
+		}
+
+		const fileIndex = Number(index);
+		if (!Number.isInteger(fileIndex) || fileIndex < 0 || fileIndex >= transfer.files.length) {
+			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
+		}
+
+		const file = transfer.files[fileIndex];
+		const objectResponse = await getObjectFromR2(file.storedKey);
+		const stream = await toReadable(objectResponse.Body);
+
+		res.setHeader("Content-Type", file.mimeType || "application/octet-stream");
+		res.setHeader("Content-Disposition", `inline; filename="${sanitizeFilename(file.originalName || "preview")}"`);
+		res.setHeader("Cache-Control", "private, max-age=300");
+		
+		if (objectResponse.ContentLength != null) {
+			res.setHeader("Content-Length", objectResponse.ContentLength);
+		}
+
+		// Support range requests for video/pdf
+		const range = req.headers.range;
+		if (range && objectResponse.ContentLength) {
+			const parts = range.replace(/bytes=/, "").split("-");
+			const start = parseInt(parts[0], 10);
+			const end = parts[1] ? parseInt(parts[1], 10) : objectResponse.ContentLength - 1;
+			const chunksize = (end - start) + 1;
+
+			res.status(206);
+			res.setHeader("Content-Range", `bytes ${start}-${end}/${objectResponse.ContentLength}`);
+			res.setHeader("Content-Length", chunksize);
+			res.setHeader("Accept-Ranges", "bytes");
+		}
+
+		await new Promise((resolve, reject) => {
+			stream.on("error", reject);
+			res.on("finish", resolve);
+			res.on("error", reject);
+			stream.pipe(res);
+		});
+
+		logEvent("Preview served", `CODE: ${code}`, `FILE: ${fileIndex}`);
+		return null;
+	} catch (error) {
+		if (res.headersSent) {
+			console.error(`Preview stream error: ${error.message}`);
+			return null;
+		}
+		return next(error);
+	}
+});
+
 module.exports = router;
 

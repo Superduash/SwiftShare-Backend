@@ -11,13 +11,17 @@ async function generateQR(code) {
 	const useBrandedQr = String(process.env.QR_BRANDED || "true").toLowerCase() !== "false";
 
 	if (!useBrandedQr) {
-		return QRCode.toDataURL(shareLink);
+		return QRCode.toDataURL(shareLink, {
+			errorCorrectionLevel: "M",
+			margin: 4,
+			width: 1024,
+		});
 	}
 
 	return QRCode.toDataURL(shareLink, {
 		errorCorrectionLevel: "M",
-		margin: 2,
-		width: 400,
+		margin: 4,
+		width: 1024,
 		color: {
 			dark: "#0EA5E9",
 			light: "#0F172A",
