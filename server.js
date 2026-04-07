@@ -19,7 +19,7 @@ const {
 	checkGeminiConnection,
 	checkGeminiConnectionLive,
 } = require("./config/gemini");
-const { initSocket } = require("./config/socket");
+const { initSocket, scheduleTransferCountdown } = require("./config/socket");
 const Transfer = require("./models/Transfer");
 const uploadRoutes = require("./routes/upload");
 const fileRoutes = require("./routes/file");
@@ -63,7 +63,15 @@ app.set("trust proxy", 1);
 
 app.use(cors({ origin: corsOrigin, maxAge: 86400 }));
 app.use(helmet());
-app.use(morgan("dev"));
+app.use(morgan((tokens, req, res) => {
+	const url = (req.originalUrl || "").split("?")[0]; // strip query params to prevent passwords leaking into logs
+	return [
+		tokens.method(req, res),
+		url,
+		tokens.status(req, res),
+		tokens["response-time"](req, res), "ms",
+	].join(" ");
+}));
 app.use(express.json({ limit: "10mb" }));
 
 app.use((req, res, next) => {
@@ -197,6 +205,21 @@ Sentry.setupExpressErrorHandler(app);
 
 app.use(errorHandler);
 
+async function restoreActiveCountdowns() {
+	try {
+		const active = await Transfer.find({
+			isDeleted: false,
+			expiresAt: { $gt: new Date() },
+		}).lean();
+		for (const t of active) {
+			scheduleTransferCountdown(t.code, t.expiresAt);
+		}
+		logEvent(`Restored ${active.length} active countdowns`);
+	} catch (err) {
+		logError("Failed to restore countdowns", err);
+	}
+}
+
 function connectMongoWithRetry() {
 	const retryDelayMs = 5000;
 	let hasConnected = false;
@@ -208,6 +231,7 @@ function connectMongoWithRetry() {
 			if (!hasConnected) {
 				hasConnected = true;
 				logSuccess("MongoDB Connected");
+				void restoreActiveCountdowns();
 			}
 			return true;
 		} catch (error) {

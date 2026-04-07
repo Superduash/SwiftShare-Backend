@@ -13,22 +13,19 @@ const {
 	getDeviceName,
 	getClientIp,
 	formatBytes,
+	isTransferExpired,
 } = require("../utils/helpers");
 const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
 const { logEvent, logError } = require("../utils/logger");
 
 const router = express.Router();
 
-function isExpired(transfer) {
-	return transfer.expiresAt && new Date(transfer.expiresAt).getTime() < Date.now();
-}
-
 function sendUnavailableTransferResponse(res, transfer) {
 	if (!transfer) {
 		return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
 	}
 
-	if (isExpired(transfer)) {
+	if (isTransferExpired(transfer)) {
 		return res.status(410).json(buildErrorResponse(ERROR_CODES.TRANSFER_EXPIRED));
 	}
 

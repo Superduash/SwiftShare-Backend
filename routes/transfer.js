@@ -11,37 +11,9 @@ const {
 const { validateCode } = require("../middleware/validateCode");
 const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
 const { logEvent } = require("../utils/logger");
-const { getClientIp, getDeviceName } = require("../utils/helpers");
+const { getClientIp, getDeviceName, isTransferExpired, getTransferStatus } = require("../utils/helpers");
 
 const router = express.Router();
-
-function isExpired(transfer) {
-	return Boolean(transfer?.expiresAt) && new Date(transfer.expiresAt).getTime() < Date.now();
-}
-
-function getTransferStatus(transfer) {
-	if (!transfer) {
-		return "DELETED";
-	}
-
-	if (transfer.isDeleted && transfer.cancelledAt) {
-		return "CANCELLED";
-	}
-
-	if (transfer.isDeleted) {
-		return "DELETED";
-	}
-
-	if (transfer.burnAfterDownload && Number(transfer.downloadCount || 0) >= 1) {
-		return "DELETED";
-	}
-
-	if (isExpired(transfer)) {
-		return "EXPIRED";
-	}
-
-	return "ACTIVE";
-}
 
 function extractPasswordFromRequest(req) {
 	const value = req.body?.password;
@@ -65,7 +37,7 @@ router.post("/:code/verify-password", validateCode, async (req, res, next) => {
 			return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
 		}
 
-		if (isExpired(transfer)) {
+		if (isTransferExpired(transfer)) {
 			return res.status(410).json(buildErrorResponse(ERROR_CODES.TRANSFER_EXPIRED));
 		}
 
@@ -161,7 +133,7 @@ router.post("/:code/extend", validateCode, async (req, res, next) => {
 			return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
 		}
 
-		if (isExpired(transfer)) {
+		if (isTransferExpired(transfer)) {
 			return res.status(410).json(buildErrorResponse(ERROR_CODES.TRANSFER_EXPIRED));
 		}
 

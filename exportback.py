@@ -123,7 +123,7 @@ def build_export(root: Path, max_bytes: int) -> tuple[str, int, int, int]:
     files = [p for p in iter_files(root) if is_important(root, p)]
     files.sort(key=lambda p: str(p.relative_to(root)).replace("\\", "/"))
 
-    now = dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     chunks = [
         f"# Backend export\\n",
         f"Generated: {now}\\n",
