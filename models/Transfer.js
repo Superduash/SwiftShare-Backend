@@ -79,6 +79,19 @@ const transferSchema = new mongoose.Schema(
 			type: Boolean,
 			default: false,
 		},
+		passwordProtected: {
+			type: Boolean,
+			default: false,
+		},
+		passwordHash: {
+			type: String,
+			default: null,
+		},
+		passwordAttempts: {
+			type: Number,
+			default: 0,
+			min: 0,
+		},
 		extendedOnce: {
 			type: Boolean,
 			default: false,
