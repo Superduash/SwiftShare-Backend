@@ -1,6 +1,6 @@
 ﻿const { Server } = require("socket.io");
 const Transfer = require("../models/Transfer");
-const { logEvent } = require("../utils/logger");
+const { logEvent, logError } = require("../utils/logger");
 
 let ioInstance;
 const countdownMap = new Map();
@@ -142,7 +142,7 @@ function initSocket(server) {
 
 				socket.emit("countdown-tick", { secondsRemaining });
 			} catch (error) {
-				console.error(`Failed to rejoin room for ${normalizedCode}: ${error.message}`);
+				logError("Failed to rejoin room", error, `CODE: ${normalizedCode}`);
 			}
 		});
 
@@ -160,12 +160,21 @@ function initSocket(server) {
 					{ $set: { senderSocketId: socket.id } },
 				);
 			} catch (error) {
-				console.error(`Failed to register sender socket for ${normalizedCode}: ${error.message}`);
+				logError("Failed to register sender socket", error, `CODE: ${normalizedCode}`);
 			}
 		});
 
-		socket.on("nearby-ping", () => {
-			// Placeholder event for Hour 4 nearby feature.
+		socket.on("nearby-ping", ({ code } = {}) => {
+			const normalizedCode = normalizeCode(code);
+			if (normalizedCode) {
+				socket.join(roomName(normalizedCode));
+			}
+
+			socket.emit("nearby-pong", {
+				timestamp: Date.now(),
+				socketId: socket.id,
+				code: normalizedCode || null,
+			});
 		});
 	});
 

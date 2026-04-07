@@ -9,22 +9,22 @@ async function generateQR(code) {
 
 	const shareLink = `${shareBaseUrl}/g/${code}`;
 	const useBrandedQr = String(process.env.QR_BRANDED || "true").toLowerCase() !== "false";
+	const baseOptions = {
+		errorCorrectionLevel: "H",
+		margin: 4,
+		width: 1024,
+		scale: 8,
+	};
 
 	if (!useBrandedQr) {
-		return QRCode.toDataURL(shareLink, {
-			errorCorrectionLevel: "M",
-			margin: 4,
-			width: 1024,
-		});
+		return QRCode.toDataURL(shareLink, baseOptions);
 	}
 
 	return QRCode.toDataURL(shareLink, {
-		errorCorrectionLevel: "M",
-		margin: 4,
-		width: 1024,
+		...baseOptions,
 		color: {
-			dark: "#0EA5E9",
-			light: "#0F172A",
+			dark: "#0F172A",
+			light: "#FFFFFF",
 		},
 	});
 }

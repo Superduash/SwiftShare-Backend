@@ -224,8 +224,7 @@ function connectMongoWithRetry() {
 }
 
 async function printStartupStatus(port) {
-	console.log(`[${new Date().toTimeString().slice(0, 8)}] SwiftShare Server Starting...`);
-	console.log("");
+	logEvent("SwiftShare Server Starting");
 
 	const mongoConnected = await connectMongoWithRetry();
 	const [redisStatus, r2Status] = await Promise.all([
@@ -236,29 +235,28 @@ async function printStartupStatus(port) {
 	const sentryEnabled = Boolean(process.env.SENTRY_DSN);
 
 	if (!mongoConnected) {
-		console.log("[✗] MongoDB Failed");
+		logError("MongoDB Failed", null);
 	}
 
 	if (redisStatus === "connected") {
 		logSuccess("Redis Connected");
 	} else {
-		console.log("[✗] Redis Failed");
+		logError("Redis Failed", null);
 	}
 
 	if (r2Status === "connected") {
 		logSuccess("R2 Connected");
 	} else {
-		console.log("[✗] R2 Failed");
+		logError("R2 Failed", null);
 	}
 
 	if (geminiStatus === "connected") {
 		logSuccess("Gemini Connected");
 	} else {
-		console.log("[✗] Gemini Failed");
+		logError("Gemini Failed", null);
 	}
 
 	logSuccess(`Sentry ${sentryEnabled ? "Enabled" : "Disabled"}`);
-	console.log("");
 
 	logSuccess("Cleanup Job Running");
 	logSuccess(`Server Running on PORT ${port}`);

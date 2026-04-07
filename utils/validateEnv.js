@@ -1,3 +1,5 @@
+const { logError, logEvent } = require("./logger");
+
 const REQUIRED_ENV_VARS = [
 	"MONGODB_URI",
 	"R2_ACCOUNT_ID",
@@ -18,18 +20,18 @@ const OPTIONAL_ENV_VARS = [
 function validateEnvOrExit() {
 	const missingRequired = REQUIRED_ENV_VARS.filter((key) => !process.env[key]);
 	if (missingRequired.length > 0) {
-		console.error("Missing required environment variables:");
+		logError("Missing required environment variables", null);
 		for (const key of missingRequired) {
-			console.error(`- ${key}`);
+			logEvent("Missing required env var", key);
 		}
 		process.exit(1);
 	}
 
 	const missingOptional = OPTIONAL_ENV_VARS.filter((key) => !process.env[key]);
 	if (missingOptional.length > 0) {
-		console.warn("Optional environment variables not set (graceful mode):");
+		logEvent("Optional environment variables not set (graceful mode)");
 		for (const key of missingOptional) {
-			console.warn(`- ${key}`);
+			logEvent("Missing optional env var", key);
 		}
 	}
 }

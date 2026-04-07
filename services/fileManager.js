@@ -1,6 +1,7 @@
 ﻿const {
 	PutObjectCommand,
 	GetObjectCommand,
+	HeadObjectCommand,
 	DeleteObjectCommand,
 } = require("@aws-sdk/client-s3");
 
@@ -31,11 +32,24 @@ async function uploadFileToR2(buffer, key, mimeType) {
 	);
 }
 
-async function streamFileFromR2(key) {
+async function streamFileFromR2(key, options = {}) {
 	assertR2Configured();
+	const range = typeof options?.range === "string" ? options.range.trim() : "";
 
 	return r2Client.send(
 		new GetObjectCommand({
+			Bucket: r2Bucket,
+			Key: key,
+			...(range ? { Range: range } : {}),
+		}),
+	);
+}
+
+async function headFileFromR2(key) {
+	assertR2Configured();
+
+	return r2Client.send(
+		new HeadObjectCommand({
 			Bucket: r2Bucket,
 			Key: key,
 		}),
@@ -88,8 +102,12 @@ async function uploadBufferToR2({ key, body, contentType }) {
 	return uploadFileToR2(body, key, contentType);
 }
 
-async function getObjectFromR2(key) {
-	return streamFileFromR2(key);
+async function getObjectFromR2(key, options = {}) {
+	return streamFileFromR2(key, options);
+}
+
+async function getObjectHeadFromR2(key) {
+	return headFileFromR2(key);
 }
 
 async function deleteObjectFromR2(key) {
@@ -103,6 +121,7 @@ module.exports = {
 	deleteMultipleFilesFromR2,
 	uploadBufferToR2,
 	getObjectFromR2,
+	getObjectHeadFromR2,
 	deleteObjectFromR2,
 	deleteFilesFromR2,
 };
