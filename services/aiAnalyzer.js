@@ -270,12 +270,15 @@ function normalizeAiResult(parsed, context) {
 		imageDescription = cleanedImageDescription || null;
 	}
 
-	// Structured per-file summaries
+	// Structured per-file summaries with key_points
 	const files = Array.isArray(parsed?.files)
 		? parsed.files.map((f) => ({
 			name: String(f?.name || "").slice(0, 128),
 			type: String(f?.type || "").slice(0, 64),
-			summary: cleanPreviewText(String(f?.summary || ""), 200),
+			summary: cleanPreviewText(String(f?.summary || ""), 300),
+			key_points: Array.isArray(f?.key_points)
+				? f.key_points.map(p => String(p || "").slice(0, 150)).slice(0, 5)
+				: [],
 		}))
 		: [];
 
@@ -338,21 +341,35 @@ async function buildPreviewFromFile(buffer, filename, mimeType) {
 	return cleanPreviewText(`File name: ${filename}\nMime type: ${mimeType}\nBinary/unsupported for direct preview.`);
 }
 
-function buildPrompt({ fileCount, totalSize, primaryFilename, primaryMime, manifest, preview, keywords }) {
+function buildPrompt({ fileCount, totalSize, primaryFilename, primaryMime, manifest, preview, keywords, enrichedFiles }) {
+	const fileDetails = enrichedFiles.map((f, idx) => {
+		const previewSnippet = f.preview ? f.preview.slice(0, 1500) : '[No text content]';
+		return `\n--- FILE ${idx + 1}: ${f.name} ---\nType: ${f.mime}\nSize: ${formatSize(f.size)}\nGuessed category: ${f.categoryGuess}\nExtracted content:\n${previewSnippet}\n`;
+	}).join('\n');
+
 	return [
 		"You are SwiftShare Intelligence, an elite document analyst for instant file transfers.",
 		"Return STRICT JSON only (no markdown, no explanation) with exactly these keys:",
 		"overall_summary, suggested_filename, category, imageDescription, detected_intent, risk_flags, files",
 		"",
-		"Rules:",
-		"1) overall_summary: 2-4 concrete sentences. Explain what the file or bundle is about, why it matters, and what action the receiver should take next.",
+		"CRITICAL RULES:",
+		"1) overall_summary: 2-4 concrete sentences. Explain what the file or bundle is about, why it matters, and what action the receiver should take next. BE SPECIFIC about actual content.",
 		"2) suggested_filename: short kebab-case, no extension, max 64 chars.",
 		"3) category: one of Assignment, Notes, Invoice, Report, Image, Video, Audio, Code, Presentation, Spreadsheet, Other.",
 		"4) imageDescription: only for image-centric inputs, otherwise null.",
 		"5) detected_intent: a short phrase describing the sender's likely purpose (e.g. 'sharing homework', 'sending invoice', 'sharing photos').",
 		"6) risk_flags: array of strings noting any concerns (e.g. 'contains personal data', 'large binary', 'potentially sensitive'). Empty array if none.",
-		"7) files: array of objects, one per file in the manifest. Each object: { name, type, summary }. \"summary\" is 1-2 sentence description of that specific file.",
-		"8) Prefer factual details over generic wording.",
+		"7) files: array of objects, ONE PER FILE in the manifest. Each object MUST have: { name, type, summary, key_points }.",
+		"   - name: exact filename from manifest",
+		"   - type: file type (pdf, image, code, etc)",
+		"   - summary: 2-3 sentences describing ACTUAL content of THIS specific file",
+		"   - key_points: array of 2-4 specific insights from THIS file's content",
+		"8) YOU MUST analyze EVERY file. DO NOT skip files. DO NOT give generic summaries.",
+		"9) Read the actual extracted content below and reference specific details.",
+		"10) For PDFs: mention key topics, sections, or data found.",
+		"11) For images: describe what's visible (if vision model used).",
+		"12) For code: identify language, purpose, main functions.",
+		"13) DO NOT truncate responses. Complete all file analyses.",
 		"",
 		`Transfer facts: fileCount=${fileCount}, totalSize=${formatSize(totalSize)}`,
 		`Primary file: ${primaryFilename} (${primaryMime})`,
@@ -361,8 +378,8 @@ function buildPrompt({ fileCount, totalSize, primaryFilename, primaryMime, manif
 		"File manifest:",
 		manifest,
 		"",
-		"Extracted preview:",
-		preview,
+		"DETAILED FILE CONTENT (analyze each thoroughly):",
+		fileDetails,
 	].join("\n");
 }
 
@@ -468,7 +485,26 @@ async function analyzeTransfer(files) {
 			return normalizeAiResult(null, context);
 		}
 
-		const prompt = buildPrompt(context);
+		const prompt = buildPrompt({
+			...context,
+			enrichedFiles: await Promise.all(files.slice(0, MAX_MODEL_FILES).map(async (file) => {
+				const preview = await buildPreviewFromFile(
+					file.buffer,
+					file.originalname || file.filename || "file",
+					file.mimetype || file.mimeType || "application/octet-stream",
+				);
+				const mime = file.mimetype || file.mimeType || "application/octet-stream";
+				const name = file.originalname || file.filename || "file";
+				return {
+					name,
+					mime,
+					size: Number(file.size || (file.buffer ? file.buffer.length : 0) || 0),
+					preview,
+					categoryGuess: detectCategoryWithoutAI(name, mime, preview),
+				};
+			})),
+		});
+
 		const useImageInput = context.fileCount === 1 && context.primaryMime.startsWith("image/") && Boolean(context.primaryBuffer);
 
 		const responseText = useImageInput
