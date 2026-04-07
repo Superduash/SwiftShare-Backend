@@ -1,4 +1,4 @@
-﻿const express = require("express");
+const express = require("express");
 const { Readable } = require("stream");
 const bcrypt = require("bcrypt");
 
@@ -194,15 +194,26 @@ async function finalizeDownload(transfer, {
 				},
 				$push: {
 					activity: {
-						event: "downloaded",
-						device: receiverDevice,
-						ip: receiverIp,
-						timestamp: new Date(),
+						$each: [
+							{
+								event: "downloaded",
+								device: receiverDevice,
+								ip: receiverIp,
+								timestamp: new Date(),
+							},
+							{
+								event: "burned",
+								device: "System",
+								ip: "",
+								timestamp: new Date(),
+							},
+						],
 					},
 				},
 			},
 		);
 		clearTransferCountdown(transfer.code);
+		emitToRoom(transfer.code, "transfer-deleted", { code: transfer.code, status: "DELETED", reason: "burn" });
 		return;
 	}
 

@@ -1,4 +1,4 @@
-﻿const mongoose = require("mongoose");
+const mongoose = require("mongoose");
 
 const transferFileSchema = new mongoose.Schema(
 	{
@@ -129,6 +129,10 @@ const transferSchema = new mongoose.Schema(
 			type: Boolean,
 			default: false,
 		},
+		cancelledAt: {
+			type: Date,
+			default: null,
+		},
 		senderIp: {
 			type: String,
 			default: "",
@@ -146,12 +150,7 @@ const transferSchema = new mongoose.Schema(
 			default: "",
 		},
 		ai: {
-			type: {
-				summary: { type: String, default: null },
-				suggestedName: { type: String, default: null },
-				category: { type: String, default: null },
-				imageDescription: { type: String, default: null },
-			},
+			type: mongoose.Schema.Types.Mixed,
 			default: null,
 		},
 		activity: {
@@ -161,8 +160,30 @@ const transferSchema = new mongoose.Schema(
 	},
 	{
 		timestamps: true,
+		toJSON: { virtuals: true },
+		toObject: { virtuals: true },
 	},
 );
+
+transferSchema.virtual("status").get(function () {
+	if (this.isDeleted && this.cancelledAt) {
+		return "CANCELLED";
+	}
+
+	if (this.isDeleted) {
+		return "DELETED";
+	}
+
+	if (this.burnAfterDownload && Number(this.downloadCount || 0) >= 1) {
+		return "DELETED";
+	}
+
+	if (this.expiresAt && new Date(this.expiresAt).getTime() < Date.now()) {
+		return "EXPIRED";
+	}
+
+	return "ACTIVE";
+});
 
 transferSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 transferSchema.index({ createdAt: -1 });

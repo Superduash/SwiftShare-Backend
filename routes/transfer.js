@@ -1,4 +1,4 @@
-﻿const express = require("express");
+const express = require("express");
 const bcrypt = require("bcrypt");
 
 const Transfer = require("../models/Transfer");
@@ -21,22 +21,26 @@ function isExpired(transfer) {
 
 function getTransferStatus(transfer) {
 	if (!transfer) {
-		return "deleted";
+		return "DELETED";
 	}
 
-	if (isExpired(transfer)) {
-		return "expired";
-	}
-
-	if (transfer.burnAfterDownload && Number(transfer.downloadCount || 0) >= 1) {
-		return "downloaded";
+	if (transfer.isDeleted && transfer.cancelledAt) {
+		return "CANCELLED";
 	}
 
 	if (transfer.isDeleted) {
-		return "deleted";
+		return "DELETED";
 	}
 
-	return "active";
+	if (transfer.burnAfterDownload && Number(transfer.downloadCount || 0) >= 1) {
+		return "DELETED";
+	}
+
+	if (isExpired(transfer)) {
+		return "EXPIRED";
+	}
+
+	return "ACTIVE";
 }
 
 function extractPasswordFromRequest(req) {
@@ -207,10 +211,17 @@ router.delete("/:code", validateCode, async (req, res, next) => {
 		if (!transfer.isDeleted) {
 			await deleteFilesFromR2(transfer.files);
 			transfer.isDeleted = true;
+			transfer.cancelledAt = new Date();
+			transfer.activity.push({
+				event: "cancelled",
+				device: getDeviceName(req.get("user-agent") || ""),
+				ip: getClientIp(req),
+				timestamp: new Date(),
+			});
 			await transfer.save();
 			clearTransferCountdown(code);
-			emitToRoom(code, "transfer-cancelled", { code });
-			logEvent("Transfer deleted", `CODE: ${code}`);
+			emitToRoom(code, "transfer-cancelled", { code, status: "CANCELLED" });
+			logEvent("Transfer cancelled", `CODE: ${code}`);
 		}
 
 		return res.status(200).json({
