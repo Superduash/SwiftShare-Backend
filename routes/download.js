@@ -1,5 +1,6 @@
 ﻿const express = require("express");
 const { Readable } = require("stream");
+const bcrypt = require("bcrypt");
 
 const Transfer = require("../models/Transfer");
 const { getObjectFromR2, deleteFilesFromR2 } = require("../services/fileManager");
@@ -33,6 +34,59 @@ function sendUnavailableTransferResponse(res, transfer) {
 
 	if (transfer.isDeleted || (transfer.burnAfterDownload && transfer.downloadCount >= 1)) {
 		return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
+	}
+
+	return null;
+}
+
+function getProvidedPassword(req) {
+	const headerPassword = req.get("x-transfer-password");
+	if (typeof headerPassword === "string" && headerPassword.length > 0) {
+		return headerPassword;
+	}
+
+	const queryPassword = req.query?.password;
+	if (typeof queryPassword === "string" && queryPassword.length > 0) {
+		return queryPassword;
+	}
+
+	return "";
+}
+
+async function getPasswordErrorResponse(req, transfer) {
+	if (!transfer.passwordProtected) {
+		return null;
+	}
+
+	if (Number(transfer.passwordAttempts || 0) >= 5) {
+		return {
+			status: 429,
+			body: buildErrorResponse(ERROR_CODES.INVALID_PASSWORD, "Too many incorrect password attempts"),
+		};
+	}
+
+	const providedPassword = getProvidedPassword(req);
+	if (!providedPassword) {
+		return {
+			status: 401,
+			body: buildErrorResponse(ERROR_CODES.PASSWORD_REQUIRED),
+		};
+	}
+
+	const isValidPassword = Boolean(
+		transfer.passwordHash && await bcrypt.compare(providedPassword, transfer.passwordHash),
+	);
+
+	if (!isValidPassword) {
+		await Transfer.updateOne({ _id: transfer._id }, { $inc: { passwordAttempts: 1 } });
+		return {
+			status: 401,
+			body: buildErrorResponse(ERROR_CODES.INVALID_PASSWORD),
+		};
+	}
+
+	if (Number(transfer.passwordAttempts || 0) > 0) {
+		await Transfer.updateOne({ _id: transfer._id }, { $set: { passwordAttempts: 0 } });
 	}
 
 	return null;
@@ -207,6 +261,11 @@ router.get("/:code", rateLimitDownload, validateCode, async (req, res, next) => 
 			return unavailableResponse;
 		}
 
+		const passwordError = await getPasswordErrorResponse(req, transfer);
+		if (passwordError) {
+			return res.status(passwordError.status).json(passwordError.body);
+		}
+
 		emitToRoom(code, "download-started", { receiverDevice });
 		logEvent("Download started", `CODE: ${code}`, `DEVICE: ${receiverDevice}`);
 
@@ -281,6 +340,11 @@ router.get("/:code/single/:index", rateLimitDownload, validateCode, async (req, 
 		const unavailableResponse = sendUnavailableTransferResponse(res, transfer);
 		if (unavailableResponse) {
 			return unavailableResponse;
+		}
+
+		const passwordError = await getPasswordErrorResponse(req, transfer);
+		if (passwordError) {
+			return res.status(passwordError.status).json(passwordError.body);
 		}
 
 		emitToRoom(code, "download-started", { receiverDevice });

@@ -133,6 +133,7 @@ router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => 
 
 		return res.status(200).json({
 			code: transfer.code,
+			passwordProtected: Boolean(transfer.passwordProtected),
 			files: (transfer.files || []).map((file) => ({
 				name: file.originalName,
 				size: file.size,

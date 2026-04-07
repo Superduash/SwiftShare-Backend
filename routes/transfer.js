@@ -1,4 +1,5 @@
 ﻿const express = require("express");
+const bcrypt = require("bcrypt");
 
 const Transfer = require("../models/Transfer");
 const { deleteFilesFromR2 } = require("../services/fileManager");
@@ -37,6 +38,68 @@ function getTransferStatus(transfer) {
 
 	return "active";
 }
+
+function extractPasswordFromRequest(req) {
+	const value = req.body?.password;
+	if (typeof value !== "string") {
+		return "";
+	}
+
+	return value;
+}
+
+router.post("/:code/verify-password", validateCode, async (req, res, next) => {
+	try {
+		const { code } = req.params;
+		const transfer = await Transfer.findOne({ code });
+
+		if (!transfer) {
+			return res.status(404).json(buildErrorResponse(ERROR_CODES.CODE_NOT_FOUND));
+		}
+
+		if (transfer.isDeleted) {
+			return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
+		}
+
+		if (isExpired(transfer)) {
+			return res.status(410).json(buildErrorResponse(ERROR_CODES.TRANSFER_EXPIRED));
+		}
+
+		if (!transfer.passwordProtected) {
+			return res.status(200).json({ success: true, data: { verified: true } });
+		}
+
+		if (Number(transfer.passwordAttempts || 0) >= 5) {
+			return res
+				.status(429)
+				.json(buildErrorResponse(ERROR_CODES.INVALID_PASSWORD, "Too many incorrect password attempts"));
+		}
+
+		const password = extractPasswordFromRequest(req);
+		if (!password) {
+			return res.status(400).json(buildErrorResponse(ERROR_CODES.PASSWORD_REQUIRED));
+		}
+
+		const isValidPassword = Boolean(
+			transfer.passwordHash && await bcrypt.compare(password, transfer.passwordHash),
+		);
+
+		if (!isValidPassword) {
+			transfer.passwordAttempts = Number(transfer.passwordAttempts || 0) + 1;
+			await transfer.save();
+			return res.status(401).json(buildErrorResponse(ERROR_CODES.INVALID_PASSWORD));
+		}
+
+		if (Number(transfer.passwordAttempts || 0) > 0) {
+			transfer.passwordAttempts = 0;
+			await transfer.save();
+		}
+
+		return res.status(200).json({ success: true, data: { verified: true } });
+	} catch (error) {
+		return next(error);
+	}
+});
 
 router.get("/:code/activity", validateCode, async (req, res, next) => {
 	try {

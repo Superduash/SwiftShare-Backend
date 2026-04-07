@@ -1,5 +1,6 @@
 ﻿const express = require("express");
 const multer = require("multer");
+const bcrypt = require("bcrypt");
 
 const Transfer = require("../models/Transfer");
 const { uploadBufferToR2 } = require("../services/fileManager");
@@ -47,6 +48,10 @@ function getSessionExpiryMinutes() {
 }
 
 function parseBurnAfterDownload(value) {
+	return parseBooleanFlag(value);
+}
+
+function parseBooleanFlag(value) {
 	if (typeof value === "boolean") {
 		return value;
 	}
@@ -56,6 +61,14 @@ function parseBurnAfterDownload(value) {
 	}
 
 	return false;
+}
+
+function parsePassword(value) {
+	if (typeof value !== "string") {
+		return "";
+	}
+
+	return value.trim();
 }
 
 function createAppError(status, errorCode, message) {
@@ -91,7 +104,14 @@ function validateIncomingFiles(files) {
 	}
 }
 
-async function processUploadFlow({ req, incomingFiles, burnAfterDownload, senderSocketId }) {
+async function processUploadFlow({
+	req,
+	incomingFiles,
+	burnAfterDownload,
+	senderSocketId,
+	password,
+	passwordProtected,
+}) {
 	const shareBaseUrl = process.env.SHARE_BASE_URL;
 	if (!shareBaseUrl) {
 		throw createAppError(500, ERROR_CODES.SERVER_ERROR, "SHARE_BASE_URL is not set in environment variables");
@@ -149,6 +169,10 @@ async function processUploadFlow({ req, incomingFiles, burnAfterDownload, sender
 	const expiresAt = new Date(
 		Date.now() + getSessionExpiryMinutes() * 60 * 1000,
 	);
+	const shouldProtectWithPassword = Boolean(passwordProtected && password);
+	const passwordHash = shouldProtectWithPassword
+		? await bcrypt.hash(password, 10)
+		: null;
 	const uploadDurationMs = Math.max(Date.now() - uploadStartedAt, 1);
 	const uploadSpeed = Math.round(totalSize / (uploadDurationMs / 1000));
 	const qr = await generateQR(code);
@@ -160,6 +184,9 @@ async function processUploadFlow({ req, incomingFiles, burnAfterDownload, sender
 		fileCount,
 		isZipped: false,
 		burnAfterDownload,
+		passwordProtected: shouldProtectWithPassword,
+		passwordHash,
+		passwordAttempts: 0,
 		downloadCount: 0,
 		uploadSpeed,
 		uploadDuration: uploadDurationMs,
@@ -235,6 +262,7 @@ async function processUploadFlow({ req, incomingFiles, burnAfterDownload, sender
 		})),
 		totalSize,
 		burnAfterDownload,
+		passwordProtected: shouldProtectWithPassword,
 	};
 }
 
@@ -283,11 +311,15 @@ router.post("/", rateLimitUpload, multerHandler, validateUpload, async (req, res
 		const senderSocketId =
 			typeof req.body?.senderSocketId === "string" ? req.body.senderSocketId : "";
 		const burnAfterDownload = parseBurnAfterDownload(req.body?.burnAfterDownload);
+		const passwordProtected = parseBooleanFlag(req.body?.passwordProtected);
+		const password = parsePassword(req.body?.password);
 		const response = await processUploadFlow({
 			req,
 			incomingFiles,
 			burnAfterDownload,
 			senderSocketId,
+			password,
+			passwordProtected,
 		});
 
 		return res.status(200).json(response);
@@ -302,7 +334,13 @@ router.post("/", rateLimitUpload, multerHandler, validateUpload, async (req, res
 router.post("/clipboard", rateLimitUpload, async (req, res) => {
 	try {
 		logEvent("Clipboard upload", "REQUEST_RECEIVED");
-		const { imageBase64, burnAfterDownload, senderSocketId } = req.body || {};
+		const {
+			imageBase64,
+			burnAfterDownload,
+			senderSocketId,
+			passwordProtected,
+			password,
+		} = req.body || {};
 
 		if (typeof imageBase64 !== "string") {
 			return res.status(400).json(buildErrorResponse(ERROR_CODES.INVALID_FILE_TYPE));
@@ -337,6 +375,8 @@ router.post("/clipboard", rateLimitUpload, async (req, res) => {
 			incomingFiles,
 			burnAfterDownload: parseBurnAfterDownload(burnAfterDownload),
 			senderSocketId: typeof senderSocketId === "string" ? senderSocketId : "",
+			passwordProtected: parseBooleanFlag(passwordProtected),
+			password: parsePassword(password),
 		});
 
 		return res.status(200).json(response);
