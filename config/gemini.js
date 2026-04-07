@@ -2,8 +2,9 @@
 
 const geminiApiKey = process.env.GEMINI_API_KEY;
 const geminiClient = geminiApiKey ? new GoogleGenerativeAI(geminiApiKey) : null;
+const modelName = process.env.GEMINI_MODEL || "gemini-2.0-flash-exp";
 const model = geminiClient
-	? geminiClient.getGenerativeModel({ model: "gemini-2.5-flash" })
+	? geminiClient.getGenerativeModel({ model: modelName })
 	: null;
 
 let geminiPingCache = {
@@ -49,7 +50,8 @@ async function checkGeminiConnectionLive() {
 	}
 
 	try {
-		await model.generateContent("ping");
+		// Use countTokens instead of generateContent to avoid wasting API quota
+		await model.countTokens("ping");
 		geminiPingCache = { checkedAt: now, ok: true };
 		return true;
 	} catch (error) {
