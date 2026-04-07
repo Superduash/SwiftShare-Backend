@@ -1,12 +1,8 @@
 ﻿const express = require("express");
 const { Readable } = require("stream");
-const {
-	GetObjectCommand,
-	DeleteObjectCommand,
-} = require("@aws-sdk/client-s3");
 
 const Transfer = require("../models/Transfer");
-const { r2Client, r2Bucket } = require("../config/r2");
+const { getObjectFromR2, deleteFilesFromR2 } = require("../services/fileManager");
 const { emitToRoom, clearTransferCountdown } = require("../config/socket");
 const { streamZipFromR2 } = require("../services/zipService");
 const { rateLimitDownload } = require("../middleware/rateLimiter");
@@ -50,30 +46,8 @@ async function toReadable(body) {
 	throw new Error("Unable to read object stream");
 }
 
-async function deleteTransferFilesFromR2(files) {
-	await Promise.all(
-		(files || []).map(async (file) => {
-			try {
-				await r2Client.send(
-					new DeleteObjectCommand({
-						Bucket: r2Bucket,
-						Key: file.storedKey,
-					}),
-				);
-			} catch (error) {
-				console.error(`Failed deleting ${file.storedKey}: ${error.message}`);
-			}
-		}),
-	);
-}
-
 async function streamSingleFile(res, file) {
-	const objectResponse = await r2Client.send(
-		new GetObjectCommand({
-			Bucket: r2Bucket,
-			Key: file.storedKey,
-		}),
-	);
+	const objectResponse = await getObjectFromR2(file.storedKey);
 
 	const stream = await toReadable(objectResponse.Body);
 	const downloadName = sanitizeFilename(file.originalName || "download");
@@ -143,7 +117,7 @@ async function incrementDownloadCount(transferId) {
 }
 
 async function finalizeBurnDownload(transfer) {
-	await deleteTransferFilesFromR2(transfer.files);
+	await deleteFilesFromR2(transfer.files);
 	await Transfer.updateOne({ _id: transfer._id }, { $set: { isDeleted: true } });
 	clearTransferCountdown(transfer.code);
 }

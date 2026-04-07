@@ -1,10 +1,9 @@
 ﻿const express = require("express");
 const multer = require("multer");
-const { PutObjectCommand } = require("@aws-sdk/client-s3");
 const path = require("path");
 
 const Transfer = require("../models/Transfer");
-const { r2Client, r2Bucket } = require("../config/r2");
+const { uploadBufferToR2 } = require("../services/fileManager");
 const {
 	emitToRoom,
 	scheduleTransferCountdown,
@@ -20,11 +19,9 @@ const {
 	getDeviceName,
 	mimeToIcon,
 	sanitizeFilename,
+ 	getTotalSize,
 } = require("../utils/helpers");
 const { logEvent, logError, formatSizeMB } = require("../utils/logger");
-const {
-	getTotalSize,
-} = require("../utils/fileHelpers");
 const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
 
 const router = express.Router();
@@ -116,14 +113,11 @@ async function processUploadFlow({ req, incomingFiles, burnAfterDownload, sender
 		const storedKey = `transfers/${code}/${safeName}`;
 		const mimeType = file.mimetype || "application/octet-stream";
 
-		await r2Client.send(
-			new PutObjectCommand({
-				Bucket: r2Bucket,
-				Key: storedKey,
-				Body: file.buffer,
-				ContentType: mimeType,
-			}),
-		);
+		await uploadBufferToR2({
+			key: storedKey,
+			body: file.buffer,
+			contentType: mimeType,
+		});
 
 		uploadedFiles.push({
 			originalName: file.originalname,
@@ -239,17 +233,22 @@ function multerHandler(req, res, next) {
 			return next();
 		}
 
-		if (error instanceof multer.MulterError) {
-			if (error.code === "LIMIT_FILE_SIZE") {
-				return res.status(400).json(buildErrorResponse(ERROR_CODES.FILE_TOO_LARGE));
-			}
-
-			if (error.code === "LIMIT_FILE_COUNT") {
-				return res.status(400).json(buildErrorResponse(ERROR_CODES.TOO_MANY_FILES));
-			}
+		const code = error?.code;
+		if (code === "LIMIT_FILE_SIZE") {
+			return res.status(400).json(buildErrorResponse(ERROR_CODES.FILE_TOO_LARGE));
 		}
 
-		return res.status(400).json(buildErrorResponse(ERROR_CODES.NO_FILE_UPLOADED));
+		if (code === "LIMIT_FILE_COUNT") {
+			return res.status(400).json(buildErrorResponse(ERROR_CODES.TOO_MANY_FILES));
+		}
+
+		if (code === "LIMIT_UNEXPECTED_FILE") {
+			return res
+				.status(400)
+				.json(buildErrorResponse(ERROR_CODES.INVALID_FILE_TYPE, "Please use the 'files' field to upload."));
+		}
+
+		return next(error);
 	});
 }
 

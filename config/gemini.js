@@ -6,6 +6,11 @@ const model = geminiClient
 	? geminiClient.getGenerativeModel({ model: "gemini-2.5-flash" })
 	: null;
 
+let geminiPingCache = {
+	checkedAt: 0,
+	ok: false,
+};
+
 async function generateAIResponse(prompt, fileBuffer, mimeType) {
 	if (!model) {
 		return null;
@@ -33,8 +38,29 @@ function checkGeminiConnection() {
 	return Boolean(model);
 }
 
+async function checkGeminiConnectionLive() {
+	if (!model) {
+		return false;
+	}
+
+	const now = Date.now();
+	if (now - geminiPingCache.checkedAt < 60_000) {
+		return geminiPingCache.ok;
+	}
+
+	try {
+		await model.generateContent("ping");
+		geminiPingCache = { checkedAt: now, ok: true };
+		return true;
+	} catch (error) {
+		geminiPingCache = { checkedAt: now, ok: false };
+		return false;
+	}
+}
+
 module.exports = {
 	generateAIResponse,
 	checkGeminiConnection,
+	checkGeminiConnectionLive,
 };
 

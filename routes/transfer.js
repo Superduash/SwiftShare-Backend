@@ -1,31 +1,13 @@
 ﻿const express = require("express");
-const { DeleteObjectCommand } = require("@aws-sdk/client-s3");
 
 const Transfer = require("../models/Transfer");
-const { r2Client, r2Bucket } = require("../config/r2");
+const { deleteFilesFromR2 } = require("../services/fileManager");
 const { emitToRoom, clearTransferCountdown } = require("../config/socket");
 const { validateCode } = require("../middleware/validateCode");
 const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
 const { logEvent } = require("../utils/logger");
 
 const router = express.Router();
-
-async function deleteFilesFromR2(files) {
-	await Promise.all(
-		(files || []).map(async (file) => {
-			try {
-				await r2Client.send(
-					new DeleteObjectCommand({
-						Bucket: r2Bucket,
-						Key: file.storedKey,
-					}),
-				);
-			} catch (error) {
-				console.error(`Failed deleting ${file.storedKey}: ${error.message}`);
-			}
-		}),
-	);
-}
 
 router.delete("/:code", validateCode, async (req, res, next) => {
 	try {

@@ -118,6 +118,10 @@ function sanitizeFilename(name = "file") {
 	return sanitized;
 }
 
+function getTotalSize(files = []) {
+	return files.reduce((total, file) => total + Number(file?.size || 0), 0);
+}
+
 module.exports = {
 	getClientIp,
 	getSubnet,
@@ -125,6 +129,7 @@ module.exports = {
 	mimeToIcon,
 	formatBytes,
 	sanitizeFilename,
+	getTotalSize,
 	// Backward-compatible aliases used by existing Hour 1-3 code.
 	extractClientIp: getClientIp,
 	parseDeviceName: getDeviceName,

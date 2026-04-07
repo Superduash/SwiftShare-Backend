@@ -1,8 +1,7 @@
 ﻿const archiver = require("archiver");
 const { Readable } = require("stream");
-const { GetObjectCommand } = require("@aws-sdk/client-s3");
 
-const { r2Client, r2Bucket } = require("../config/r2");
+const { getObjectFromR2 } = require("./fileManager");
 const { sanitizeFilename } = require("../utils/helpers");
 
 async function toReadable(body) {
@@ -25,16 +24,11 @@ async function streamZipFromR2({ code, files, res, onChunk }) {
 		`attachment; filename="swiftshare-${code}.zip"`,
 	);
 
-	const archive = archiver("zip", { zlib: { level: 9 } });
+	const archive = archiver("zip", { zlib: { level: 1 } });
 	archive.pipe(res);
 
 	for (const file of files) {
-		const objectResponse = await r2Client.send(
-			new GetObjectCommand({
-				Bucket: r2Bucket,
-				Key: file.storedKey,
-			}),
-		);
+		const objectResponse = await getObjectFromR2(file.storedKey);
 
 		const stream = await toReadable(objectResponse.Body);
 		if (typeof onChunk === "function") {
