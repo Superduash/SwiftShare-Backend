@@ -1,4 +1,4 @@
-﻿const express = require("express");
+const express = require("express");
 const { Readable } = require("stream");
 
 const Transfer = require("../models/Transfer");
@@ -14,9 +14,21 @@ function isExpired(transfer) {
 	return transfer.expiresAt && new Date(transfer.expiresAt).getTime() < Date.now();
 }
 
+const PREVIEWABLE_TEXT_MIMES = new Set([
+	"text/plain", "text/html", "text/css", "text/csv",
+	"text/javascript", "text/markdown", "text/xml",
+	"application/json", "application/javascript",
+	"application/xml", "application/x-yaml",
+]);
+
 function isPreviewableMime(mimeType) {
 	const mime = String(mimeType || "").toLowerCase();
-	return mime.startsWith("image/") || mime.includes("pdf");
+	if (mime.startsWith("image/")) return true;
+	if (mime.includes("pdf")) return true;
+	if (mime.startsWith("video/")) return true;
+	if (mime.startsWith("text/")) return true;
+	if (PREVIEWABLE_TEXT_MIMES.has(mime)) return true;
+	return false;
 }
 
 async function toReadable(body) {
@@ -68,6 +80,8 @@ router.get("/:code/preview/:fileIndex", rateLimitMetadata, validateCode, async (
 
 		res.setHeader("Content-Type", contentType);
 		res.setHeader("Content-Disposition", `inline; filename="${filename}"`);
+		res.setHeader("Cache-Control", "public, max-age=300");
+		res.setHeader("Accept-Ranges", "bytes");
 		if (objectResponse.ContentLength != null) {
 			res.setHeader("Content-Length", objectResponse.ContentLength);
 		}
@@ -108,7 +122,26 @@ router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => 
 		}
 
 		if (isExpired(transfer)) {
-			return res.status(410).json(buildErrorResponse(ERROR_CODES.TRANSFER_EXPIRED));
+			// Expired transfers return metadata as read-only with status
+			const expiredFiles = (transfer.files || []).map((file) => ({
+				name: file.originalName,
+				size: file.size,
+				type: file.mimeType,
+				icon: file.icon,
+			}));
+			return res.status(200).json({
+				code: transfer.code,
+				status: "EXPIRED",
+				passwordProtected: Boolean(transfer.passwordProtected),
+				files: expiredFiles,
+				totalSize: transfer.totalSize,
+				fileCount: transfer.fileCount,
+				expiresAt: transfer.expiresAt,
+				secondsRemaining: 0,
+				burnAfterDownload: transfer.burnAfterDownload,
+				senderDeviceName: transfer.senderDeviceName,
+				ai: transfer.ai || null,
+			});
 		}
 
 		const receiverDevice = getDeviceName(req.get("user-agent") || "");
@@ -131,8 +164,16 @@ router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => 
 			},
 		);
 
+		const transferStatus = (() => {
+			if (transfer.isDeleted && transfer.cancelledAt) return "CANCELLED";
+			if (transfer.isDeleted) return "DELETED";
+			if (transfer.burnAfterDownload && Number(transfer.downloadCount || 0) >= 1) return "DELETED";
+			return "ACTIVE";
+		})();
+
 		return res.status(200).json({
 			code: transfer.code,
+			status: transferStatus,
 			passwordProtected: Boolean(transfer.passwordProtected),
 			files: (transfer.files || []).map((file) => ({
 				name: file.originalName,

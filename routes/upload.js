@@ -1,4 +1,4 @@
-﻿const express = require("express");
+const express = require("express");
 const multer = require("multer");
 const bcrypt = require("bcrypt");
 
@@ -268,6 +268,9 @@ async function processUploadFlow({
 				category: aiResult?.category || null,
 				suggestedName: aiResult?.suggestedName || null,
 				imageDescription: aiResult?.imageDescription || null,
+				files: aiResult?.files || [],
+				detectedIntent: aiResult?.detectedIntent || null,
+				riskFlags: aiResult?.riskFlags || [],
 			});
 
 			logEvent("AI analysis completed", `CODE: ${code}`, `READY: ${Boolean(aiResult)}`);

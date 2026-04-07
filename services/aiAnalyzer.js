@@ -1,4 +1,4 @@
-﻿const path = require("path");
+const path = require("path");
 const pdfParse = require("pdf-parse");
 const mammoth = require("mammoth");
 const { generateAIResponse } = require("../config/gemini");
@@ -33,7 +33,7 @@ const KEYWORD_STOPWORDS = new Set([
 ]);
 
 const MAX_PREVIEW_CHARS = 6000;
-const MAX_MODEL_FILES = 3;
+const MAX_MODEL_FILES = 5;
 
 let currentWindowStart = Date.now();
 let requestCountInWindow = 0;
@@ -258,8 +258,11 @@ function normalizeAiResult(parsed, context) {
 		? parsedCategory
 		: fallbackCategory;
 
-	const summary = normalizeSummary(parsed?.summary, fallbackSummary);
-	const suggestedName = sanitizeSuggestedName(parsed?.suggestedName, fallbackName);
+	// Support both old-format (summary/suggestedName) and new-format (overall_summary/suggested_filename)
+	const rawSummary = parsed?.overall_summary || parsed?.summary;
+	const summary = normalizeSummary(rawSummary, fallbackSummary);
+	const rawSuggestedName = parsed?.suggested_filename || parsed?.suggestedName;
+	const suggestedName = sanitizeSuggestedName(rawSuggestedName, fallbackName);
 
 	let imageDescription = null;
 	if (category === "Image" || context.primaryMime.startsWith("image/")) {
@@ -267,11 +270,33 @@ function normalizeAiResult(parsed, context) {
 		imageDescription = cleanedImageDescription || null;
 	}
 
+	// Structured per-file summaries
+	const files = Array.isArray(parsed?.files)
+		? parsed.files.map((f) => ({
+			name: String(f?.name || "").slice(0, 128),
+			type: String(f?.type || "").slice(0, 64),
+			summary: cleanPreviewText(String(f?.summary || ""), 200),
+		}))
+		: [];
+
+	const detectedIntent = typeof parsed?.detected_intent === "string"
+		? cleanPreviewText(parsed.detected_intent, 120)
+		: null;
+
+	const riskFlags = Array.isArray(parsed?.risk_flags)
+		? parsed.risk_flags.filter((f) => typeof f === "string").slice(0, 5)
+		: [];
+
 	return {
+		// Backward compat
 		summary,
 		suggestedName,
 		category,
 		imageDescription,
+		// New structured fields
+		files,
+		detectedIntent,
+		riskFlags,
 	};
 }
 
@@ -317,14 +342,17 @@ function buildPrompt({ fileCount, totalSize, primaryFilename, primaryMime, manif
 	return [
 		"You are SwiftShare Intelligence, an elite document analyst for instant file transfers.",
 		"Return STRICT JSON only (no markdown, no explanation) with exactly these keys:",
-		"summary, suggestedName, category, imageDescription",
+		"overall_summary, suggested_filename, category, imageDescription, detected_intent, risk_flags, files",
 		"",
 		"Rules:",
-		"1) summary: 2-4 concrete sentences. Explain what the file or bundle is about, why it matters, and what action the receiver should take next.",
-		"2) suggestedName: short kebab-case, no extension, max 64 chars.",
+		"1) overall_summary: 2-4 concrete sentences. Explain what the file or bundle is about, why it matters, and what action the receiver should take next.",
+		"2) suggested_filename: short kebab-case, no extension, max 64 chars.",
 		"3) category: one of Assignment, Notes, Invoice, Report, Image, Video, Audio, Code, Presentation, Spreadsheet, Other.",
 		"4) imageDescription: only for image-centric inputs, otherwise null.",
-		"5) Prefer factual details over generic wording.",
+		"5) detected_intent: a short phrase describing the sender's likely purpose (e.g. 'sharing homework', 'sending invoice', 'sharing photos').",
+		"6) risk_flags: array of strings noting any concerns (e.g. 'contains personal data', 'large binary', 'potentially sensitive'). Empty array if none.",
+		"7) files: array of objects, one per file in the manifest. Each object: { name, type, summary }. \"summary\" is 1-2 sentence description of that specific file.",
+		"8) Prefer factual details over generic wording.",
 		"",
 		`Transfer facts: fileCount=${fileCount}, totalSize=${formatSize(totalSize)}`,
 		`Primary file: ${primaryFilename} (${primaryMime})`,
