@@ -1,5 +1,23 @@
 ﻿const path = require("path");
 
+const BLOCKED_EXTENSIONS = new Set([
+	".exe",
+	".bat",
+	".sh",
+	".cmd",
+	".msi",
+	".scr",
+	".com",
+	".vbs",
+	".ps1",
+	".jar",
+]);
+
+const DANGEROUS_SIGNATURES = [
+	Buffer.from([0x4d, 0x5a]), // MZ
+	Buffer.from([0x7f, 0x45, 0x4c, 0x46]), // ELF
+];
+
 function getClientIp(req) {
 	const forwarded = req.headers["x-forwarded-for"];
 
@@ -118,6 +136,33 @@ function sanitizeFilename(name = "file") {
 	return sanitized;
 }
 
+function isBlockedExtension(name = "") {
+	const extension = path.extname(String(name || "")).toLowerCase();
+	return BLOCKED_EXTENSIONS.has(extension);
+}
+
+function hasDangerousSignature(bufferLike) {
+	if (!bufferLike) {
+		return false;
+	}
+
+	const buffer = Buffer.isBuffer(bufferLike)
+		? bufferLike
+		: Buffer.from(bufferLike);
+
+	for (const signature of DANGEROUS_SIGNATURES) {
+		if (buffer.length < signature.length) {
+			continue;
+		}
+
+		if (buffer.subarray(0, signature.length).equals(signature)) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
 function getTotalSize(files = []) {
 	return files.reduce((total, file) => total + Number(file?.size || 0), 0);
 }
@@ -129,6 +174,8 @@ module.exports = {
 	mimeToIcon,
 	formatBytes,
 	sanitizeFilename,
+	isBlockedExtension,
+	hasDangerousSignature,
 	getTotalSize,
 	// Backward-compatible aliases used by existing Hour 1-3 code.
 	extractClientIp: getClientIp,

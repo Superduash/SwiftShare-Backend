@@ -11,11 +11,18 @@ const ALLOWED_CATEGORIES = new Set([
 	"Report",
 	"Image",
 	"Video",
+	"Audio",
 	"Code",
 	"Presentation",
 	"Spreadsheet",
 	"Other",
 ]);
+
+const CODE_EXTENSIONS = new Set([".js", ".py", ".java", ".cpp", ".html", ".css", ".ts", ".jsx", ".go", ".rs"]);
+const PRESENTATION_EXTENSIONS = new Set([".ppt", ".pptx"]);
+const SPREADSHEET_EXTENSIONS = new Set([".xls", ".xlsx", ".csv"]);
+const VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".avi", ".mkv"]);
+const AUDIO_EXTENSIONS = new Set([".mp3", ".wav", ".flac"]);
 
 let currentWindowStart = Date.now();
 let requestCountInWindow = 0;
@@ -78,6 +85,33 @@ function normalizeAiResult(parsed, filename) {
 	};
 }
 
+function detectCategoryWithoutAI(filename, mimeType) {
+	const ext = String(path.extname(filename || "")).toLowerCase();
+	const lowerMime = String(mimeType || "").toLowerCase();
+
+	if (CODE_EXTENSIONS.has(ext)) {
+		return "Code";
+	}
+
+	if (PRESENTATION_EXTENSIONS.has(ext)) {
+		return "Presentation";
+	}
+
+	if (SPREADSHEET_EXTENSIONS.has(ext)) {
+		return "Spreadsheet";
+	}
+
+	if (VIDEO_EXTENSIONS.has(ext) || lowerMime.startsWith("video/")) {
+		return "Video";
+	}
+
+	if (AUDIO_EXTENSIONS.has(ext) || lowerMime.startsWith("audio/")) {
+		return "Audio";
+	}
+
+	return null;
+}
+
 async function buildPreviewFromFile(buffer, filename, mimeType) {
 	const lowerMime = String(mimeType || "").toLowerCase();
 	const ext = String(path.extname(filename || "")).toLowerCase();
@@ -116,6 +150,17 @@ ${contentPreview}`;
 
 async function analyzeFile(buffer, filename, mimeType) {
 	try {
+		const directCategory = detectCategoryWithoutAI(filename, mimeType);
+		if (directCategory) {
+			const extensionlessName = path.parse(filename || "file").name || "file";
+			return {
+				summary: null,
+				suggestedName: extensionlessName,
+				category: directCategory,
+				imageDescription: null,
+			};
+		}
+
 		if (!canUseAI()) {
 			logEvent("AI analysis skipped", "local rate safety limit reached");
 			return null;

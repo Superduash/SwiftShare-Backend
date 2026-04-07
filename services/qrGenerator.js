@@ -8,7 +8,21 @@ async function generateQR(code) {
 	}
 
 	const shareLink = `${shareBaseUrl}/g/${code}`;
-	return QRCode.toDataURL(shareLink);
+	const useBrandedQr = String(process.env.QR_BRANDED || "true").toLowerCase() !== "false";
+
+	if (!useBrandedQr) {
+		return QRCode.toDataURL(shareLink);
+	}
+
+	return QRCode.toDataURL(shareLink, {
+		errorCorrectionLevel: "M",
+		margin: 2,
+		width: 400,
+		color: {
+			dark: "#0EA5E9",
+			light: "#0F172A",
+		},
+	});
 }
 
 module.exports = {

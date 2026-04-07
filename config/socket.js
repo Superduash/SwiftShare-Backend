@@ -56,6 +56,19 @@ function scheduleTransferCountdown(code, expiresAt) {
 		if (secondsRemaining <= 0) {
 			clearTransferCountdown(code);
 			emitToRoom(code, "transfer-expired", { code });
+			void Transfer.updateOne(
+				{ code },
+				{
+					$push: {
+						activity: {
+							event: "expired",
+							device: "System",
+							ip: "",
+							timestamp: new Date(),
+						},
+					},
+				},
+			);
 			logEvent("Transfer expired", `CODE: ${code}`);
 		}
 	}, 1000);
@@ -78,6 +91,30 @@ function initSocket(server) {
 			}
 
 			socket.join(roomName(code));
+		});
+
+		socket.on("rejoin-room", async ({ code } = {}) => {
+			if (!code) {
+				return;
+			}
+
+			socket.join(roomName(code));
+
+			try {
+				const transfer = await Transfer.findOne({ code }).lean();
+				if (!transfer || transfer.isDeleted || !transfer.expiresAt) {
+					return;
+				}
+
+				const secondsRemaining = Math.max(
+					0,
+					Math.ceil((new Date(transfer.expiresAt).getTime() - Date.now()) / 1000),
+				);
+
+				socket.emit("countdown-tick", { secondsRemaining });
+			} catch (error) {
+				console.error(`Failed to rejoin room for ${code}: ${error.message}`);
+			}
 		});
 
 		socket.on("register-sender", async ({ code } = {}) => {
