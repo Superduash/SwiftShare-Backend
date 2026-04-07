@@ -1,5 +1,6 @@
 const path = require("path");
-const pdfParse = require("pdf-parse");
+const pdfParseLib = require("pdf-parse");
+const pdfParse = pdfParseLib.PDFParse || pdfParseLib;
 const mammoth = require("mammoth");
 const AdmZip = require("adm-zip");
 const Tesseract = require("tesseract.js");
