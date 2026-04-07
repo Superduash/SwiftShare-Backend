@@ -7,14 +7,14 @@ const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
 
 function getMaxFileSizeBytes() {
 	const maxSizeMb = Number(process.env.MAX_FILE_SIZE_MB);
-	const safeMb = Number.isFinite(maxSizeMb) && maxSizeMb > 0 ? maxSizeMb : 500;
-	const cappedMb = Math.min(safeMb, 50);
+	const safeMb = Number.isFinite(maxSizeMb) && maxSizeMb > 0 ? maxSizeMb : 100;
+	const cappedMb = Math.min(safeMb, 100);
 	return cappedMb * 1024 * 1024;
 }
 
 function getMaxFileCount() {
 	const maxCount = Number(process.env.MAX_FILE_COUNT);
-	return Number.isInteger(maxCount) && maxCount > 0 ? maxCount : 10;
+	return Number.isInteger(maxCount) && maxCount > 0 ? maxCount : 5;
 }
 
 function sendUploadError(res, code) {
