@@ -2,6 +2,7 @@
 
 const Transfer = require("../models/Transfer");
 const { deleteFilesFromR2 } = require("./fileManager");
+const { clearTransferCountdown } = require("../config/socket");
 const { logEvent, logError } = require("../utils/logger");
 
 let cleanupTask;
@@ -18,6 +19,7 @@ async function runCleanup() {
 			await deleteFilesFromR2(transfer.files);
 			transfer.isDeleted = true;
 			await transfer.save();
+			clearTransferCountdown(transfer.code);
 		}
 
 		logEvent(`Cleanup job removed ${expiredTransfers.length} expired transfers`);

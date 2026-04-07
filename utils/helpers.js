@@ -167,6 +167,34 @@ function getTotalSize(files = []) {
 	return files.reduce((total, file) => total + Number(file?.size || 0), 0);
 }
 
+function isTransferExpired(transfer) {
+	return Boolean(transfer?.expiresAt) && new Date(transfer.expiresAt).getTime() < Date.now();
+}
+
+function getTransferStatus(transfer) {
+	if (!transfer) {
+		return "DELETED";
+	}
+
+	if (transfer.isDeleted && transfer.cancelledAt) {
+		return "CANCELLED";
+	}
+
+	if (transfer.isDeleted) {
+		return "DELETED";
+	}
+
+	if (transfer.burnAfterDownload && Number(transfer.downloadCount || 0) >= 1) {
+		return "DELETED";
+	}
+
+	if (isTransferExpired(transfer)) {
+		return "EXPIRED";
+	}
+
+	return "ACTIVE";
+}
+
 module.exports = {
 	getClientIp,
 	getSubnet,
@@ -177,6 +205,8 @@ module.exports = {
 	isBlockedExtension,
 	hasDangerousSignature,
 	getTotalSize,
+	isTransferExpired,
+	getTransferStatus,
 	// Backward-compatible aliases used by existing Hour 1-3 code.
 	extractClientIp: getClientIp,
 	parseDeviceName: getDeviceName,
