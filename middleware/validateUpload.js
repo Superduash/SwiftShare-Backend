@@ -1,5 +1,5 @@
 ﻿const path = require("path");
-const { getTotalSize } = require("../utils/fileHelpers");
+const { getTotalSize } = require("../utils/helpers");
 const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
 
 const BLOCKED_EXTENSIONS = new Set([".exe", ".bat", ".sh", ".cmd"]);

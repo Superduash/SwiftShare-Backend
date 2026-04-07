@@ -13,7 +13,7 @@ router.get("/", async (req, res, next) => {
 		logEvent("Nearby request", `IP: ${clientIp || "unknown"}`, `SUBNET: ${subnet || "n/a"}`);
 
 		if (!subnet) {
-			return res.status(200).json({ transfers: [] });
+			return res.status(200).json({ devices: [] });
 		}
 
 		const now = new Date();
@@ -27,12 +27,13 @@ router.get("/", async (req, res, next) => {
 			.lean();
 
 		return res.status(200).json({
-			transfers: candidates.map((transfer) => ({
+			devices: candidates.map((transfer) => ({
 				code: transfer.code,
-				fileName: transfer.files?.[0]?.originalName || "Unknown",
-				fileSize: transfer.files?.[0]?.size || 0,
+				fileCount: Number(transfer.fileCount || transfer.files?.length || 0),
+				totalSize: Number(transfer.totalSize || 0),
+				category: transfer.ai?.category || "Other",
 				deviceName: transfer.senderDeviceName || "Unknown Device",
-				createdAt: transfer.createdAt,
+				expiresAt: transfer.expiresAt,
 			})),
 		});
 	} catch (error) {

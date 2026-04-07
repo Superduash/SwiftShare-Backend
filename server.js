@@ -10,7 +10,10 @@ const morgan = require("morgan");
 const { connectDB } = require("./config/db");
 const { checkRedisConnection } = require("./config/redis");
 const { checkR2Connection } = require("./config/r2");
-const { checkGeminiConnection } = require("./config/gemini");
+const {
+	checkGeminiConnection,
+	checkGeminiConnectionLive,
+} = require("./config/gemini");
 const { initSocket } = require("./config/socket");
 const uploadRoutes = require("./routes/upload");
 const fileRoutes = require("./routes/file");
@@ -25,6 +28,13 @@ const { logEvent, logError } = require("./utils/logger");
 
 const app = express();
 const server = http.createServer(app);
+
+const REQUIRED_ENV_VARS = [
+	"MONGODB_URI",
+	"FRONTEND_URL",
+	"BACKEND_URL",
+	"SHARE_BASE_URL",
+];
 
 app.set("trust proxy", 1);
 
@@ -52,10 +62,15 @@ async function getR2Status() {
 	return (await checkR2Connection()) ? "connected" : "disconnected";
 }
 
+async function getGeminiStatus() {
+	return (await checkGeminiConnectionLive()) ? "connected" : "disconnected";
+}
+
 app.get("/api/health", async (req, res) => {
-	const [redisStatus, r2Status] = await Promise.all([
+	const [redisStatus, r2Status, geminiStatus] = await Promise.all([
 		getRedisStatus(),
 		getR2Status(),
+		getGeminiStatus(),
 	]);
 
 	res.json({
@@ -63,6 +78,7 @@ app.get("/api/health", async (req, res) => {
 		mongodb: getMongoStatus(),
 		redis: redisStatus,
 		r2: r2Status,
+		gemini: geminiStatus,
 		uptime: process.uptime(),
 		timestamp: Date.now(),
 	});
@@ -111,6 +127,11 @@ async function printStartupStatus(port) {
 
 function startServer() {
 	try {
+		const missingEnv = REQUIRED_ENV_VARS.filter((key) => !process.env[key]);
+		if (missingEnv.length) {
+			throw new Error(`Missing required environment variables: ${missingEnv.join(", ")}`);
+		}
+
 		initSocket(server);
 
 		const port = Number(process.env.PORT) || 3001;
