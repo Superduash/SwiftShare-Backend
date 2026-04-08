@@ -1,6 +1,6 @@
 const express = require("express");
 const { Readable } = require("stream");
-const bcrypt = require("bcrypt");
+const bcrypt = require("bcryptjs");
 const mammoth = require("mammoth");
 
 const Transfer = require("../models/Transfer");

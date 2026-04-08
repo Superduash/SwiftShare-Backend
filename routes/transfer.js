@@ -1,5 +1,5 @@
 const express = require("express");
-const bcrypt = require("bcrypt");
+const bcrypt = require("bcryptjs");
 
 const Transfer = require("../models/Transfer");
 const { deleteFilesFromR2 } = require("../services/fileManager");
