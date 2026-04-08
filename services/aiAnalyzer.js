@@ -48,10 +48,13 @@ Write naturally like a developer explaining to another person.
 
 Rules:
 - 1 sentence per file
-- no metadata descriptions
+- no file-extension or MIME chatter
 - no file extensions
 - no 'this file contains'
 - no repetition
+
+If trusted details are available for media files (artist, title, album, release year, genres), include them in key_points.
+Use only high-confidence details; if uncertain, omit.
 
 Focus on purpose and meaning.`;
 
@@ -84,6 +87,12 @@ const STOP_WORDS = new Set([
 ]);
 
 const CODE_EXTENSIONS = new Set([".js", ".jsx", ".ts", ".tsx", ".py", ".java", ".go", ".rb", ".php", ".c", ".cpp", ".cs", ".rs", ".swift", ".sh"]);
+const AUDIO_EXTENSIONS = new Set([".mp3", ".wav", ".aac", ".m4a", ".ogg", ".opus", ".flac"]);
+const VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"]);
+const MUSIC_LOOKUP_CACHE = new Map();
+const MUSICBRAINZ_TIMEOUT_MS = 5000;
+const ITUNES_TIMEOUT_MS = 5000;
+const MUSICBRAINZ_USER_AGENT = "SwiftShare/1.0 (https://swiftshare.local)";
 
 function normalizeWhitespace(value) {
 	return String(value || "")
@@ -194,6 +203,309 @@ function getFileName(file) {
 
 function getFileExt(name) {
 	return path.extname(String(name || "")).toLowerCase();
+}
+
+function stripExtension(name) {
+	return String(name || "").replace(/\.[^.]+$/, "");
+}
+
+function toReleaseYear(value) {
+	const match = String(value || "").match(/\b(19|20)\d{2}\b/);
+	return match ? match[0] : "";
+}
+
+function dedupeStrings(values = []) {
+	const seen = new Set();
+	const output = [];
+
+	for (const raw of values) {
+		const normalized = normalizeWhitespace(raw);
+		if (!normalized) {
+			continue;
+		}
+
+		const key = normalized.toLowerCase();
+		if (seen.has(key)) {
+			continue;
+		}
+
+		seen.add(key);
+		output.push(normalized);
+	}
+
+	return output;
+}
+
+function parseMediaNameHints(fileName) {
+	const base = normalizeWhitespace(stripExtension(fileName));
+	if (!base) {
+		return { title: "", artist: "", year: "" };
+	}
+
+	const cleaned = base
+		.replace(/[_]+/g, " ")
+		.replace(/\[(official|lyrics?|audio|video|hd|hq|4k)[^\]]*\]/gi, "")
+		.replace(/\((official|lyrics?|audio|video|hd|hq|4k)[^)]*\)/gi, "")
+		.replace(/\s{2,}/g, " ")
+		.trim();
+
+	const year = toReleaseYear(cleaned);
+	const parts = cleaned.split(/\s[-–—]\s/).map((item) => item.trim()).filter(Boolean);
+
+	if (parts.length >= 2) {
+		const artist = parts[0];
+		const title = parts.slice(1).join(" - ");
+		return {
+			title: normalizeWhitespace(title),
+			artist: normalizeWhitespace(artist),
+			year,
+		};
+	}
+
+	return {
+		title: normalizeWhitespace(cleaned),
+		artist: "",
+		year,
+	};
+}
+
+function pickBestRecording(recordings) {
+	if (!Array.isArray(recordings) || recordings.length === 0) {
+		return null;
+	}
+
+	return [...recordings].sort((a, b) => Number(b?.score || 0) - Number(a?.score || 0))[0] || null;
+}
+
+function mergeMusicMetadata(primary, secondary) {
+	const first = primary || {};
+	const second = secondary || {};
+
+	return {
+		title: normalizeWhitespace(first.title || second.title || ""),
+		artist: normalizeWhitespace(first.artist || second.artist || ""),
+		album: normalizeWhitespace(first.album || second.album || ""),
+		releaseYear: normalizeWhitespace(first.releaseYear || second.releaseYear || ""),
+		genres: dedupeStrings([
+			...(Array.isArray(first.genres) ? first.genres : []),
+			...(Array.isArray(second.genres) ? second.genres : []),
+		]),
+	};
+}
+
+function pickBestItunesResult(results, hints) {
+	if (!Array.isArray(results) || !results.length) return null;
+
+	const titleHint = normalizeWhitespace(hints?.title).toLowerCase();
+	const artistHint = normalizeWhitespace(hints?.artist).toLowerCase();
+
+	function score(item) {
+		const track = normalizeWhitespace(item?.trackName).toLowerCase();
+		const artist = normalizeWhitespace(item?.artistName).toLowerCase();
+		let points = 0;
+
+		if (titleHint) {
+			if (track === titleHint) points += 5;
+			else if (track.includes(titleHint) || titleHint.includes(track)) points += 3;
+		}
+
+		if (artistHint) {
+			if (artist === artistHint) points += 5;
+			else if (artist.includes(artistHint) || artistHint.includes(artist)) points += 3;
+		}
+
+		if (String(item?.kind || "").toLowerCase() === "song") points += 1;
+		return points;
+	}
+
+	return [...results].sort((a, b) => score(b) - score(a))[0] || null;
+}
+
+async function fetchItunesSongMetadata(hints) {
+	const title = normalizeWhitespace(hints?.title);
+	const artist = normalizeWhitespace(hints?.artist);
+	if (!title) return null;
+
+	const term = normalizeWhitespace(`${artist} ${title}`).trim();
+	if (!term) return null;
+
+	const controller = new AbortController();
+	const timeoutId = setTimeout(() => controller.abort(), ITUNES_TIMEOUT_MS);
+
+	try {
+		const url = `https://itunes.apple.com/search?entity=song&limit=5&term=${encodeURIComponent(term)}`;
+		const response = await fetch(url, { signal: controller.signal });
+		if (!response.ok) {
+			return null;
+		}
+
+		const json = await response.json();
+		const best = pickBestItunesResult(json?.results, hints);
+		if (!best) {
+			return null;
+		}
+
+		return {
+			title: normalizeWhitespace(best?.trackName || ""),
+			artist: normalizeWhitespace(best?.artistName || ""),
+			album: normalizeWhitespace(best?.collectionName || ""),
+			releaseYear: toReleaseYear(best?.releaseDate || ""),
+			genres: dedupeStrings([best?.primaryGenreName]).slice(0, 5),
+		};
+	} catch (error) {
+		if (error?.name !== "AbortError") {
+			logError("iTunes metadata lookup failed", error, `TERM: ${term}`);
+		}
+		return null;
+	} finally {
+		clearTimeout(timeoutId);
+	}
+}
+
+async function fetchMusicMetadataFromWeb(hints) {
+	const title = normalizeWhitespace(hints?.title);
+	const artist = normalizeWhitespace(hints?.artist);
+
+	if (!title) {
+		return null;
+	}
+
+	const cacheKey = `${artist.toLowerCase()}|${title.toLowerCase()}`;
+	if (MUSIC_LOOKUP_CACHE.has(cacheKey)) {
+		return MUSIC_LOOKUP_CACHE.get(cacheKey);
+	}
+
+	const queryParts = [];
+	if (title) {
+		queryParts.push(`recording:\"${title.replace(/\"/g, "")}\"`);
+	}
+	if (artist) {
+		queryParts.push(`artist:\"${artist.replace(/\"/g, "")}\"`);
+	}
+
+	if (!queryParts.length) {
+		MUSIC_LOOKUP_CACHE.set(cacheKey, null);
+		return null;
+	}
+
+	const controller = new AbortController();
+	const timeoutId = setTimeout(() => controller.abort(), MUSICBRAINZ_TIMEOUT_MS);
+
+	try {
+		const query = queryParts.join(" AND ");
+		const url = `https://musicbrainz.org/ws/2/recording/?fmt=json&limit=3&query=${encodeURIComponent(query)}`;
+		const response = await fetch(url, {
+			headers: {
+				"User-Agent": MUSICBRAINZ_USER_AGENT,
+				"Accept": "application/json",
+			},
+			signal: controller.signal,
+		});
+
+		let musicbrainzMeta = null;
+		if (response.ok) {
+			const json = await response.json();
+			const best = pickBestRecording(json?.recordings);
+			if (best) {
+				const artistName = (best["artist-credit"] || [])
+					.map((entry) => normalizeWhitespace(entry?.name || entry?.artist?.name || ""))
+					.filter(Boolean)
+					.join(", ");
+
+				musicbrainzMeta = {
+					title: normalizeWhitespace(best?.title || ""),
+					artist: artistName,
+					album: normalizeWhitespace(best?.releases?.[0]?.title || ""),
+					releaseYear: toReleaseYear(best?.["first-release-date"] || best?.releases?.[0]?.date || ""),
+					genres: dedupeStrings((best?.tags || []).map((tag) => tag?.name)).slice(0, 5),
+				};
+			}
+		}
+
+		const itunesMeta = await fetchItunesSongMetadata(hints);
+		const merged = mergeMusicMetadata(musicbrainzMeta, itunesMeta);
+
+		if (!merged.title && !merged.artist) {
+			MUSIC_LOOKUP_CACHE.set(cacheKey, null);
+			return null;
+		}
+
+		MUSIC_LOOKUP_CACHE.set(cacheKey, merged);
+		return merged;
+	} catch (error) {
+		if (error?.name !== "AbortError") {
+			logError("Music metadata lookup failed", error, `TITLE: ${title}`);
+		}
+		const fallback = await fetchItunesSongMetadata(hints);
+		if (fallback) {
+			MUSIC_LOOKUP_CACHE.set(cacheKey, fallback);
+			return fallback;
+		}
+		MUSIC_LOOKUP_CACHE.set(cacheKey, null);
+		return null;
+	} finally {
+		clearTimeout(timeoutId);
+	}
+}
+
+function buildMediaKeyPoints(hints, webMeta, type) {
+	const points = [];
+
+	const title = normalizeWhitespace(webMeta?.title || hints?.title || "");
+	const artist = normalizeWhitespace(webMeta?.artist || hints?.artist || "");
+	const album = normalizeWhitespace(webMeta?.album || "");
+	const releaseYear = normalizeWhitespace(webMeta?.releaseYear || hints?.year || "");
+	const genres = dedupeStrings(Array.isArray(webMeta?.genres) ? webMeta.genres : []);
+
+	if (title) {
+		points.push(`${type === "video" ? "Title" : "Track"}: ${title}`);
+	}
+	if (artist) {
+		points.push(`Artist: ${artist}`);
+	}
+	if (album) {
+		points.push(`Album: ${album}`);
+	}
+	if (releaseYear) {
+		points.push(`Released: ${releaseYear}`);
+	}
+	if (genres.length) {
+		points.push(`Genres: ${genres.join(", ")}`);
+	}
+
+	return dedupeStrings(points);
+}
+
+function buildAudioMeaning(hints, webMeta) {
+	const title = normalizeWhitespace(webMeta?.title || hints?.title || "");
+	const artist = normalizeWhitespace(webMeta?.artist || hints?.artist || "");
+	const album = normalizeWhitespace(webMeta?.album || "");
+	const releaseYear = normalizeWhitespace(webMeta?.releaseYear || hints?.year || "");
+
+	if (title && artist) {
+		const albumPart = album ? ` from ${album}` : "";
+		const yearPart = releaseYear ? ` (${releaseYear})` : "";
+		return `Song \"${title}\" by ${artist}${albumPart}${yearPart}.`;
+	}
+	if (title) {
+		return `Song \"${title}\" is included in this transfer.`;
+	}
+
+	return "Audio clip shared as part of a conversation or media drop.";
+}
+
+function buildVideoMeaning(hints, webMeta) {
+	const title = normalizeWhitespace(webMeta?.title || hints?.title || "");
+	const artist = normalizeWhitespace(webMeta?.artist || hints?.artist || "");
+
+	if (title && artist) {
+		return `Video associated with the song \"${title}\" by ${artist}.`;
+	}
+	if (title) {
+		return `Video associated with \"${title}\".`;
+	}
+
+	return "Short video clip shared in this transfer.";
 }
 
 function getMeaningfulParagraphs(rawText, minLength = 80, maxParagraphs = 5) {
@@ -606,10 +918,16 @@ function inferIntentFromContext(context) {
 
 function buildAnalysisPrompt(context) {
 	const contextText = context
-		.map((item) => `File: ${item.name}\nMeaning: ${item.meaning}`)
+		.map((item) => {
+			const details = Array.isArray(item?.key_points) && item.key_points.length
+				? `\nKnown details:\n${item.key_points.map((point) => `- ${point}`).join("\n")}`
+				: "";
+
+			return `File: ${item.name}\nMeaning: ${item.meaning}${details}`;
+		})
 		.join("\n\n");
 
-	return `${HUMAN_REVIEW_PROMPT}\n\n${contextText}\n\nReturn JSON only in this format:\n{\n  "overall_summary": "2 sentences explaining what this bundle actually is",\n  "files": [\n    { "name": "exact filename", "summary": "one sentence" }\n  ]\n}`;
+	return `${HUMAN_REVIEW_PROMPT}\n\n${contextText}\n\nReturn JSON only in this format:\n{\n  "overall_summary": "2 sentences explaining what this bundle actually is",\n  "files": [\n    { "name": "exact filename", "summary": "one sentence", "key_points": ["optional detail"] }\n  ]\n}`;
 }
 
 function buildRewritePrompt(context, previousOutput) {
@@ -634,13 +952,28 @@ function mapFilesToContext(context, aiFiles) {
 
 		return {
 			name: item.name,
-			summary: clipText(ensureSentence(picked?.summary || ""), 220),
+			summary: (() => {
+				const aiSummary = ensureSentence(picked?.summary || "");
+				const fallbackSummary = ensureSentence(item.meaning || "");
+
+				if (item.type === "audio" || item.type === "video") {
+					if (fallbackSummary) {
+						return fallbackSummary;
+					}
+				}
+
+				return aiSummary || fallbackSummary;
+			})(),
+			key_points: dedupeStrings([
+				...(Array.isArray(item?.key_points) ? item.key_points : []),
+				...(Array.isArray(picked?.key_points) ? picked.key_points : []),
+			]),
 		};
 	});
 }
 
 function normalizeAiOutput(output, context) {
-	const overallSummary = clipText(String(output?.overall_summary || output?.summary || ""), 420);
+	const overallSummary = normalizeWhitespace(String(output?.overall_summary || output?.summary || ""));
 	const files = mapFilesToContext(context, output?.files);
 
 	return {
@@ -738,9 +1071,10 @@ async function buildAIContext(files) {
 
 		let meaning = "";
 		let type = "file";
+		let keyPoints = [];
 
 		if (!buffer || !Buffer.isBuffer(buffer)) {
-			context.push({ name, meaning: "Shared file with limited readable content.", type });
+			context.push({ name, meaning: "Shared file with limited readable content.", type, key_points: [] });
 			continue;
 		}
 
@@ -765,12 +1099,18 @@ async function buildAIContext(files) {
 		} else if (ext === ".zip" || mime.includes("zip")) {
 			type = "zip";
 			meaning = summarizeZipMeaning(buffer);
-		} else if (mime.startsWith("video/") || [".mp4", ".mov", ".avi", ".mkv", ".webm"].includes(ext)) {
+		} else if (mime.startsWith("video/") || VIDEO_EXTENSIONS.has(ext)) {
 			type = "video";
-			meaning = "Short video clip, likely personal recording or shared media.";
-		} else if (mime.startsWith("audio/") || [".mp3", ".wav", ".aac", ".m4a", ".ogg"].includes(ext)) {
+			const hints = parseMediaNameHints(name);
+			const webMeta = await fetchMusicMetadataFromWeb(hints);
+			meaning = buildVideoMeaning(hints, webMeta);
+			keyPoints = buildMediaKeyPoints(hints, webMeta, "video");
+		} else if (mime.startsWith("audio/") || AUDIO_EXTENSIONS.has(ext)) {
 			type = "audio";
-			meaning = "Audio clip shared as part of a conversation or media drop.";
+			const hints = parseMediaNameHints(name);
+			const webMeta = await fetchMusicMetadataFromWeb(hints);
+			meaning = buildAudioMeaning(hints, webMeta);
+			keyPoints = buildMediaKeyPoints(hints, webMeta, "audio");
 		} else if (ext === ".docx" || mime.includes("wordprocessingml")) {
 			type = "docx";
 			meaning = await extractDocxMeaning(buffer);
@@ -790,8 +1130,9 @@ async function buildAIContext(files) {
 
 		context.push({
 			name,
-			meaning: clipText(meaning, 190),
+			meaning: clipText(meaning, 560),
 			type,
+			key_points: keyPoints,
 		});
 	}
 

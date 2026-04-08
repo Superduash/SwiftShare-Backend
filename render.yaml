@@ -1,0 +1,50 @@
+services:
+  - type: web
+    name: swiftshare-backend
+    env: node
+    region: oregon
+    plan: free
+    buildCommand: npm install --production=false
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # All secrets below must be set manually in the Render dashboard
+      # (Dashboard → Environment → Add Environment Variable)
+      - key: MONGODB_URI
+        sync: false
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET_NAME
+        sync: false
+      - key: R2_PUBLIC_URL
+        sync: false
+      - key: R2_REGION
+        value: auto
+      - key: FRONTEND_URL
+        sync: false
+      - key: SHARE_BASE_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: SENTRY_DSN
+        sync: false
+      - key: SESSION_EXPIRY_MINUTES
+        value: "10"
+      - key: MAX_FILE_SIZE_MB
+        value: "100"
+      - key: MAX_FILE_COUNT
+        value: "10"
+      - key: CODE_LENGTH
+        value: "6"
