@@ -1,5 +1,6 @@
 const { Server } = require("socket.io");
 const Transfer = require("../models/Transfer");
+const { getSubnet } = require("../utils/helpers");
 const { logEvent, logError } = require("../utils/logger");
 
 let ioInstance;
@@ -89,6 +90,50 @@ function scheduleTransferCountdown(code, expiresAt) {
 	countdownMap.set(normalizedCode, { intervalId });
 }
 
+function getSocketIp(socket) {
+	const forwardedFor = socket?.handshake?.headers?.["x-forwarded-for"];
+	if (typeof forwardedFor === "string" && forwardedFor.trim()) {
+		return forwardedFor.split(",")[0].trim();
+	}
+
+	return String(socket?.handshake?.address || "").trim();
+}
+
+async function emitNearbyDevices(socket) {
+	const clientIp = getSocketIp(socket);
+	const subnet = getSubnet(clientIp);
+
+	if (!subnet) {
+		socket.emit("nearby-devices", { devices: [] });
+		return;
+	}
+
+	const now = new Date();
+	const candidates = await Transfer.find({
+		isDeleted: false,
+		expiresAt: { $gt: now },
+		senderSocketId: { $exists: true, $ne: "" },
+		senderIp: { $regex: `^${subnet.replace(/\./g, "\\.")}\\.` },
+	})
+		.sort({ createdAt: -1 })
+		.limit(20)
+		.lean();
+
+	const devices = candidates
+		.map((transfer) => ({
+			code: transfer.code,
+			fileCount: Number(transfer.fileCount || transfer.files?.length || 0),
+			totalSize: Number(transfer.totalSize || 0),
+			category: transfer.ai?.category || "Other",
+			deviceName: transfer.senderDeviceName || "Unknown Device",
+			expiresAt: transfer.expiresAt,
+			socketId: String(transfer.senderSocketId || ""),
+		}))
+		.filter((device) => device.socketId && device.socketId !== socket.id);
+
+	socket.emit("nearby-devices", { devices });
+}
+
 function initSocket(server) {
 	const allowedOrigins = String(process.env.FRONTEND_URL || "")
 		.split(",")
@@ -174,6 +219,24 @@ function initSocket(server) {
 				timestamp: Date.now(),
 				socketId: socket.id,
 				code: normalizedCode || null,
+			});
+
+			void emitNearbyDevices(socket).catch((error) => {
+				logError("Failed to emit nearby devices", error, `SOCKET: ${socket.id}`);
+			});
+		});
+
+		socket.on("push-transfer-offer", ({ targetSocketId, code, filename } = {}) => {
+			const safeTargetSocketId = String(targetSocketId || "").trim();
+			const safeCode = normalizeCode(code);
+			if (!safeTargetSocketId || !safeCode || safeTargetSocketId === socket.id) {
+				return;
+			}
+
+			ioInstance.to(safeTargetSocketId).emit("receive-transfer-offer", {
+				code: safeCode,
+				filename: String(filename || "file").slice(0, 180),
+				senderId: socket.id,
 			});
 		});
 
