@@ -22,6 +22,36 @@ const {
 
 const router = express.Router();
 const MINUTE_MS = 60 * 1000;
+const STATUS_CACHE_TTL_MS = 1200;
+const ACTIVITY_CACHE_TTL_MS = 1200;
+const statusCache = new Map();
+const activityCache = new Map();
+
+function getCachedPayload(cache, code) {
+	const entry = cache.get(code);
+	if (!entry) {
+		return null;
+	}
+
+	if (entry.expiresAt <= Date.now()) {
+		cache.delete(code);
+		return null;
+	}
+
+	return entry.payload;
+}
+
+function setCachedPayload(cache, code, payload, ttlMs) {
+	cache.set(code, {
+		payload,
+		expiresAt: Date.now() + ttlMs,
+	});
+}
+
+function invalidateTransferCache(code) {
+	statusCache.delete(code);
+	activityCache.delete(code);
+}
 
 function extractPasswordFromRequest(req) {
 	const value = req.body?.password;
@@ -107,16 +137,24 @@ router.post("/:code/verify-password", validateCode, async (req, res, next) => {
 router.get("/:code/activity", validateCode, async (req, res, next) => {
 	try {
 		const { code } = req.params;
+		const cached = getCachedPayload(activityCache, code);
+		if (cached) {
+			return res.status(200).json(cached);
+		}
+
 		const transfer = await Transfer.findOne({ code }).lean();
 
 		if (!transfer) {
 			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
 		}
 
-		return res.status(200).json({
+		const payload = {
 			code: transfer.code,
 			activity: Array.isArray(transfer.activity) ? transfer.activity : [],
-		});
+		};
+
+		setCachedPayload(activityCache, code, payload, ACTIVITY_CACHE_TTL_MS);
+		return res.status(200).json(payload);
 	} catch (error) {
 		return next(error);
 	}
@@ -125,6 +163,11 @@ router.get("/:code/activity", validateCode, async (req, res, next) => {
 router.get("/:code/status", validateCode, async (req, res, next) => {
 	try {
 		const { code } = req.params;
+		const cached = getCachedPayload(statusCache, code);
+		if (cached) {
+			return res.status(200).json(cached);
+		}
+
 		const transfer = await Transfer.findOne({ code }).lean();
 
 		if (!transfer) {
@@ -135,13 +178,16 @@ router.get("/:code/status", validateCode, async (req, res, next) => {
 			? Math.max(0, Math.ceil((new Date(transfer.expiresAt).getTime() - Date.now()) / 1000))
 			: 0;
 
-		return res.status(200).json({
+		const payload = {
 			code: transfer.code,
 			status: getTransferStatus(transfer),
 			downloadCount: Number(transfer.downloadCount || 0),
 			expiresAt: transfer.expiresAt,
 			secondsRemaining,
-		});
+		};
+
+		setCachedPayload(statusCache, code, payload, STATUS_CACHE_TTL_MS);
+		return res.status(200).json(payload);
 	} catch (error) {
 		return next(error);
 	}
@@ -187,6 +233,7 @@ router.post("/:code/extend", validateCode, async (req, res, next) => {
 			timestamp: new Date(),
 		});
 		await transfer.save();
+		invalidateTransferCache(code);
 
 		// Schedule new countdown AFTER save
 		scheduleTransferCountdown(code, expiresAt);
@@ -230,6 +277,7 @@ router.delete("/:code", validateCode, async (req, res, next) => {
 				timestamp: new Date(),
 			});
 			await transfer.save();
+			invalidateTransferCache(code);
 			clearTransferCountdown(code);
 			emitToRoom(code, "transfer-cancelled", { code, status: "CANCELLED" });
 			logEvent("Transfer cancelled", `CODE: ${code}`);
@@ -290,6 +338,7 @@ router.post("/:code/burn-finalize", validateCode, async (req, res, next) => {
 				},
 			},
 		);
+		invalidateTransferCache(code);
 
 		clearTransferCountdown(code);
 		emitToRoom(code, "transfer-deleted", { code, status: "DELETED", reason: "burn" });

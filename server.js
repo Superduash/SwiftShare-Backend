@@ -36,12 +36,36 @@ const { version } = require("./package.json");
 const app = express();
 const server = http.createServer(app);
 const isProduction = String(process.env.NODE_ENV || "").toLowerCase() === "production";
+const allowAllOrigins = String(process.env.CORS_ALLOW_ALL_ORIGINS || "").toLowerCase() === "true";
 
 function getAllowedFrontendOrigins() {
-	return String(process.env.FRONTEND_URL || "")
+	const configured = `${String(process.env.FRONTEND_URL || "")},${String(process.env.CORS_EXTRA_ORIGINS || "")}`;
+
+	return configured
 		.split(",")
-		.map((origin) => origin.trim())
+		.map((origin) => normalizeConfiguredOrigin(origin))
 		.filter(Boolean);
+}
+
+function normalizeConfiguredOrigin(origin) {
+	const trimmed = String(origin || "").trim();
+	if (!trimmed) {
+		return "";
+	}
+
+	if (trimmed === "*") {
+		return "*";
+	}
+
+	if (/^(https?:\/\/)?\*\./i.test(trimmed)) {
+		return trimmed.replace(/\/+$/, "").toLowerCase();
+	}
+
+	const withProtocol = /^[a-z]+:\/\//i.test(trimmed)
+		? trimmed
+		: `https://${trimmed}`;
+
+	return withProtocol.replace(/\/+$/, "").toLowerCase();
 }
 
 function parseOrigin(origin) {
@@ -50,6 +74,18 @@ function parseOrigin(origin) {
 	} catch {
 		return null;
 	}
+}
+
+function getOriginPort(parsed) {
+	if (!parsed) {
+		return "";
+	}
+
+	if (parsed.port) {
+		return parsed.port;
+	}
+
+	return parsed.protocol === "https:" ? "443" : "80";
 }
 
 function isLoopbackHost(hostname) {
@@ -88,17 +124,38 @@ function isDevOriginAllowed(origin) {
 }
 
 function originsMatch(requestOrigin, configuredOrigin) {
+	if (configuredOrigin === "*") {
+		return true;
+	}
+
+	const wildcardMatch = String(configuredOrigin || "").match(/^(https?:\/\/)?\*\.([^/:]+)$/i);
+	if (wildcardMatch) {
+		const reqParsed = parseOrigin(requestOrigin);
+		if (!reqParsed) {
+			return false;
+		}
+
+		const requiredProtocol = wildcardMatch[1] ? wildcardMatch[1].toLowerCase() : "";
+		if (requiredProtocol && reqParsed.protocol !== requiredProtocol) {
+			return false;
+		}
+
+		const suffix = String(wildcardMatch[2] || "").toLowerCase();
+		const hostname = String(reqParsed.hostname || "").toLowerCase();
+		return hostname === suffix || hostname.endsWith(`.${suffix}`);
+	}
+
 	const reqParsed = parseOrigin(requestOrigin);
 	const cfgParsed = parseOrigin(configuredOrigin);
 	if (!reqParsed || !cfgParsed) {
-		return requestOrigin === configuredOrigin;
+		return normalizeConfiguredOrigin(requestOrigin) === normalizeConfiguredOrigin(configuredOrigin);
 	}
 
 	if (reqParsed.protocol !== cfgParsed.protocol) {
 		return false;
 	}
 
-	if (reqParsed.port !== cfgParsed.port) {
+	if (getOriginPort(reqParsed) !== getOriginPort(cfgParsed)) {
 		return false;
 	}
 
@@ -117,6 +174,11 @@ function corsOrigin(origin, callback) {
 		return;
 	}
 
+	if (allowAllOrigins) {
+		callback(null, true);
+		return;
+	}
+
 	if (!isProduction && isDevOriginAllowed(origin)) {
 		callback(null, true);
 		return;
@@ -130,6 +192,7 @@ function corsOrigin(origin, callback) {
 		return;
 	}
 
+	logEvent("Blocked HTTP CORS origin", `ORIGIN: ${origin}`);
 	callback(null, false);
 }
 
