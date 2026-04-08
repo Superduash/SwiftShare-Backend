@@ -10,6 +10,8 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      - key: LOG_LEVEL
+        value: warn
       # All secrets below must be set manually in the Render dashboard
       # (Dashboard → Environment → Add Environment Variable)
       - key: MONGODB_URI
@@ -56,6 +58,10 @@ services:
         value: "20000"
       - key: AI_CACHE_TTL_SECONDS
         value: "3600"
+      - key: HEALTH_CACHE_TTL_MS
+        value: "15000"
+      - key: HEALTH_CHECK_TIMEOUT_MS
+        value: "4000"
       - key: BURN_IDLE_FINALIZE_MS
         value: "90000"
       - key: SESSION_EXPIRY_MINUTES
