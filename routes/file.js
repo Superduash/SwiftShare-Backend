@@ -3,7 +3,7 @@ const express = require("express");
 const Transfer = require("../models/Transfer");
 const { rateLimitMetadata } = require("../middleware/rateLimiter");
 const { validateCode } = require("../middleware/validateCode");
-const { getClientIp, getDeviceName, isTransferExpired, getTransferStatus } = require("../utils/helpers");
+const { getClientIp, getDeviceName, isTransferExpired, getTransferStatus, isBurnClaimOwner } = require("../utils/helpers");
 const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
 const { getObjectFromR2 } = require("../services/fileManager");
 const { analyzeTransfer } = require("../services/aiAnalyzer");
@@ -20,6 +20,19 @@ function isUsableAiResult(aiResult) {
 	return Boolean(summary && Array.isArray(aiResult.files) && aiResult.files.length > 0);
 }
 
+function isBurnLockedForRequester(transfer, req) {
+	if (!transfer?.burnAfterDownload || !transfer?.burnClaimOwner || transfer?.isDeleted) {
+		return false;
+	}
+
+	const senderIp = String(transfer?.senderIp || "").trim();
+	if (senderIp && getClientIp(req) === senderIp) {
+		return false;
+	}
+
+	return !isBurnClaimOwner(transfer, req);
+}
+
 router.post("/:code/analyze", rateLimitMetadata, validateCode, async (req, res, next) => {
 	try {
 		const { code } = req.params;
@@ -29,7 +42,10 @@ router.post("/:code/analyze", rateLimitMetadata, validateCode, async (req, res, 
 		if (!transfer) {
 			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
 		}
-		if (transfer.isDeleted || (transfer.burnAfterDownload && transfer.downloadCount >= 1)) {
+		if (transfer.isDeleted) {
+			return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
+		}
+		if (isBurnLockedForRequester(transfer, req)) {
 			return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
 		}
 		if (isTransferExpired(transfer)) {
@@ -95,14 +111,15 @@ router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => 
 			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
 		}
 
-		// Check burn-before-isDeleted so we return ALREADY_DOWNLOADED (not CODE_NOT_FOUND)
-		// even after finalizeBurnDownload has set isDeleted: true.
-		if (transfer.burnAfterDownload && transfer.downloadCount >= 1) {
-			return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
+		if (transfer.isDeleted) {
+			if (transfer.burnAfterDownload && !transfer.cancelledAt) {
+				return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
+			}
+			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
 		}
 
-		if (transfer.isDeleted) {
-			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
+		if (isBurnLockedForRequester(transfer, req)) {
+			return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
 		}
 
 		if (isTransferExpired(transfer)) {

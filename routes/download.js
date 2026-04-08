@@ -13,6 +13,8 @@ const {
 	sanitizeFilename,
 	getDeviceName,
 	getClientIp,
+	getRequestFingerprint,
+	isBurnClaimOwner,
 	formatBytes,
 	isTransferExpired,
 } = require("../utils/helpers");
@@ -21,7 +23,7 @@ const { logEvent, logError } = require("../utils/logger");
 
 const router = express.Router();
 
-function sendUnavailableTransferResponse(res, transfer) {
+function sendUnavailableTransferResponse(req, res, transfer) {
 	if (!transfer) {
 		return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
 	}
@@ -30,7 +32,14 @@ function sendUnavailableTransferResponse(res, transfer) {
 		return res.status(410).json(buildErrorResponse(ERROR_CODES.TRANSFER_EXPIRED));
 	}
 
-	if (transfer.isDeleted || (transfer.burnAfterDownload && transfer.downloadCount >= 1)) {
+	if (transfer.isDeleted) {
+		return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
+	}
+
+	const senderIp = String(transfer?.senderIp || "").trim();
+	const isSenderRequest = senderIp && senderIp === getClientIp(req);
+
+	if (transfer.burnAfterDownload && transfer.burnClaimOwner && !isSenderRequest && !isBurnClaimOwner(transfer, req)) {
 		return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
 	}
 
@@ -328,58 +337,117 @@ async function streamZip(res, code, files) {
 	return totalBytes;
 }
 
-async function claimBurnDownload(transferId) {
-	return Transfer.findOneAndUpdate(
+async function claimBurnDownload(transfer, req) {
+	const requesterFingerprint = getRequestFingerprint(req);
+	const now = new Date();
+
+	if (transfer?.burnClaimOwner === requesterFingerprint) {
+		const ownedTransfer = await Transfer.findOneAndUpdate(
+			{
+				_id: transfer._id,
+				isDeleted: false,
+				burnAfterDownload: true,
+				burnClaimOwner: requesterFingerprint,
+			},
+			{ $set: { burnLastActiveAt: now } },
+			{ new: true },
+		);
+
+		return { transfer: ownedTransfer, claimedNow: false };
+	}
+
+	if (transfer?.burnClaimOwner && transfer.burnClaimOwner !== requesterFingerprint) {
+		return { transfer: null, claimedNow: false };
+	}
+
+	const claimedTransfer = await Transfer.findOneAndUpdate(
 		{
-			_id: transferId,
+			_id: transfer._id,
 			isDeleted: false,
 			burnAfterDownload: true,
-			downloadCount: 0,
+			$or: [
+				{ burnClaimOwner: { $exists: false } },
+				{ burnClaimOwner: null },
+				{ burnClaimOwner: "" },
+			],
 		},
-		{ $inc: { downloadCount: 1 } },
+		{
+			$set: {
+				burnClaimOwner: requesterFingerprint,
+				burnClaimedAt: now,
+				burnLastActiveAt: now,
+			},
+		},
 		{ new: true },
 	);
+
+	if (claimedTransfer) {
+		return { transfer: claimedTransfer, claimedNow: true };
+	}
+
+	const ownerTransfer = await Transfer.findOneAndUpdate(
+		{
+			_id: transfer._id,
+			isDeleted: false,
+			burnAfterDownload: true,
+			burnClaimOwner: requesterFingerprint,
+		},
+		{ $set: { burnLastActiveAt: now } },
+		{ new: true },
+	);
+
+	return { transfer: ownerTransfer, claimedNow: false };
 }
 
 async function finalizeDownload(transfer, {
 	isBurnFlow,
+	claimedNow,
 	downloadDuration,
 	downloadSpeed,
 	receiverDevice,
 	receiverIp,
 }) {
 	if (isBurnFlow) {
-		await deleteFilesFromR2(transfer.files);
 		await Transfer.updateOne(
 			{ _id: transfer._id },
 			{
+				$inc: { downloadCount: 1 },
 				$set: {
-					isDeleted: true,
 					downloadDuration,
 					downloadSpeed,
+					burnLastActiveAt: new Date(),
 				},
 				$push: {
-					activity: {
-						$each: [
-							{
-								event: "downloaded",
-								device: receiverDevice,
-								ip: receiverIp,
-								timestamp: new Date(),
-							},
-							{
-								event: "burned",
-								device: "System",
-								ip: "",
-								timestamp: new Date(),
-							},
-						],
-					},
+					activity: claimedNow
+						? {
+							$each: [
+								{
+									event: "burn_claimed",
+									device: receiverDevice,
+									ip: receiverIp,
+									timestamp: new Date(),
+								},
+								{
+									event: "downloaded",
+									device: receiverDevice,
+									ip: receiverIp,
+									timestamp: new Date(),
+								},
+							],
+						}
+						: {
+							event: "downloaded",
+							device: receiverDevice,
+							ip: receiverIp,
+							timestamp: new Date(),
+						},
 				},
 			},
 		);
-		clearTransferCountdown(transfer.code);
-		emitToRoom(transfer.code, "transfer-deleted", { code: transfer.code, status: "DELETED", reason: "burn" });
+
+		if (claimedNow) {
+			emitToRoom(transfer.code, "transfer-claimed", { code: transfer.code, status: "CLAIMED" });
+		}
 		return;
 	}
 
@@ -433,7 +501,7 @@ router.get("/:code", rateLimitDownload, validateCode, async (req, res, next) => 
 		const receiverDevice = getDeviceName(req.get("user-agent") || "");
 		const receiverIp = getClientIp(req);
 
-		const unavailableResponse = sendUnavailableTransferResponse(res, transfer);
+		const unavailableResponse = sendUnavailableTransferResponse(req, res, transfer);
 		if (unavailableResponse) {
 			return unavailableResponse;
 		}
@@ -447,12 +515,14 @@ router.get("/:code", rateLimitDownload, validateCode, async (req, res, next) => 
 		logEvent("Download started", `CODE: ${code}`, `DEVICE: ${receiverDevice}`);
 
 		let isBurnFlow = false;
+		let claimedNow = false;
 		if (transfer.burnAfterDownload) {
-			const claimedTransfer = await claimBurnDownload(transfer._id);
-			if (!claimedTransfer) {
+			const burnClaim = await claimBurnDownload(transfer, req);
+			if (!burnClaim?.transfer) {
 				return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
 			}
-			transfer = claimedTransfer;
+			transfer = burnClaim.transfer;
+			claimedNow = Boolean(burnClaim.claimedNow);
 			isBurnFlow = true;
 		}
 
@@ -478,6 +548,7 @@ router.get("/:code", rateLimitDownload, validateCode, async (req, res, next) => 
 
 		await finalizeDownload(transfer, {
 			isBurnFlow,
+			claimedNow,
 			downloadDuration,
 			downloadSpeed,
 			receiverDevice,
@@ -514,7 +585,7 @@ router.get("/:code/single/:index", rateLimitDownload, validateCode, async (req, 
 		const receiverDevice = getDeviceName(req.get("user-agent") || "");
 		const receiverIp = getClientIp(req);
 
-		const unavailableResponse = sendUnavailableTransferResponse(res, transfer);
+		const unavailableResponse = sendUnavailableTransferResponse(req, res, transfer);
 		if (unavailableResponse) {
 			return unavailableResponse;
 		}
@@ -528,12 +599,14 @@ router.get("/:code/single/:index", rateLimitDownload, validateCode, async (req, 
 		logEvent("Download started", `CODE: ${code}`, `DEVICE: ${receiverDevice}`, "MODE: single");
 
 		let isBurnFlow = false;
+		let claimedNow = false;
 		if (transfer.burnAfterDownload) {
-			const claimedTransfer = await claimBurnDownload(transfer._id);
-			if (!claimedTransfer) {
+			const burnClaim = await claimBurnDownload(transfer, req);
+			if (!burnClaim?.transfer) {
 				return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
 			}
-			transfer = claimedTransfer;
+			transfer = burnClaim.transfer;
+			claimedNow = Boolean(burnClaim.claimedNow);
 			isBurnFlow = true;
 		}
 
@@ -552,6 +625,7 @@ router.get("/:code/single/:index", rateLimitDownload, validateCode, async (req, 
 
 		await finalizeDownload(transfer, {
 			isBurnFlow,
+			claimedNow,
 			downloadDuration,
 			downloadSpeed,
 			receiverDevice,
@@ -586,7 +660,7 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 		const { code, index } = req.params;
 		const transfer = await Transfer.findOne({ code });
 
-		const unavailableResponse = sendUnavailableTransferResponse(res, transfer);
+		const unavailableResponse = sendUnavailableTransferResponse(req, res, transfer);
 		if (unavailableResponse) {
 			return unavailableResponse;
 		}
@@ -669,7 +743,7 @@ router.get("/:code/preview/:index/docx-html", validateCode, async (req, res, nex
 		const { code, index } = req.params;
 		const transfer = await Transfer.findOne({ code });
 
-		const unavailableResponse = sendUnavailableTransferResponse(res, transfer);
+		const unavailableResponse = sendUnavailableTransferResponse(req, res, transfer);
 		if (unavailableResponse) {
 			return unavailableResponse;
 		}

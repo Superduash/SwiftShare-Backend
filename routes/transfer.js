@@ -11,7 +11,14 @@ const {
 const { validateCode } = require("../middleware/validateCode");
 const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
 const { logEvent } = require("../utils/logger");
-const { getClientIp, getDeviceName, isTransferExpired, getTransferStatus } = require("../utils/helpers");
+const {
+	getClientIp,
+	getDeviceName,
+	isTransferExpired,
+	getTransferStatus,
+	getRequestFingerprint,
+	isBurnClaimOwner,
+} = require("../utils/helpers");
 
 const router = express.Router();
 const MINUTE_MS = 60 * 1000;
@@ -232,6 +239,63 @@ router.delete("/:code", validateCode, async (req, res, next) => {
 			success: true,
 			code,
 		});
+	} catch (error) {
+		return next(error);
+	}
+});
+
+router.post("/:code/burn-finalize", validateCode, async (req, res, next) => {
+	try {
+		const { code } = req.params;
+		const transfer = await Transfer.findOne({ code });
+
+		if (!transfer) {
+			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
+		}
+
+		if (!transfer.burnAfterDownload) {
+			return res.status(200).json({ success: true, code, status: transfer.status || "ACTIVE" });
+		}
+
+		if (transfer.isDeleted) {
+			return res.status(200).json({ success: true, code, status: "DELETED" });
+		}
+
+		if (!transfer.burnClaimOwner) {
+			return res.status(409).json(buildErrorResponse(ERROR_CODES.SERVER_ERROR, "Burn session has not been claimed yet"));
+		}
+
+		if (!isBurnClaimOwner(transfer, req)) {
+			return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
+		}
+
+		await deleteFilesFromR2(transfer.files);
+
+		const finalizedAt = new Date();
+		await Transfer.updateOne(
+			{ _id: transfer._id, isDeleted: false },
+			{
+				$set: {
+					isDeleted: true,
+					burnFinalizedAt: finalizedAt,
+					burnLastActiveAt: finalizedAt,
+				},
+				$push: {
+					activity: {
+						event: "burned",
+						device: getDeviceName(req.get("user-agent") || ""),
+						ip: getClientIp(req),
+						timestamp: finalizedAt,
+					},
+				},
+			},
+		);
+
+		clearTransferCountdown(code);
+		emitToRoom(code, "transfer-deleted", { code, status: "DELETED", reason: "burn" });
+		logEvent("Burn finalized", `CODE: ${code}`, `OWNER: ${getRequestFingerprint(req).slice(0, 12)}`);
+
+		return res.status(200).json({ success: true, code, status: "DELETED" });
 	} catch (error) {
 		return next(error);
 	}
