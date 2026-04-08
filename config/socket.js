@@ -1,4 +1,4 @@
-﻿const { Server } = require("socket.io");
+const { Server } = require("socket.io");
 const Transfer = require("../models/Transfer");
 const { logEvent, logError } = require("../utils/logger");
 
@@ -175,6 +175,17 @@ function initSocket(server) {
 				socketId: socket.id,
 				code: normalizedCode || null,
 			});
+		});
+
+		socket.on("disconnect", async () => {
+			try {
+				await Transfer.updateMany(
+					{ senderSocketId: socket.id },
+					{ $set: { senderSocketId: "" } },
+				);
+			} catch (error) {
+				logError("Failed to clean up sender socket on disconnect", error);
+			}
 		});
 	});
 
