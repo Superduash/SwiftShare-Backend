@@ -8,16 +8,10 @@ const { generateAIResponse } = require("../config/gemini");
 const { logEvent, logError } = require("../utils/logger");
 
 const ALLOWED_CATEGORIES = new Set([
-	"Assignment",
-	"Notes",
-	"Invoice",
-	"Report",
-	"Image",
-	"Video",
-	"Audio",
-	"Code",
-	"Presentation",
-	"Spreadsheet",
+	"Codebase",
+	"Asset-Bundle",
+	"Mixed-Media",
+	"Document",
 	"Other",
 ]);
 
@@ -242,7 +236,7 @@ function chunkText(text, chunkChars = 3500, maxChunks = 20) {
 }
 
 function normalizeSummary(value, fallbackSummary) {
-	const cleaned = cleanPreviewText(String(value || ""), 700).replace(/\n+/g, " ").trim();
+	const cleaned = cleanPreviewText(String(value || ""), 1200).replace(/\n+/g, " ").trim();
 	if (!cleaned || cleaned.length < 24) {
 		return fallbackSummary;
 	}
@@ -271,51 +265,51 @@ function detectCategoryWithoutAI(filename, mimeType, previewText = "") {
 	const lowerPreview = String(previewText || "").toLowerCase();
 
 	if (IMAGE_EXTENSIONS.has(ext) || lowerMime.startsWith("image/")) {
-		return "Image";
+		return "Mixed-Media";
 	}
 
 	if (CODE_EXTENSIONS.has(ext)) {
-		return "Code";
+		return "Codebase";
 	}
 
 	if (PRESENTATION_EXTENSIONS.has(ext) || lowerMime.includes("presentation")) {
-		return "Presentation";
+		return "Document";
 	}
 
 	if (SPREADSHEET_EXTENSIONS.has(ext) || lowerMime.includes("spreadsheet") || lowerMime.includes("csv") || lowerMime.includes("excel")) {
-		return "Spreadsheet";
+		return "Document";
 	}
 
 	if (VIDEO_EXTENSIONS.has(ext) || lowerMime.startsWith("video/")) {
-		return "Video";
+		return "Mixed-Media";
 	}
 
 	if (AUDIO_EXTENSIONS.has(ext) || lowerMime.startsWith("audio/")) {
-		return "Audio";
+		return "Mixed-Media";
 	}
 
 	if (/invoice|receipt|bill|quotation/.test(lowerName) || /invoice|subtotal|tax|amount due|bill to/.test(lowerPreview)) {
-		return "Invoice";
+		return "Document";
 	}
 
 	if (/assignment|homework|coursework|lab/.test(lowerName) || /question\s*\d+|submission|deadline|student/.test(lowerPreview)) {
-		return "Assignment";
+		return "Document";
 	}
 
 	if (/report|analysis|findings|executive/.test(lowerName) || /executive summary|methodology|conclusion/.test(lowerPreview)) {
-		return "Report";
+		return "Document";
 	}
 
 	if (/notes|meeting|minutes|lecture/.test(lowerName) || /agenda|notes|minutes/.test(lowerPreview)) {
-		return "Notes";
+		return "Document";
 	}
 
 	if (TEXT_EXTENSIONS.has(ext) || lowerMime.startsWith("text/")) {
-		return "Notes";
+		return "Document";
 	}
 
 	if (ARCHIVE_EXTENSIONS.has(ext) || lowerMime.includes("zip")) {
-		return "Other";
+		return "Asset-Bundle";
 	}
 
 	return "Other";
@@ -759,16 +753,10 @@ async function preprocessFileContent(file) {
 
 function pickDominantCategory(enrichedFiles) {
 	const priorityOrder = [
-		"Invoice",
-		"Assignment",
-		"Report",
-		"Presentation",
-		"Spreadsheet",
-		"Code",
-		"Image",
-		"Video",
-		"Audio",
-		"Notes",
+		"Codebase",
+		"Asset-Bundle",
+		"Document",
+		"Mixed-Media",
 		"Other",
 	];
 
@@ -796,15 +784,11 @@ function pickDominantCategory(enrichedFiles) {
 }
 
 function inferDetectedIntent(category, fileCount) {
-	if (category === "Assignment") return "sharing coursework";
-	if (category === "Invoice") return "sending invoice";
-	if (category === "Code") return "sharing source code";
-	if (category === "Presentation") return "sharing presentation";
-	if (category === "Spreadsheet") return "sharing spreadsheet";
-	if (category === "Image") return fileCount > 1 ? "sharing photos" : "sharing image";
-	if (category === "Report") return "sharing report";
-	if (category === "Notes") return "sharing notes";
-	return "sharing files";
+	if (category === "Codebase") return "project handoff";
+	if (category === "Asset-Bundle") return "asset distribution";
+	if (category === "Document") return "document handoff";
+	if (category === "Mixed-Media") return fileCount > 1 ? "media bundle share" : "media share";
+	return "file transfer";
 }
 
 function buildFallbackSummary({ fileCount, totalSize, category, keywords, detectedIntent }) {
@@ -819,58 +803,45 @@ function buildFallbackSummary({ fileCount, totalSize, category, keywords, detect
 	return `Single ${category.toLowerCase()} file (${formatSize(totalSize)}) likely shared for ${detectedIntent}.${keywordText}`.trim();
 }
 
-function buildPrompt({ fileCount, totalSize, primaryFilename, primaryMime, manifest, preview, keywords }) {
-  return [
-    "You are a file analysis engine for SwiftShare, a file-sharing platform.",
-    "Analyze the transferred files below and return a JSON object.",
-    "",
-    "Your job: Read the ACTUAL extracted content, understand what the files ARE about, and provide specific, useful analysis.",
-    "",
-    "Analysis rules by file type:",
-    "- PDF/Document: Identify the main topic, thesis, or purpose. Extract key headings, names, dates, or figures mentioned in the text.",
-    "- Code: Explain what the code does functionally. Name the key functions, classes, or endpoints. Identify the framework/language.",
-    "- Image: If OCR text was extracted, summarize what the text says. If no text, describe the image purpose based on filename/metadata.",
-    "- Spreadsheet/CSV: Identify column names, data subject, and row count.",
-    "- Archive/ZIP: Summarize the structure and likely purpose based on contained filenames.",
-    "- Video/Audio: Infer purpose from filename, size, and format.",
-    "",
-    "JSON schema:",
-    "{",
-    '  "overall_summary": "2-3 specific sentences. State what this transfer contains and its purpose. Reference actual content (names, topics, functions) found in the extracted text.",',
-    '  "suggested_filename": "descriptive-kebab-case-name, max 50 chars, based on actual content",',
-    '  "category": "ONE of: Assignment, Notes, Invoice, Report, Image, Video, Audio, Code, Presentation, Spreadsheet, Other",',
-    '  "imageDescription": "If image with meaningful visual/text content, describe it. Otherwise null.",',
-    '  "detected_intent": "2-4 word phrase describing why this was shared (e.g., Homework submission, API documentation, Photo backup)",',
-    '  "risk_flags": ["Only include REAL risks: PII exposure, executable code, sensitive credentials. Empty array if none."],',
-    '  "files": [',
-    '    {',
-    '      "name": "exact original filename",',
-    '      "type": "specific type like JavaScript source, PDF report, JPEG photo",',
-    '      "summary": "One sentence: what this specific file contains or does, referencing actual content",',
-    '      "key_points": ["2-4 specific observations from the content, max 8 words each"]',
-    '    }',
-    '  ]',
-    "}",
-    "",
-    "Bad example (generic, useless):",
-    '  "overall_summary": "This transfer contains a PDF file that has been shared for document purposes."',
-    '  "summary": "A JavaScript file containing code."',
-    "",
-    "Good example (specific, useful):",
-    '  "overall_summary": "Computer Networks assignment covering TCP/IP stack analysis with 5 questions on routing protocols and subnet calculations. Due date referenced: March 15."',
-    '  "summary": "Express.js REST API with 6 endpoints handling user authentication via JWT, using bcrypt for password hashing and MongoDB for storage."',
-    "",
-    "--- TRANSFER DATA ---",
-    `Files: ${fileCount} | Total size: ${formatSizeMB(totalSize)}`,
-    `Primary file: ${primaryFilename} (${primaryMime})`,
-    keywords.length ? `Detected keywords: ${keywords.join(", ")}` : "",
-    "",
-    "File manifest:",
-    manifest,
-    "",
-    "Extracted content (analyze this carefully):",
-    preview,
-  ].filter(line => line !== "").join("\n");
+function buildPrompt({ fileCount, totalSize, primaryFilename, primaryMime: _primaryMime, manifest, preview, keywords }) {
+	return `You are SwiftShare Intelligence, a sharp, elite data analyst.
+Your job is to analyze file transfers and extract REAL insights.
+CRITICAL: Return STRICT JSON ONLY. No markdown tags (\`\`\`json), no yapping, no extra text.
+
+{
+	"overall_summary": "2 sharp sentences. Exactly WHAT this bundle is and WHY it exists. Focus on the core value.",
+	"suggested_filename": "short-kebab-case",
+	"category": "Codebase|Asset-Bundle|Mixed-Media|Document|Other",
+	"detected_intent": "Max 4 words (e.g., 'Game mod management', 'Project handoff')",
+	"risk_flags": ["Real risks only like 'Exposed file path' or 'Executable script'. Empty array if safe."],
+	"files": [
+		{
+			"name": "Exact filename",
+			"type": "File extension",
+			"summary": "1 punchy sentence describing ACTUAL purpose. NEVER say 'cannot be previewed'. Infer from the name if needed.",
+			"key_points": ["Insight 1 (max 6 words)", "Insight 2 (max 6 words)"]
+		}
+	]
+}
+
+HARD RULES:
+1. ZERO GENERIC PHRASES: Banned words: "This file contains", "cannot be previewed", "is a placeholder", "appears to be".
+2. INFER INTELLIGENTLY: If a zip is named '0coinsbs', don't just say 'it's a zip'. Say 'Archive likely containing supporting app assets'.
+3. BE IMPRESSIVE: Think like a senior dev reviewing a pull request.
+4. DO NOT TRUNCATE: You must complete the JSON object for EVERY file.
+
+<CONTEXT>
+Files: ${fileCount} | Size: ${formatSizeMB(totalSize)} | Primary: ${primaryFilename}
+Keywords: ${keywords.length ? keywords.join(", ") : "None"}
+</CONTEXT>
+
+<MANIFEST>
+${manifest}
+</MANIFEST>
+
+<EXTRACTED_CONTENT>
+${preview}
+</EXTRACTED_CONTENT>`;
 }
 
 async function buildTransferContext(files) {
