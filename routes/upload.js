@@ -271,21 +271,30 @@ async function processUploadFlow({
 			return;
 		}
 
+		let emitted = false;
+		const emitUnavailable = (warning) => {
+			if (emitted) {
+				return;
+			}
+
+			emitToRoom(code, "ai-ready", {
+				summary: null,
+				category: null,
+				imageDescription: null,
+				files: [],
+				detectedIntent: null,
+				riskFlags: [],
+				warning: warning || "AI analysis unavailable",
+			});
+			emitted = true;
+		};
+
 		try {
 			logEvent("AI analysis started", `CODE: ${code}`, `FILES: ${incomingFiles.length}`);
 			const aiResult = await analyzeTransfer(incomingFiles, code);
 
 			if (!isUsableAiResult(aiResult)) {
-				emitToRoom(code, "ai-ready", {
-					summary: null,
-					category: null,
-					suggestedName: null,
-					imageDescription: null,
-					files: [],
-					detectedIntent: null,
-					riskFlags: [],
-					warning: aiResult?.warning || "AI analysis unavailable",
-				});
+				emitUnavailable(aiResult?.warning || "AI analysis unavailable");
 
 				logEvent("AI analysis completed", `CODE: ${code}`, "READY: false");
 				return;
@@ -296,16 +305,21 @@ async function processUploadFlow({
 			emitToRoom(code, "ai-ready", {
 				summary: aiResult.summary || aiResult.overall_summary || null,
 				category: aiResult.category || null,
-				suggestedName: aiResult.suggestedName || aiResult.suggested_filename || null,
 				imageDescription: aiResult.imageDescription || null,
 				files: aiResult.files || [],
 				detectedIntent: aiResult.detectedIntent || aiResult.detected_intent || null,
 				riskFlags: aiResult.riskFlags || aiResult.risk_flags || [],
 			});
+			emitted = true;
 
 			logEvent("AI analysis completed", `CODE: ${code}`, "READY: true");
 		} catch (aiError) {
 			logError("AI analysis failed", aiError, `CODE: ${code}`, "READY: false");
+			emitUnavailable("AI analysis unavailable");
+		} finally {
+			if (!emitted) {
+				emitUnavailable("AI analysis unavailable");
+			}
 		}
 	})();
 

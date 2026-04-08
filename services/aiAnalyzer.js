@@ -604,16 +604,6 @@ function inferIntentFromContext(context) {
 	return "File sharing";
 }
 
-function buildSuggestedFilename(context) {
-	const priority = context.find((item) => item.type === "code")
-		|| context.find((item) => item.type === "pdf")
-		|| context[0];
-
-	const stem = path.parse(priority?.name || "swiftshare-transfer").name;
-	const cleaned = stem.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-	return cleaned || "swiftshare-transfer";
-}
-
 function buildAnalysisPrompt(context) {
 	const contextText = context
 		.map((item) => `File: ${item.name}\nMeaning: ${item.meaning}`)
@@ -848,7 +838,6 @@ async function analyzeTransfer(files, transferCode, forceFallback = false) {
 
 		const normalized = await runAnalysisWithValidation(context, transferCode, forceFallback);
 		const overallSummary = normalized.overall_summary;
-		const suggestedFilename = buildSuggestedFilename(context);
 		const category = inferCategoryFromContext(context);
 		const detectedIntent = inferIntentFromContext(context);
 
@@ -858,8 +847,6 @@ async function analyzeTransfer(files, transferCode, forceFallback = false) {
 			summary: overallSummary,
 			files: normalized.files,
 			category,
-			suggested_filename: suggestedFilename,
-			suggestedName: suggestedFilename,
 			detected_intent: detectedIntent,
 			detectedIntent,
 		};

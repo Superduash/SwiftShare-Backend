@@ -1,6 +1,7 @@
 const express = require("express");
 const { Readable } = require("stream");
 const bcrypt = require("bcrypt");
+const mammoth = require("mammoth");
 
 const Transfer = require("../models/Transfer");
 const { getObjectFromR2, getObjectHeadFromR2, deleteFilesFromR2 } = require("../services/fileManager");
@@ -100,6 +101,64 @@ async function toReadable(body) {
 	}
 
 	throw new Error("Unable to read object stream");
+}
+
+async function toBuffer(body) {
+	if (Buffer.isBuffer(body)) {
+		return body;
+	}
+
+	if (body && typeof body.transformToByteArray === "function") {
+		const bytes = await body.transformToByteArray();
+		return Buffer.from(bytes);
+	}
+
+	const stream = await toReadable(body);
+	const chunks = [];
+	for await (const chunk of stream) {
+		chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+	}
+
+	return Buffer.concat(chunks);
+}
+
+function sanitizeDocxHtml(htmlValue) {
+	return String(htmlValue || "")
+		.replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, "")
+		.replace(/<style[\s\S]*?>[\s\S]*?<\/style>/gi, "")
+		.replace(/<iframe[\s\S]*?>[\s\S]*?<\/iframe>/gi, "")
+		.replace(/ on[a-z]+\s*=\s*"[^"]*"/gi, "")
+		.replace(/ on[a-z]+\s*=\s*'[^']*'/gi, "")
+		.replace(/\s(href|src)\s*=\s*"javascript:[^"]*"/gi, " $1=\"#\"")
+		.replace(/\s(href|src)\s*=\s*'javascript:[^']*'/gi, " $1='#'");
+}
+
+function renderDocxPreviewDocument(fileName, bodyHtml) {
+	const title = sanitizeFilename(fileName || "Document");
+	const safeBody = String(bodyHtml || "").trim() || "<p>No preview content was extracted from this document.</p>";
+
+	return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${title}</title>
+  <style>
+    body { margin: 0; padding: 16px; font-family: Arial, sans-serif; color: #111827; background: #ffffff; line-height: 1.5; }
+    img, table { max-width: 100%; }
+    pre { white-space: pre-wrap; word-break: break-word; }
+  </style>
+</head>
+<body>
+${safeBody}
+</body>
+</html>`;
+}
+
+function isDocxFile(file) {
+	const mime = String(file?.mimeType || "").toLowerCase();
+	const name = String(file?.originalName || "").toLowerCase();
+	return mime.includes("wordprocessingml") || name.endsWith(".docx");
 }
 
 function parseRangeHeader(rangeHeader, totalBytes) {
@@ -483,28 +542,9 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 			return unavailableResponse;
 		}
 
-		// Sender bypass: if the requester provides a matching senderKey, skip password.
-		// The senderKey is the sender's current socket ID, updated on every reconnect
-		// via the register-sender event. This lets senders preview their own files.
-		const senderKey = typeof req.query?.senderKey === "string" ? req.query.senderKey : "";
-		// Check both the stored senderSocketId AND verify via live socket connection.
-		// The stored ID may be stale if the sender reconnected.
-		let isSender = Boolean(senderKey && transfer.senderSocketId && senderKey === transfer.senderSocketId);
-
-		// Fallback: if the socket is currently in the transfer's room, treat as sender.
-		// This handles the race condition where register-sender hasn't updated the DB yet.
-		if (!isSender && senderKey && transfer.senderIp) {
-			const senderIp = getClientIp(req);
-			if (senderIp && senderIp === transfer.senderIp) {
-				isSender = true;
-			}
-		}
-
-		if (!isSender) {
-			const passwordError = await getPasswordErrorResponse(req, transfer);
-			if (passwordError) {
-				return res.status(passwordError.status).json(passwordError.body);
-			}
+		const passwordError = await getPasswordErrorResponse(req, transfer);
+		if (passwordError) {
+			return res.status(passwordError.status).json(passwordError.body);
 		}
 
 		const fileIndex = Number(index);
@@ -563,6 +603,52 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 	} catch (error) {
 		if (res.headersSent) {
 			logError("Preview stream error", error, `CODE: ${req.params?.code || ""}`, `FILE: ${req.params?.index || ""}`);
+			return null;
+		}
+		return next(error);
+	}
+});
+
+router.get("/:code/preview/:index/docx-html", validateCode, async (req, res, next) => {
+	try {
+		const { code, index } = req.params;
+		const transfer = await Transfer.findOne({ code });
+
+		const unavailableResponse = sendUnavailableTransferResponse(res, transfer);
+		if (unavailableResponse) {
+			return unavailableResponse;
+		}
+
+		const passwordError = await getPasswordErrorResponse(req, transfer);
+		if (passwordError) {
+			return res.status(passwordError.status).json(passwordError.body);
+		}
+
+		const fileIndex = Number(index);
+		if (!Number.isInteger(fileIndex) || fileIndex < 0 || fileIndex >= transfer.files.length) {
+			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
+		}
+
+		const file = transfer.files[fileIndex];
+		if (!isDocxFile(file)) {
+			return res.status(415).json(buildErrorResponse(ERROR_CODES.INVALID_FILE_TYPE, "DOCX preview is only available for .docx files"));
+		}
+
+		const objectResponse = await getObjectFromR2(file.storedKey);
+		const buffer = await toBuffer(objectResponse.Body);
+		const converted = await mammoth.convertToHtml({ buffer });
+		const sanitizedHtml = sanitizeDocxHtml(converted?.value || "");
+
+		res.setHeader("Content-Type", "text/html; charset=utf-8");
+		res.setHeader("Content-Disposition", `inline; filename="${sanitizeFilename(file.originalName || "preview")}.html"`);
+		res.setHeader("Cache-Control", "private, max-age=120");
+		res.send(renderDocxPreviewDocument(file.originalName, sanitizedHtml));
+
+		logEvent("DOCX preview served", `CODE: ${code}`, `FILE: ${fileIndex}`);
+		return null;
+	} catch (error) {
+		if (res.headersSent) {
+			logError("DOCX preview stream error", error, `CODE: ${req.params?.code || ""}`, `FILE: ${req.params?.index || ""}`);
 			return null;
 		}
 		return next(error);

@@ -48,10 +48,6 @@ async function testAnalyzer() {
 		console.log(result.overall_summary || result.summary);
 		console.log("");
 		
-		console.log("📁 SUGGESTED FILENAME:");
-		console.log(result.suggested_filename);
-		console.log("");
-		
 		console.log("🏷️  CATEGORY:");
 		console.log(result.category);
 		console.log("");
