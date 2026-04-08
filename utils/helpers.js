@@ -1,4 +1,5 @@
 ﻿const path = require("path");
+const crypto = require("crypto");
 
 const BLOCKED_EXTENSIONS = new Set([
 	".exe",
@@ -171,6 +172,31 @@ function isTransferExpired(transfer) {
 	return Boolean(transfer?.expiresAt) && new Date(transfer.expiresAt).getTime() < Date.now();
 }
 
+function getRequestFingerprint(req) {
+	const ip = getClientIp(req);
+	const userAgent = String(req?.get?.("user-agent") || req?.headers?.["user-agent"] || "");
+	return crypto
+		.createHash("sha256")
+		.update(`${ip}|${userAgent}`)
+		.digest("hex");
+}
+
+function isBurnClaimOwner(transfer, reqOrFingerprint) {
+	if (!transfer?.burnClaimOwner) {
+		return false;
+	}
+
+	const fingerprint = typeof reqOrFingerprint === "string"
+		? reqOrFingerprint
+		: getRequestFingerprint(reqOrFingerprint);
+
+	return transfer.burnClaimOwner === fingerprint;
+}
+
+function isBurnClaimOpen(transfer) {
+	return Boolean(transfer?.burnAfterDownload && transfer?.burnClaimOwner && !transfer?.isDeleted);
+}
+
 function getTransferStatus(transfer) {
 	if (!transfer) {
 		return "DELETED";
@@ -184,8 +210,8 @@ function getTransferStatus(transfer) {
 		return "DELETED";
 	}
 
-	if (transfer.burnAfterDownload && Number(transfer.downloadCount || 0) >= 1) {
-		return "DELETED";
+	if (isBurnClaimOpen(transfer)) {
+		return "CLAIMED";
 	}
 
 	if (isTransferExpired(transfer)) {
@@ -206,6 +232,9 @@ module.exports = {
 	hasDangerousSignature,
 	getTotalSize,
 	isTransferExpired,
+	getRequestFingerprint,
+	isBurnClaimOwner,
+	isBurnClaimOpen,
 	getTransferStatus,
 	// Backward-compatible aliases used by existing Hour 1-3 code.
 	extractClientIp: getClientIp,

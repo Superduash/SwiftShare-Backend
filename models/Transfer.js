@@ -101,6 +101,22 @@ const transferSchema = new mongoose.Schema(
 			default: 0,
 			min: 0,
 		},
+		burnClaimOwner: {
+			type: String,
+			default: "",
+		},
+		burnClaimedAt: {
+			type: Date,
+			default: null,
+		},
+		burnLastActiveAt: {
+			type: Date,
+			default: null,
+		},
+		burnFinalizedAt: {
+			type: Date,
+			default: null,
+		},
 		uploadSpeed: {
 			type: Number,
 			default: 0,
@@ -174,8 +190,8 @@ transferSchema.virtual("status").get(function () {
 		return "DELETED";
 	}
 
-	if (this.burnAfterDownload && Number(this.downloadCount || 0) >= 1) {
-		return "DELETED";
+	if (this.burnAfterDownload && this.burnClaimOwner) {
+		return "CLAIMED";
 	}
 
 	if (this.expiresAt && new Date(this.expiresAt).getTime() < Date.now()) {
