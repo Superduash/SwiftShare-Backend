@@ -7,7 +7,7 @@ const pdfParse = typeof pdfParseLib === 'function'
 const mammoth = require("mammoth");
 const AdmZip = require("adm-zip");
 const Tesseract = require("tesseract.js");
-const { generateAIResponse } = require("../config/gemini");
+const { analyzeWithFallback } = require("./aiRouter");
 const { logEvent, logError } = require("../utils/logger");
 
 const ALLOWED_CATEGORIES = new Set([
@@ -49,6 +49,18 @@ const AUDIO_EXTENSIONS = new Set([".mp3", ".wav", ".flac", ".m4a", ".ogg"]);
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg", ".heic"]);
 const TEXT_EXTENSIONS = new Set([".txt", ".md", ".rtf", ".log"]);
 const ARCHIVE_EXTENSIONS = new Set([".zip"]);
+const DOCUMENT_EXTENSIONS = new Set([
+	...TEXT_EXTENSIONS,
+	...PRESENTATION_EXTENSIONS,
+	...SPREADSHEET_EXTENSIONS,
+	".pdf",
+	".doc",
+	".docx",
+	".odt",
+]);
+const ARCHIVE_TAG_EXTENSIONS = new Set([".zip", ".rar", ".7z", ".tar", ".gz"]);
+const KEY_FILE_PRIORITIES = [".py", ".js", ".pdf"];
+const GAME_MOD_HINTS = ["mod", "mods", "forge", "fabric", "shader", "resourcepack", "resource-pack", "minecraft", "curseforge", "pack"];
 
 const KEYWORD_STOPWORDS = new Set([
 	"a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "have", "in", "is", "it", "its",
@@ -290,36 +302,97 @@ function inferPurposeFromFilename(name) {
 	const keywords = keywordHintsFromText(normalizedStem, 4);
 
 	if (keywords.length) {
-		return `Purpose inferred from filename context: ${keywords.join(" ")}.`;
+		return `Related to ${keywords.join(", ")}.`;
 	}
 
 	if (normalizedStem) {
-		return `Purpose inferred from filename context: ${normalizedStem}.`;
+		return `Named \"${normalizedStem}\" — purpose inferred from context.`;
 	}
 
-	return "Purpose inferred from filename context.";
+	return "Shared as part of a file transfer bundle.";
 }
 
+const BANNED_PHRASES = [
+	"analyzed using", "purpose inferred", "file type", "this file contains",
+	"this file is a", "appears to be", "cannot extract", "cannot be previewed",
+	"is a placeholder", "binary content", "pdf_text_extraction_failed",
+	"image containing readable text", "analyzed image", "metadata-based",
+	"text extraction failed", "files centered on", "code focused on application logic",
+];
+
 function cleanAiText(value) {
-	return String(value || "")
+	let result = String(value || "");
+	for (const phrase of BANNED_PHRASES) {
+		result = result.replace(new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), "");
+	}
+	return result
 		.replace(/analyzed using.*?\./gi, "")
 		.replace(/file type.*?\./gi, "")
-		.replace(/this file contains/gi, "")
-		.replace(/likely/gi, "")
-		.replace(/metadata/gi, "")
-		.replace(/cannot extract/gi, "")
-		.replace(/binary/gi, "")
+		.replace(/\bmetadata\b/gi, "")
 		.replace(/\s{2,}/g, " ")
+		.replace(/^[\s.,;:]+/, "")
 		.trim();
 }
 
+function isBadOutput(text) {
+	const lower = String(text || "").toLowerCase();
+	if (!lower || lower.length < 12) return true;
+	for (const phrase of BANNED_PHRASES) {
+		if (lower.includes(phrase)) return true;
+	}
+	// Check for excessive repetition (same word 4+ times)
+	const words = lower.match(/[a-z]{3,}/g) || [];
+	const counts = new Map();
+	for (const w of words) {
+		counts.set(w, (counts.get(w) || 0) + 1);
+		if (counts.get(w) >= 4 && !KEYWORD_STOPWORDS.has(w)) return true;
+	}
+	return false;
+}
+
+function dedupeRepeatedSentences(value, maxChars = 220) {
+	const text = cleanPreviewText(String(value || ""), maxChars);
+	if (!text) {
+		return "";
+	}
+
+	const parts = text
+		.split(/[.!?\n]+/)
+		.map((item) => item.trim())
+		.filter(Boolean);
+
+	if (!parts.length) {
+		return text;
+	}
+
+	const seen = new Set();
+	const unique = [];
+	for (const part of parts) {
+		const normalized = part.toLowerCase().replace(/[^a-z0-9\s-]+/g, "").replace(/\s+/g, " ").trim();
+		if (!normalized || seen.has(normalized)) {
+			continue;
+		}
+
+		seen.add(normalized);
+		unique.push(part);
+	}
+
+	if (!unique.length) {
+		return "";
+	}
+
+	return cleanPreviewText(`${unique.join(". ")}.`, maxChars);
+}
+
 function cleanInsightText(value, maxChars = 220) {
-	return cleanPreviewText(cleanAiText(String(value || "")), maxChars)
+	const cleaned = cleanPreviewText(cleanAiText(String(value || "")), maxChars)
 		.replace(/\b(this file contains|this file is a|appears to be)\b/gi, "")
 		.replace(/\b(mime|format|extension|file size|size)\b\s*[:\-]?/gi, "")
 		.replace(/\b\d+(?:\.\d+)?\s*(kb|mb|gb|bytes?)\b/gi, "")
 		.replace(/\s{2,}/g, " ")
 		.trim();
+
+	return dedupeRepeatedSentences(cleaned, maxChars);
 }
 
 function cleanInsightPoints(input) {
@@ -327,10 +400,213 @@ function cleanInsightPoints(input) {
 		return [];
 	}
 
-	return input
+	const deduped = [];
+	const seen = new Set();
+
+	for (const item of input
 		.map((item) => cleanInsightText(item, 140))
-		.filter((item) => item.length > 2)
-		.slice(0, 5);
+		.filter((item) => item.length > 2)) {
+		const normalized = item.toLowerCase().replace(/[^a-z0-9\s-]+/g, "").replace(/\s+/g, " ").trim();
+		if (!normalized || seen.has(normalized)) {
+			continue;
+		}
+
+		seen.add(normalized);
+		deduped.push(item);
+		if (deduped.length >= 5) {
+			break;
+		}
+	}
+
+	return deduped;
+}
+
+function summarizeFileSignal(file) {
+	const name = String(file?.name || "");
+	const lowerName = name.toLowerCase();
+	const ext = path.extname(lowerName);
+	const summaryText = String(file?.summary || "").toLowerCase();
+	const keyPointsText = Array.isArray(file?.key_points)
+		? file.key_points.join(" ").toLowerCase()
+		: "";
+	const combined = `${lowerName} ${summaryText} ${keyPointsText}`;
+
+	const isCode = CODE_EXTENSIONS.has(ext) || /\b(api|script|service|backend|frontend|code|function|module)\b/.test(combined);
+	const isMedia = IMAGE_EXTENSIONS.has(ext)
+		|| VIDEO_EXTENSIONS.has(ext)
+		|| AUDIO_EXTENSIONS.has(ext)
+		|| /\b(photo|image|video|audio|clip|media)\b/.test(combined);
+	const isArchive = ARCHIVE_TAG_EXTENSIONS.has(ext) || /\barchive|bundle|compressed\b/.test(combined);
+	const isDocs = DOCUMENT_EXTENSIONS.has(ext)
+		|| /\b(report|notes|document|summary|manual|readme|guide|invoice)\b/.test(combined);
+	const hasGameModHint = ext === ".jar" || GAME_MOD_HINTS.some((hint) => combined.includes(hint));
+
+	return {
+		isCode,
+		isMedia,
+		isArchive,
+		isDocs,
+		hasGameModHint,
+		ext,
+	};
+}
+
+function collectFileSignals(files) {
+	const safeFiles = Array.isArray(files) ? files : [];
+	const stats = {
+		total: safeFiles.length,
+		codeCount: 0,
+		mediaCount: 0,
+		docsCount: 0,
+		archiveCount: 0,
+		modHintCount: 0,
+	};
+
+	for (const file of safeFiles) {
+		const signal = summarizeFileSignal(file);
+		if (signal.isCode) stats.codeCount += 1;
+		if (signal.isMedia) stats.mediaCount += 1;
+		if (signal.isDocs) stats.docsCount += 1;
+		if (signal.isArchive) stats.archiveCount += 1;
+		if (signal.hasGameModHint) stats.modHintCount += 1;
+	}
+
+	return stats;
+}
+
+function detectPurpose(files) {
+	const stats = collectFileSignals(files);
+	const total = Math.max(1, stats.total);
+	const codeRatio = stats.codeCount / total;
+	const mediaRatio = stats.mediaCount / total;
+
+	if (stats.modHintCount > 0 && (stats.archiveCount > 0 || stats.total > 1)) {
+		return "Game Mod Setup";
+	}
+
+	if (codeRatio >= 0.5 && stats.mediaCount <= 1) {
+		return "Developer Tool";
+	}
+
+	if (mediaRatio >= 0.5 && stats.codeCount <= 1) {
+		return "Media Bundle";
+	}
+
+	return "Mixed Files";
+}
+
+function detectTags(files) {
+	const stats = collectFileSignals(files);
+	const tags = [];
+
+	if (stats.codeCount > 0) tags.push("Code");
+	if (stats.mediaCount > 0) tags.push("Media");
+	if (stats.docsCount > 0) tags.push("Docs");
+	if (stats.archiveCount > 0) tags.push("Archive");
+
+	return tags;
+}
+
+function calculateConfidence(aiJson) {
+	const files = Array.isArray(aiJson?.files) ? aiJson.files : [];
+	const stats = collectFileSignals(files);
+	const total = Math.max(1, stats.total);
+	const codeRatio = stats.codeCount / total;
+	const mediaRatio = stats.mediaCount / total;
+
+	if (codeRatio >= 0.5) {
+		const score = 90 + Math.round(Math.min(8, codeRatio * 8));
+		return Math.max(90, Math.min(98, score));
+	}
+
+	if (mediaRatio >= 0.5) {
+		const score = 70 + Math.round(Math.min(15, mediaRatio * 15));
+		return Math.max(70, Math.min(85, score));
+	}
+
+	const mixedBoost = (stats.archiveCount > 0 ? 4 : 0) + (stats.docsCount > 0 ? 3 : 0) + (stats.codeCount > 0 ? 2 : 0) + (stats.mediaCount > 0 ? 1 : 0);
+	const score = 80 + Math.min(10, mixedBoost);
+	return Math.max(80, Math.min(90, score));
+}
+
+function highlightKeyFile(files) {
+	const safeFiles = Array.isArray(files)
+		? files.map((file) => ({ ...file }))
+		: [];
+
+	if (!safeFiles.length) {
+		return [];
+	}
+
+	let keyIndex = -1;
+	for (const ext of KEY_FILE_PRIORITIES) {
+		keyIndex = safeFiles.findIndex((file) => path.extname(String(file?.name || "").toLowerCase()) === ext);
+		if (keyIndex >= 0) {
+			break;
+		}
+	}
+
+	if (keyIndex < 0) {
+		keyIndex = safeFiles
+			.map((file, index) => ({ index, score: String(file?.summary || "").length }))
+			.sort((a, b) => b.score - a.score)[0]?.index ?? 0;
+	}
+
+	return safeFiles.map((file, index) => ({
+		...file,
+		isKeyFile: index === keyIndex,
+	}));
+}
+
+function looksLikeRawFilename(name, files) {
+	const slug = sanitizeSuggestedName(name, "");
+	if (!slug) {
+		return true;
+	}
+
+	const normalizedStems = (Array.isArray(files) ? files : [])
+		.map((file) => sanitizeSuggestedName(path.parse(String(file?.name || "")).name, ""))
+		.filter(Boolean);
+
+	if (normalizedStems.includes(slug)) {
+		return true;
+	}
+
+	const compact = slug.replace(/-/g, "");
+	if (/^[a-z0-9]{4,}$/.test(compact) && !slug.includes("-")) {
+		return true;
+	}
+
+	return false;
+}
+
+function generateSmartName(aiName, files) {
+	const purpose = detectPurpose(files);
+	const tags = detectTags(files);
+	const candidate = sanitizeSuggestedName(aiName, "");
+
+	if (candidate && !looksLikeRawFilename(candidate, files) && candidate.length >= 8) {
+		return candidate;
+	}
+
+	const purposeBase = {
+		"Developer Tool": "developer-tool",
+		"Media Bundle": "media-bundle",
+		"Game Mod Setup": "mod-setup",
+		"Mixed Files": "mixed-files",
+	}[purpose] || "swiftshare-transfer";
+
+	let suffix = "bundle";
+	if (tags.includes("Code")) {
+		suffix = "toolkit";
+	} else if (tags.includes("Media")) {
+		suffix = "pack";
+	} else if (tags.includes("Docs")) {
+		suffix = "brief";
+	}
+
+	const combined = purposeBase.endsWith(`-${suffix}`) ? purposeBase : `${purposeBase}-${suffix}`;
+	return sanitizeSuggestedName(combined, "swiftshare-transfer");
 }
 
 function detectCategoryWithoutAI(filename, mimeType, previewText = "") {
@@ -515,7 +791,7 @@ async function preprocessPdfFile({ buffer, name }) {
 		localSummary: summary,
 		keyPoints: keywords.length
 			? [`Topics: ${keywords.slice(0, 5).join(", ")}`]
-			: ["Purpose inferred from filename context"],
+			: ["Context derived from naming and bundle"],
 		imageDescription: null,
 		riskFlags: [],
 	};
@@ -543,7 +819,7 @@ async function preprocessDocxFile({ buffer, name }) {
 			: inferPurposeFromFilename(name),
 		keyPoints: keywords.length
 			? [`Topics: ${keywords.slice(0, 5).join(", ")}`]
-			: ["Purpose inferred from filename context"],
+			: ["Context derived from naming and bundle"],
 		imageDescription: null,
 		riskFlags: [],
 	};
@@ -591,19 +867,26 @@ async function preprocessImageFile({ buffer, name }) {
 	const riskFlags = ocr.skippedReason ? [ocr.skippedReason] : [];
 
 	if (text) {
-		const summary = `Image containing readable text focused on ${keywords.length ? keywords.slice(0, 4).join(", ") : "documented visual content"}.`;
+		// Summarize the actual meaning of the OCR text, not just "image with text"
 		const firstLine = text.split(/\n+/).find((line) => line.trim().length > 0) || "";
+		const summary = keywords.length >= 2
+			? `Screenshot or graphic covering ${keywords.slice(0, 4).join(", ")}.`
+			: (firstLine
+				? `Captured text reads: \"${cleanPreviewText(firstLine, 80)}\"`
+				: "Visual with embedded readable content.");
 
 		return {
 			typeLabel: "image",
 			preview: cleanPreviewText(text),
 			promptText: cleanPreviewText(text, MAX_PROMPT_TEXT_CHARS),
-			localSummary: cleanAiText(summary),
+			localSummary: summary,
 			keyPoints: [
-				keywords.length ? `Topics: ${keywords.slice(0, 5).join(", ")}` : "OCR text extracted",
-				firstLine ? `Leading text: ${cleanPreviewText(firstLine, 120)}` : null,
+				keywords.length ? `Topics: ${keywords.slice(0, 5).join(", ")}` : "Text detected via OCR",
+				firstLine ? `Reads: ${cleanPreviewText(firstLine, 120)}` : null,
 			].filter(Boolean),
-			imageDescription: `Image with extracted text: ${cleanPreviewText(firstLine || text, 180)}`,
+			imageDescription: firstLine
+				? `Visual with text: ${cleanPreviewText(firstLine, 180)}`
+				: `Graphic with embedded text about ${keywords.slice(0, 3).join(", ") || "various topics"}.`,
 			riskFlags,
 		};
 	}
@@ -612,9 +895,9 @@ async function preprocessImageFile({ buffer, name }) {
 		typeLabel: "image",
 		preview: "",
 		promptText: "",
-		localSummary: inferPurposeFromFilename(name),
-		keyPoints: ["Purpose inferred from filename context"],
-		imageDescription: `Visual meaning inferred from ${name}.`,
+		localSummary: "Stylized graphic or visual asset with no clear readable text.",
+		keyPoints: ["Visual content shared as-is"],
+		imageDescription: "Stylized graphic or visual asset.",
 		riskFlags,
 	};
 }
@@ -669,7 +952,7 @@ function preprocessZipFile({ buffer, name, size }) {
 			preview: "",
 			promptText: "",
 			localSummary: inferPurposeFromFilename(name),
-			keyPoints: ["Bundle purpose inferred from filename context"],
+			keyPoints: ["Bundle context derived from naming and entries"],
 			imageDescription: null,
 			riskFlags: [],
 		};
@@ -753,7 +1036,7 @@ function preprocessMetadataOnlyFile({ name, mime }) {
 		preview: "",
 		promptText: "",
 		localSummary: summary,
-		keyPoints: ["Purpose inferred from filename context"],
+		keyPoints: ["Context derived from naming and bundle"],
 		imageDescription: null,
 		riskFlags: [],
 	};
@@ -850,59 +1133,151 @@ function buildFallbackSummary({ fileCount, category, keywords, detectedIntent })
 
 function buildPrompt({ manifest, preview }) {
 	return `
-You are a sharp senior engineer analyzing a file transfer.
+You are a sharp senior engineer analyzing a file transfer like a human expert.
 
+Your job:
+Understand what this bundle is ACTUALLY for, not describe files.
+
+CRITICAL:
 Return STRICT JSON ONLY.
-
-{
-  "overall_summary": "2 short sentences explaining what this bundle is actually for.",
-  "suggested_filename": "kebab-case name",
-  "category": "Codebase | Media | Documents | Mixed | Other",
-  "detected_intent": "max 3 words",
-  "risk_flags": [],
-  "files": [
-    {
-      "name": "",
-      "summary": "what this file is used for",
-      "key_points": ["insight 1", "insight 2"]
-    }
-  ]
-}
-
-RULES:
-
-- DO NOT describe file types
-- DO NOT mention size, format, MIME
-- DO NOT say "this file contains"
-- DO NOT say "analyzed using"
-- DO NOT say "likely"
-
-- ALWAYS explain PURPOSE
-- KEEP everything short and sharp
-
-- If content is missing:
-  -> infer from filename intelligently
-
-- ZIP:
-  -> describe bundle purpose
-
-- Code:
-  -> explain what it does
-
-- Image:
-  -> describe visible meaning
+NO markdown.
+NO explanations.
+NO robotic phrases.
 
 ---
 
-FILES:
+==============================
+BAD OUTPUT (NEVER DO THIS)
+==============================
+
+- "files centered on media content"
+- "purpose inferred from filename"
+- "code focused on application logic"
+- "image containing readable text"
+- "analyzed using metadata"
+
+These are WRONG. Do not generate anything similar.
+
+---
+
+==============================
+GOOD OUTPUT (MATCH THIS STYLE)
+==============================
+
+- "A small developer utility for listing installed Minecraft mods, shared along with unrelated personal media."
+- "Python script that scans a mods folder and exports installed .jar names."
+- "Basic project documentation for SwiftShare features and structure."
+- "Screenshot containing stylized text and social content."
+- "Short personal video clip shared casually."
+
+Write like this. Direct. Useful. Human.
+
+---
+
+==============================
+THINKING RULES (IMPORTANT)
+==============================
+
+1. DO NOT DESCRIBE FILE TYPES
+2. DO NOT REPEAT FILENAMES
+3. DO NOT SAY "this file contains"
+4. ALWAYS explain REAL PURPOSE
+5. CONNECT FILES INTO A SINGLE STORY
+
+---
+
+==============================
+FILE-TYPE INTELLIGENCE (USE THIS)
+==============================
+
+If .py / .js:
+-> explain what the script DOES (automation, tool, processing)
+
+If .zip:
+-> describe bundle purpose (project files, assets, mixed pack)
+
+If .pdf:
+-> treat as documentation, notes, or report
+
+If image:
+-> describe visual meaning (text, screenshot, graphic)
+
+If video:
+-> short real-world description (clip, recording, casual share)
+
+---
+
+==============================
+ANTI-REPETITION RULE
+==============================
+
+Each file summary MUST be UNIQUE.
+Do NOT reuse sentence structure.
+
+---
+
+==============================
+MOST IMPORTANT (TOP SUMMARY)
+==============================
+
+overall_summary MUST:
+
+- be 2 strong sentences
+- explain WHAT + WHY
+- feel like a product insight
+- NOT generic
+
+Example:
+"A lightweight developer tool bundled with personal media, likely shared for testing or quick review. The core value lies in the script for managing mod files, with other files being secondary assets."
+
+---
+
+==============================
+JSON OUTPUT
+==============================
+
+{
+	"overall_summary": "",
+	"suggested_filename": "",
+	"category": "Codebase | Media | Documents | Mixed | Other",
+	"detected_intent": "",
+	"risk_flags": [],
+	"files": [
+		{
+			"name": "",
+			"summary": "",
+			"key_points": []
+		}
+	]
+}
+
+---
+
+==============================
+FILES
+==============================
 ${manifest}
 
-CONTENT:
+---
+
+==============================
+CONTENT
+==============================
 ${preview}
+
+---
+
+FINAL INSTRUCTION:
+
+Think like a human reviewing a shared folder.
+
+Do NOT fallback to generic phrases.
+
+Make it feel intelligent, useful, and intentional.
 `;
 }
 
-async function buildTransferContext(files) {
+async function buildTransferContext(files, transferCode) {
 	const validFiles = Array.isArray(files) ? files.filter(Boolean) : [];
 	if (!validFiles.length) {
 		return null;
@@ -955,6 +1330,7 @@ async function buildTransferContext(files) {
 
 	return {
 		fileCount: enrichedFiles.length,
+		transferCode: String(transferCode || "").trim().toUpperCase() || "",
 		totalSize,
 		primaryFilename: primary.name,
 		primaryMime: String(primary.mime || "").toLowerCase(),
@@ -999,9 +1375,13 @@ function normalizeAiResult(parsed, context) {
 		: normalizeCategoryName(fallbackCategory);
 
 	const rawSummary = parsed?.overall_summary || parsed?.summary;
-	const summary = cleanInsightText(normalizeSummary(cleanAiText(rawSummary), fallbackSummary), 1200)
+	let summary = cleanInsightText(normalizeSummary(cleanAiText(rawSummary), fallbackSummary), 1200)
 		|| cleanInsightText(fallbackSummary, 1200)
 		|| fallbackSummary;
+	// Final quality gate: if summary still contains banned output, use fallback
+	if (isBadOutput(summary)) {
+		summary = cleanInsightText(fallbackSummary, 1200) || "Mixed files shared together.";
+	}
 	const rawSuggestedName = parsed?.suggested_filename || parsed?.suggestedName;
 	const suggestedName = sanitizeSuggestedName(rawSuggestedName, fallbackName);
 
@@ -1018,11 +1398,15 @@ function normalizeAiResult(parsed, context) {
 	const files = context.enrichedFiles.map((file, index) => {
 		const candidate = findAiFile(file.name, index);
 		const fallbackFileSummary = cleanInsightText(file.localSummary || inferPurposeFromFilename(file.name), 700)
-			|| "Purpose inferred from filename context.";
-		const cleanFileSummary = cleanInsightText(
+			|| "Context derived from naming and bundle.";
+		let cleanFileSummary = cleanInsightText(
 			normalizeSummary(cleanAiText(candidate?.summary), fallbackFileSummary),
 			700,
 		) || fallbackFileSummary;
+		// Quality gate per file
+		if (isBadOutput(cleanFileSummary)) {
+			cleanFileSummary = fallbackFileSummary;
+		}
 		const cleanedKeyPoints = cleanInsightPoints(
 			normalizeKeyPoints(candidate?.key_points || candidate?.keyPoints, file.localKeyPoints),
 		);
@@ -1032,7 +1416,7 @@ function normalizeAiResult(parsed, context) {
 			summary: cleanFileSummary,
 			key_points: cleanedKeyPoints.length
 				? cleanedKeyPoints
-				: ["Purpose inferred from filename context"],
+				: ["Context derived from naming and bundle"],
 		};
 	});
 
@@ -1056,24 +1440,42 @@ function normalizeAiResult(parsed, context) {
 		imageDescription = aiImageDescription || fallbackImageDescription;
 	}
 
+	const highlightedFiles = highlightKeyFile(files);
+	const purpose = detectPurpose(highlightedFiles);
+	const tags = detectTags(highlightedFiles);
+	const smartSuggestedFilename = generateSmartName(rawSuggestedName || suggestedName, highlightedFiles);
+	const confidenceScore = calculateConfidence({
+		files: highlightedFiles,
+		category,
+		purpose,
+		tags,
+	});
+
 	return {
 		// Backward compat
 		summary: normalizedSummary,
-		suggestedName,
+		suggestedName: smartSuggestedFilename,
 		category,
 		imageDescription,
 		// New structured fields
-		files,
+		files: highlightedFiles,
 		detectedIntent,
 		riskFlags,
+		overall_summary: normalizedSummary,
+		suggested_filename: smartSuggestedFilename,
+		detected_intent: detectedIntent,
+		risk_flags: riskFlags,
+		purpose,
+		tags,
+		confidence_score: confidenceScore,
 	};
 }
 
-async function analyzeTransfer(files) {
+async function analyzeTransfer(files, transferCode) {
 	let context = null;
 
 	try {
-		context = await buildTransferContext(files);
+		context = await buildTransferContext(files, transferCode);
 		if (!context) {
 			return null;
 		}
@@ -1084,25 +1486,15 @@ async function analyzeTransfer(files) {
 		}
 
 		const prompt = buildPrompt({
-			fileCount: context.fileCount,
-			totalSize: context.totalSize,
-			primaryFilename: context.primaryFilename,
-			primaryMime: context.primaryMime,
 			manifest: context.manifest,
 			preview: context.preview,
-			keywords: context.keywords,
 		});
-		const useImageInput = context.fileCount === 1 && context.primaryMime.startsWith("image/") && Boolean(context.primaryBuffer);
 
-		const responseText = useImageInput
-			? await generateAIResponse(prompt, context.primaryBuffer, context.primaryMime)
-			: await generateAIResponse(prompt);
-
-		if (!responseText) {
+		const parsed = await analyzeWithFallback(prompt, context.transferCode);
+		if (!parsed) {
 			return normalizeAiResult(null, context);
 		}
 
-		const parsed = parseAiJson(responseText);
 		const normalized = normalizeAiResult(parsed, context);
 		if (!Array.isArray(normalized?.files) || normalized.files.length === 0) {
 			return normalizeAiResult(null, context);
@@ -1114,7 +1506,7 @@ async function analyzeTransfer(files) {
 
 		try {
 			if (!context) {
-				context = await buildTransferContext(files);
+				context = await buildTransferContext(files, transferCode);
 			}
 
 			if (!context) {

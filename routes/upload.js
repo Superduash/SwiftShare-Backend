@@ -264,7 +264,7 @@ async function processUploadFlow({
 
 		try {
 			logEvent("AI analysis started", `CODE: ${code}`, `FILES: ${incomingFiles.length}`);
-			const aiResult = await analyzeTransfer(incomingFiles);
+			const aiResult = await analyzeTransfer(incomingFiles, code);
 
 			await Transfer.updateOne({ code }, { $set: { ai: aiResult || null } });
 
