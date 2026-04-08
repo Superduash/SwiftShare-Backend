@@ -1131,150 +1131,46 @@ function buildFallbackSummary({ fileCount, category, keywords, detectedIntent })
 	return `Single ${category.toLowerCase()} file shared for ${detectedIntent}.${keywordText}`.trim();
 }
 
-function buildPrompt({ manifest, preview }) {
-	return `
-You are a sharp senior engineer analyzing a file transfer like a human expert.
+function buildPrompt({ fileCount, totalSize, primaryFilename, manifest, preview }) {
+  return `You are a Senior Software Engineer reviewing a file transfer bundle. 
+Your ONLY job is to deduce the real-world purpose of these files and explain it in plain, human English.
 
-Your job:
-Understand what this bundle is ACTUALLY for, not describe files.
+CRITICAL RULES:
+1. NO ROBOT SPEAK. BANNED PHRASES: "inferred from", "analyzed using", "focused on application logic", "media sharing", "this file contains", "readable text".
+2. GUESS THE CONTEXT. If you see a Python script and an MP4, it's a dev tool and a demo video. Act like a human deducing the obvious.
+3. BE SPECIFIC. Do not say "source code". Say "Python script for mod management."
 
-CRITICAL:
-Return STRICT JSON ONLY.
-NO markdown.
-NO explanations.
-NO robotic phrases.
+--- EXAMPLES OF BAD VS GOOD SUMMARIES ---
+❌ BAD: "5 related files centered on media content, shared for media sharing."
+✅ GOOD: "A mixed bundle containing a Python utility script, likely for mod management, bundled with personal media."
 
----
+❌ BAD: "Purpose inferred from filename context."
+✅ GOOD: "Supporting documentation for the SwiftShare platform."
 
-==============================
-BAD OUTPUT (NEVER DO THIS)
-==============================
+❌ BAD: "Code focused on application logic with notable terms."
+✅ GOOD: "A Python script that scans directories and exports a list of .jar mods."
 
-- "files centered on media content"
-- "purpose inferred from filename"
-- "code focused on application logic"
-- "image containing readable text"
-- "analyzed using metadata"
-
-These are WRONG. Do not generate anything similar.
-
----
-
-==============================
-GOOD OUTPUT (MATCH THIS STYLE)
-==============================
-
-- "A small developer utility for listing installed Minecraft mods, shared along with unrelated personal media."
-- "Python script that scans a mods folder and exports installed .jar names."
-- "Basic project documentation for SwiftShare features and structure."
-- "Screenshot containing stylized text and social content."
-- "Short personal video clip shared casually."
-
-Write like this. Direct. Useful. Human.
-
----
-
-==============================
-THINKING RULES (IMPORTANT)
-==============================
-
-1. DO NOT DESCRIBE FILE TYPES
-2. DO NOT REPEAT FILENAMES
-3. DO NOT SAY "this file contains"
-4. ALWAYS explain REAL PURPOSE
-5. CONNECT FILES INTO A SINGLE STORY
-
----
-
-==============================
-FILE-TYPE INTELLIGENCE (USE THIS)
-==============================
-
-If .py / .js:
--> explain what the script DOES (automation, tool, processing)
-
-If .zip:
--> describe bundle purpose (project files, assets, mixed pack)
-
-If .pdf:
--> treat as documentation, notes, or report
-
-If image:
--> describe visual meaning (text, screenshot, graphic)
-
-If video:
--> short real-world description (clip, recording, casual share)
-
----
-
-==============================
-ANTI-REPETITION RULE
-==============================
-
-Each file summary MUST be UNIQUE.
-Do NOT reuse sentence structure.
-
----
-
-==============================
-MOST IMPORTANT (TOP SUMMARY)
-==============================
-
-overall_summary MUST:
-
-- be 2 strong sentences
-- explain WHAT + WHY
-- feel like a product insight
-- NOT generic
-
-Example:
-"A lightweight developer tool bundled with personal media, likely shared for testing or quick review. The core value lies in the script for managing mod files, with other files being secondary assets."
-
----
-
-==============================
-JSON OUTPUT
-==============================
-
+--- OUTPUT FORMAT (STRICT JSON ONLY) ---
 {
-	"overall_summary": "",
-	"suggested_filename": "",
-	"category": "Codebase | Media | Documents | Mixed | Other",
-	"detected_intent": "",
-	"risk_flags": [],
-	"files": [
-		{
-			"name": "",
-			"summary": "",
-			"key_points": []
-		}
-	]
+  "overall_summary": "1-2 punchy sentences explaining what this bundle actually is in the real world.",
+  "suggested_filename": "smart-kebab-case-name",
+  "category": "Codebase | Media | Documents | Mixed | Other",
+  "detected_intent": "Max 3 words (e.g., 'Game mod setup')",
+  "risk_flags": ["Real risks only, else empty array"],
+  "files": [
+    {
+      "name": "exact-filename.ext",
+      "summary": "1 sharp sentence explaining what this file is for. No filler.",
+      "key_points": ["Insight 1", "Insight 2"]
+    }
+  ]
 }
 
----
-
-==============================
-FILES
-==============================
+MANIFEST:
 ${manifest}
 
----
-
-==============================
-CONTENT
-==============================
-${preview}
-
----
-
-FINAL INSTRUCTION:
-
-Think like a human reviewing a shared folder.
-
-Do NOT fallback to generic phrases.
-
-Make it feel intelligent, useful, and intentional.
-`;
+PREVIEW CONTENT:
+${preview}`;
 }
 
 async function buildTransferContext(files, transferCode) {
@@ -1471,7 +1367,7 @@ function normalizeAiResult(parsed, context) {
 	};
 }
 
-async function analyzeTransfer(files, transferCode) {
+async function analyzeTransfer(files, transferCode, forceFallback = false) {
 	let context = null;
 
 	try {
@@ -1486,11 +1382,14 @@ async function analyzeTransfer(files, transferCode) {
 		}
 
 		const prompt = buildPrompt({
+			fileCount: context.fileCount,
+			totalSize: context.totalSize,
+			primaryFilename: context.primaryFilename,
 			manifest: context.manifest,
 			preview: context.preview,
 		});
 
-		const parsed = await analyzeWithFallback(prompt, context.transferCode);
+		const parsed = await analyzeWithFallback(prompt, context.transferCode, forceFallback);
 		if (!parsed) {
 			return normalizeAiResult(null, context);
 		}

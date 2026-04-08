@@ -5,8 +5,71 @@ const { rateLimitMetadata } = require("../middleware/rateLimiter");
 const { validateCode } = require("../middleware/validateCode");
 const { getClientIp, getDeviceName, isTransferExpired, getTransferStatus } = require("../utils/helpers");
 const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
+const { getObjectFromR2 } = require("../services/fileManager");
+const { analyzeTransfer } = require("../services/aiAnalyzer");
 
 const router = express.Router();
+
+router.post("/:code/analyze", rateLimitMetadata, validateCode, async (req, res, next) => {
+	try {
+		const { code } = req.params;
+		const { forceFallback } = req.body;
+		const transfer = await Transfer.findOne({ code }).lean();
+
+		if (!transfer) {
+			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
+		}
+		if (transfer.isDeleted || (transfer.burnAfterDownload && transfer.downloadCount >= 1)) {
+			return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
+		}
+		if (isTransferExpired(transfer)) {
+			return res.status(410).json(buildErrorResponse(ERROR_CODES.TRANSFER_EXPIRED));
+		}
+
+		// Download files to buffer for re-analysis
+		const incomingFiles = [];
+		for (const file of transfer.files) {
+			if (!file.storedKey) continue;
+			try {
+				const response = await getObjectFromR2(file.storedKey);
+				const chunks = [];
+				for await (const chunk of response.Body) {
+					chunks.push(chunk);
+				}
+				incomingFiles.push({
+					buffer: Buffer.concat(chunks),
+					originalname: file.originalName,
+					mimetype: file.mimeType,
+					size: file.size,
+				});
+			} catch (err) {
+				console.error(`Failed to fetch ${file.originalName} for analysis`, err);
+			}
+		}
+
+		const aiResult = await analyzeTransfer(incomingFiles, code, Boolean(forceFallback));
+		if (aiResult) {
+			await Transfer.updateOne(
+				{ code },
+				{
+					$set: { ai: aiResult },
+					$push: {
+						activity: {
+							event: "ai_analyzed",
+							device: getDeviceName(req.get("user-agent") || ""),
+							ip: getClientIp(req),
+							timestamp: new Date(),
+						},
+					},
+				}
+			);
+		}
+
+		return res.status(200).json({ success: true, ai: aiResult });
+	} catch (error) {
+		return next(error);
+	}
+});
 
 router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => {
 	try {

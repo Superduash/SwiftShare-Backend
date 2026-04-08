@@ -443,17 +443,31 @@ async function tryOpenRouterFamily(prompt) {
 	return runProviderStep("openrouter:qwen", () => tryOpenRouterModel(prompt, OPENROUTER_STRUCTURE_MODEL));
 }
 
-async function analyzeWithFallback(prompt, transferCode) {
-	const cached = await getCachedAiResult(transferCode);
-	if (cached) {
-		return cached;
+function sanitizeAI(text) {
+  if (!text) return text;
+  return text
+    .replace(/Purpose inferred from filename context\.?/gi, "Supporting asset.")
+    .replace(/analyzed using metadata\.?/gi, "")
+    .replace(/media shared for media sharing\.?/gi, "Mixed media bundle.")
+    .trim();
+}
+
+async function analyzeWithFallback(prompt, transferCode, forceFallback = false) {
+	if (!forceFallback) {
+		const cached = await getCachedAiResult(transferCode);
+		if (cached) {
+			return cached;
+		}
 	}
 
-	const steps = [
-		{ name: "gemini", run: () => runProviderStep("gemini", () => tryGeminiFamily(prompt)) },
+	const steps = [];
+	if (!forceFallback) {
+		steps.push({ name: "gemini", run: () => runProviderStep("gemini", () => tryGeminiFamily(prompt)) });
+	}
+	steps.push(
 		{ name: "groq", run: () => runProviderStep("groq", () => tryGroq(prompt)) },
-		{ name: "openrouter", run: () => tryOpenRouterFamily(prompt) },
-	];
+		{ name: "openrouter", run: () => tryOpenRouterFamily(prompt) }
+	);
 
 	let attempts = 0;
 	for (const step of steps) {
@@ -466,6 +480,16 @@ async function analyzeWithFallback(prompt, transferCode) {
 		if (!result.ok || !result.parsed) {
 			logEvent("AI fallback switch", `STEP: ${step.name}`, `REASON: ${result?.reason || "failed"}`);
 			continue;
+		}
+
+		// Apply the sanitizer to the result
+		if (result.parsed.overall_summary) {
+			result.parsed.overall_summary = sanitizeAI(result.parsed.overall_summary);
+		}
+		if (Array.isArray(result.parsed.files)) {
+			result.parsed.files.forEach(f => {
+				if (f.summary) f.summary = sanitizeAI(f.summary);
+			});
 		}
 
 		await setCachedAiResult(transferCode, result.parsed);
