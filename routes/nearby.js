@@ -11,6 +11,7 @@ router.get("/", rateLimitMetadata, async (req, res, next) => {
 	try {
 		const clientIp = getClientIp(req);
 		const subnet = getSubnet(clientIp);
+		const requesterSocketId = String(req.query?.socketId || "").trim();
 		logEvent("Nearby request", `IP: ${clientIp || "unknown"}`, `SUBNET: ${subnet || "n/a"}`);
 
 		if (!subnet) {
@@ -28,14 +29,21 @@ router.get("/", rateLimitMetadata, async (req, res, next) => {
 			.lean();
 
 		return res.status(200).json({
-			devices: candidates.map((transfer) => ({
-				code: transfer.code,
-				fileCount: Number(transfer.fileCount || transfer.files?.length || 0),
-				totalSize: Number(transfer.totalSize || 0),
-				category: transfer.ai?.category || "Other",
-				deviceName: transfer.senderDeviceName || "Unknown Device",
-				expiresAt: transfer.expiresAt,
-			})),
+			devices: candidates
+				.map((transfer) => ({
+					code: transfer.code,
+					fileCount: Number(transfer.fileCount || transfer.files?.length || 0),
+					totalSize: Number(transfer.totalSize || 0),
+					category: transfer.ai?.category || "Other",
+					deviceName: transfer.senderDeviceName || "Unknown Device",
+					expiresAt: transfer.expiresAt,
+					socketId: String(transfer.senderSocketId || ""),
+				}))
+				.filter((device) => {
+					if (!requesterSocketId) return true;
+					if (!device.socketId) return true;
+					return device.socketId !== requesterSocketId;
+				}),
 		});
 	} catch (error) {
 		return next(error);

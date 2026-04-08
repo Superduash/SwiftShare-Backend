@@ -202,6 +202,25 @@ async function setCachedAiResult(transferCode, value) {
 	}
 }
 
+async function clearCachedAiResult(transferCode) {
+	const key = getCacheKey(transferCode);
+	if (!key) {
+		return;
+	}
+
+	memoryCache.delete(key);
+
+	if (!redis) {
+		return;
+	}
+
+	try {
+		await redis.del(key);
+	} catch (error) {
+		logError("AI cache delete failed", error, `KEY: ${key}`);
+	}
+}
+
 async function fetchWithTimeout(url, options) {
 	const controller = new AbortController();
 	const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -453,11 +472,22 @@ function sanitizeAI(text) {
 }
 
 async function analyzeWithFallback(prompt, transferCode, forceFallback = false) {
+	const cacheKey = getCacheKey(transferCode);
+
 	if (!forceFallback) {
+		if (cacheKey && memoryCache.has(cacheKey)) {
+			const memoryValue = getMemoryCacheEntry(cacheKey);
+			if (memoryValue) {
+				return memoryValue;
+			}
+		}
+
 		const cached = await getCachedAiResult(transferCode);
 		if (cached) {
 			return cached;
 		}
+	} else {
+		await clearCachedAiResult(transferCode);
 	}
 
 	const steps = [];
@@ -486,8 +516,11 @@ async function analyzeWithFallback(prompt, transferCode, forceFallback = false) 
 		if (result.parsed.overall_summary) {
 			result.parsed.overall_summary = sanitizeAI(result.parsed.overall_summary);
 		}
+		if (result.parsed.summary) {
+			result.parsed.summary = sanitizeAI(result.parsed.summary);
+		}
 		if (Array.isArray(result.parsed.files)) {
-			result.parsed.files.forEach(f => {
+			result.parsed.files.forEach((f) => {
 				if (f.summary) f.summary = sanitizeAI(f.summary);
 			});
 		}
