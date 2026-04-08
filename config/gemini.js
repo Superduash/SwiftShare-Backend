@@ -6,7 +6,7 @@ const model = geminiClient
 	? geminiClient.getGenerativeModel({
 		model: "gemini-2.5-flash",
 		generationConfig: {
-			temperature: 0.2,
+			temperature: 0.1,
 			responseMimeType: "application/json",
 			maxOutputTokens: 2048,
 		},

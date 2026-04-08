@@ -287,22 +287,47 @@ async function printStartupStatus(port) {
 }
 
 function startServer() {
-	try {
-		initSocket(server);
+	initSocket(server);
 
-		const port = Number(process.env.PORT) || 3001;
-		server.listen(port, async () => {
-			startCleanupJob();
-			await printStartupStatus(port);
-		});
-	} catch (error) {
+	const port = Number(process.env.PORT) || 3001;
+	let retryTimer = null;
+	const isNodemonRuntime = Boolean(process.env.nodemon)
+		|| /nodemon/i.test(String(process.env.npm_lifecycle_script || ""));
+
+	server.on("error", (error) => {
+		if (error?.code === "EADDRINUSE") {
+			if (!isNodemonRuntime) {
+				logError(`Port ${port} already in use`, error);
+				process.exit(1);
+				return;
+			}
+
+			logEvent(`Port ${port} in use, retrying in 1200ms`);
+
+			if (!retryTimer) {
+				retryTimer = setTimeout(() => {
+					retryTimer = null;
+					if (!isShuttingDown) {
+						server.listen(port);
+					}
+				}, 1200);
+			}
+
+			return;
+		}
+
 		logError("Server failed to start", error);
-	}
+	});
+
+	server.listen(port, async () => {
+		startCleanupJob();
+		await printStartupStatus(port);
+	});
 }
 
 let isShuttingDown = false;
 
-async function gracefulShutdown(signal) {
+async function gracefulShutdown(signal, onComplete) {
 	if (isShuttingDown) {
 		return;
 	}
@@ -320,6 +345,11 @@ async function gracefulShutdown(signal) {
 		logError("MongoDB close during shutdown failed", error);
 	}
 
+	if (typeof onComplete === "function") {
+		onComplete();
+		return;
+	}
+
 	process.exit(0);
 }
 
@@ -332,4 +362,13 @@ process.on("SIGTERM", () => {
 process.on("SIGINT", () => {
 	void gracefulShutdown("SIGINT");
 });
+
+// Nodemon sends SIGUSR2 on restart; close the server first to avoid port rebinding races.
+if (Boolean(process.env.nodemon) || /nodemon/i.test(String(process.env.npm_lifecycle_script || ""))) {
+	process.once("SIGUSR2", () => {
+		void gracefulShutdown("SIGUSR2", () => {
+			process.kill(process.pid, "SIGUSR2");
+		});
+	});
+}
 

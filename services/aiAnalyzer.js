@@ -1,6 +1,9 @@
 const path = require("path");
 const pdfParseLib = require("pdf-parse");
-const pdfParse = pdfParseLib.PDFParse || pdfParseLib;
+// pdf-parse v1.x exports the function directly; v2.x may export as .default or .PDFParse
+const pdfParse = typeof pdfParseLib === 'function'
+	? pdfParseLib
+	: (pdfParseLib.default || pdfParseLib.PDFParse || pdfParseLib);
 const mammoth = require("mammoth");
 const AdmZip = require("adm-zip");
 const Tesseract = require("tesseract.js");
@@ -449,8 +452,8 @@ async function preprocessPdfFile({ buffer, name, size }) {
 			typeLabel: "pdf",
 			preview: cleanPreviewText(buildMetadataSummary({ name, mime: "application/pdf", size })),
 			promptText: cleanPreviewText(buildMetadataSummary({ name, mime: "application/pdf", size }), MAX_PROMPT_TEXT_CHARS),
-			localSummary: `PDF document ${name} (${formatSize(size)}) where text extraction failed, so metadata-based analysis is used.`,
-			keyPoints: ["PDF format", `Size: ${formatSize(size)}`, "Text extraction fallback used"],
+			localSummary: `Document analyzed using metadata and filename context for ${name} (${formatSize(size)}).`,
+			keyPoints: ["PDF format", `Size: ${formatSize(size)}`, "Document analyzed using metadata and filename context"],
 			imageDescription: null,
 			riskFlags: ["pdf_text_extraction_failed"],
 		};
@@ -803,35 +806,35 @@ function buildFallbackSummary({ fileCount, totalSize, category, keywords, detect
 	return `Single ${category.toLowerCase()} file (${formatSize(totalSize)}) likely shared for ${detectedIntent}.${keywordText}`.trim();
 }
 
-function buildPrompt({ fileCount, totalSize, primaryFilename, primaryMime: _primaryMime, manifest, preview, keywords }) {
-	return `You are SwiftShare Intelligence, a sharp, elite data analyst.
-Your job is to analyze file transfers and extract REAL insights.
-CRITICAL: Return STRICT JSON ONLY. No markdown tags (\`\`\`json), no yapping, no extra text.
+function buildPrompt({ fileCount, totalSize, primaryFilename, primaryMime, manifest, preview, keywords }) {
+	return `You are SwiftShare Intelligence. Your only job is to analyze file transfers and extract the REAL-WORLD PURPOSE in strict JSON format.
 
+CRITICAL RULES:
+1. NO AI ROBOT-SPEAK: BANNED PHRASES include "Document analyzed using", "ZIP archive containing", "This file is a", "appears to be", or "media bundle".
+2. INFER LIKE A HUMAN: Look at the whole picture. If there is a 'modcombiner.py' and an MP4 video, the video is likely a demo of the mod. Say that. Don't just say "video/mp4 asset".
+3. RUTHLESS NAMING: The suggested_filename must be highly specific based on the core value. "minecraft-mod-script-assets" is great. "mixed-media-share" is terrible. Max 40 chars, kebab-case.
+4. NO EXCUSES: If text extraction failed for a PDF, deduce its purpose from its name and the surrounding files.
+
+OUTPUT STRICTLY IN THIS EXACT JSON FORMAT:
 {
-	"overall_summary": "2 sharp sentences. Exactly WHAT this bundle is and WHY it exists. Focus on the core value.",
-	"suggested_filename": "short-kebab-case",
-	"category": "Codebase|Asset-Bundle|Mixed-Media|Document|Other",
-	"detected_intent": "Max 4 words (e.g., 'Game mod management', 'Project handoff')",
-	"risk_flags": ["Real risks only like 'Exposed file path' or 'Executable script'. Empty array if safe."],
-	"files": [
-		{
-			"name": "Exact filename",
-			"type": "File extension",
-			"summary": "1 punchy sentence describing ACTUAL purpose. NEVER say 'cannot be previewed'. Infer from the name if needed.",
-			"key_points": ["Insight 1 (max 6 words)", "Insight 2 (max 6 words)"]
-		}
-	]
+  "overall_summary": "Two sharp sentences explaining exactly what this collection is and why it was grouped together.",
+  "suggested_filename": "highly-specific-kebab-case-name",
+  "category": "Codebase | Asset-Bundle | Mixed-Media | Document | Other",
+  "detected_intent": "Max 4 words explaining the goal (e.g., 'Game mod management')",
+  "risk_flags": ["Real risks only like 'Exposed local paths' or 'Executable script'. Empty array [] if safe."],
+  "files": [
+    {
+      "name": "exact-filename.ext",
+      "type": "file extension",
+      "summary": "One sharp, specific sentence explaining what this file actually does or represents in the context of the bundle.",
+      "key_points": ["Insight 1 (Max 6 words)", "Insight 2 (Max 6 words)"]
+    }
+  ]
 }
 
-HARD RULES:
-1. ZERO GENERIC PHRASES: Banned words: "This file contains", "cannot be previewed", "is a placeholder", "appears to be".
-2. INFER INTELLIGENTLY: If a zip is named '0coinsbs', don't just say 'it's a zip'. Say 'Archive likely containing supporting app assets'.
-3. BE IMPRESSIVE: Think like a senior dev reviewing a pull request.
-4. DO NOT TRUNCATE: You must complete the JSON object for EVERY file.
-
 <CONTEXT>
-Files: ${fileCount} | Size: ${formatSizeMB(totalSize)} | Primary: ${primaryFilename}
+Total Files: ${fileCount} | Total Size: ${formatSize(totalSize)}
+Primary File: ${primaryFilename} (${primaryMime})
 Keywords: ${keywords.length ? keywords.join(", ") : "None"}
 </CONTEXT>
 

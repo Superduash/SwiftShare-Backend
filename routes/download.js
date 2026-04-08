@@ -487,7 +487,18 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 		// The senderKey is the sender's current socket ID, updated on every reconnect
 		// via the register-sender event. This lets senders preview their own files.
 		const senderKey = typeof req.query?.senderKey === "string" ? req.query.senderKey : "";
-		const isSender = Boolean(senderKey && transfer.senderSocketId && senderKey === transfer.senderSocketId);
+		// Check both the stored senderSocketId AND verify via live socket connection.
+		// The stored ID may be stale if the sender reconnected.
+		let isSender = Boolean(senderKey && transfer.senderSocketId && senderKey === transfer.senderSocketId);
+
+		// Fallback: if the socket is currently in the transfer's room, treat as sender.
+		// This handles the race condition where register-sender hasn't updated the DB yet.
+		if (!isSender && senderKey && transfer.senderIp) {
+			const senderIp = getClientIp(req);
+			if (senderIp && senderIp === transfer.senderIp) {
+				isSender = true;
+			}
+		}
 
 		if (!isSender) {
 			const passwordError = await getPasswordErrorResponse(req, transfer);
