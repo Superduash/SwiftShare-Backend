@@ -483,9 +483,17 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 			return unavailableResponse;
 		}
 
-		const passwordError = await getPasswordErrorResponse(req, transfer);
-		if (passwordError) {
-			return res.status(passwordError.status).json(passwordError.body);
+		// Sender bypass: if the requester provides a matching senderKey, skip password.
+		// The senderKey is the sender's current socket ID, updated on every reconnect
+		// via the register-sender event. This lets senders preview their own files.
+		const senderKey = typeof req.query?.senderKey === "string" ? req.query.senderKey : "";
+		const isSender = Boolean(senderKey && transfer.senderSocketId && senderKey === transfer.senderSocketId);
+
+		if (!isSender) {
+			const passwordError = await getPasswordErrorResponse(req, transfer);
+			if (passwordError) {
+				return res.status(passwordError.status).json(passwordError.body);
+			}
 		}
 
 		const fileIndex = Number(index);
@@ -519,6 +527,7 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 		res.setHeader("Content-Disposition", `inline; filename="${sanitizeFilename(file.originalName || "preview")}"`);
 		res.setHeader("Cache-Control", "private, max-age=300");
 		res.setHeader("Accept-Ranges", "bytes");
+		res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
 
 		if (parsedRange.value) {
 			res.status(206);

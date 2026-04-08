@@ -1,4 +1,4 @@
-﻿const { GoogleGenerativeAI } = require("@google/generative-ai");
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 const geminiApiKey = process.env.GEMINI_API_KEY;
 const geminiClient = geminiApiKey ? new GoogleGenerativeAI(geminiApiKey) : null;
@@ -7,7 +7,14 @@ const modelName = requestedModel && requestedModel !== "gemini-2.0-flash-exp"
 	? requestedModel
 	: "gemini-2.5-flash";
 const model = geminiClient
-	? geminiClient.getGenerativeModel({ model: modelName })
+	? geminiClient.getGenerativeModel({
+		model: modelName,
+		generationConfig: {
+			temperature: 0.3,
+			responseMimeType: "application/json",
+			maxOutputTokens: 4096,
+		},
+	})
 	: null;
 
 let geminiPingCache = {

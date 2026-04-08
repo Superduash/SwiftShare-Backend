@@ -37,8 +37,8 @@ const KEYWORD_STOPWORDS = new Set([
 ]);
 
 const MAX_PREVIEW_CHARS = 8000;
-const MAX_PROMPT_CHARS_PER_FILE = 1800;
-const MAX_PROMPT_TEXT_CHARS = 16000;
+const MAX_PROMPT_CHARS_PER_FILE = 6000;
+const MAX_PROMPT_TEXT_CHARS = 40000;
 const MAX_TEXT_CHARS = 120000;
 const MAX_PDF_CHARS = 240000;
 const MAX_CODE_CHARS = 180000;
@@ -820,47 +820,57 @@ function buildFallbackSummary({ fileCount, totalSize, category, keywords, detect
 }
 
 function buildPrompt({ fileCount, totalSize, primaryFilename, primaryMime, manifest, preview, keywords }) {
-	return [
-		"System: You are SwiftShare AI, an elite, hyper-intelligent data analyst. Your job is to analyze file transfers and provide deeply insightful, concise, and structured metadata.",
-		"CRITICAL: Output valid JSON ONLY. No markdown formatting, no preamble, no trailing text.",
-		"",
-		"--- JSON SCHEMA ---",
-		"{",
-		"  \"overall_summary\": \"String. 2-3 punchy, insightful sentences. What is this bundle? Why is it being sent? What is the core value? Avoid generic phrases like 'This transfer contains'.\",",
-		"  \"suggested_filename\": \"String. Short, descriptive, kebab-case (e.g., 'q1-financial-reports'). Max 50 chars.\",",
-		"  \"category\": \"String. Choose ONE: Assignment, Notes, Invoice, Report, Asset-Bundle, Codebase, Presentation, Spreadsheet, Backup, Mixed-Media, Other.\",",
-		"  \"imageDescription\": \"String or null. If an image has visual descriptions, summarize them. Else null.\",",
-		"  \"detected_intent\": \"String. 2-4 words maximum (e.g., 'Project handoff', 'Sharing vacation photos', 'Code review').\",",
-		"  \"risk_flags\": \"Array of Strings. Identify risks based on content (e.g., ['Contains PII', 'Large executable', 'Financial data']). Empty array [] if completely safe.\",",
-		"  \"files\": [",
-		"    {",
-		"      \"name\": \"String. Exact filename.\",",
-		"      \"type\": \"String. File extension/type.\",",
-		"      \"summary\": \"String. 1 sentence. What EXACTLY is in this file based on the extracted text? NEVER say 'cannot be previewed' or 'binary'. If text is sparse, infer purpose from name/type.\",",
-		"      \"key_points\": [\"String\", \"String\"] // 2 bullet points of specific data, metrics, or features found inside. Max 8 words each.",
-		"    }",
-		"  ]",
-		"}",
-		"--- END SCHEMA ---",
-		"",
-		"RULES FOR GEMINI 2.5 FLASH:",
-		"1. BE SPECIFIC: Use the 'DETAILED FILE CONTENT'. Quote actual metrics, names, or code functions you see.",
-		"2. NO EXCUSES: NEVER write 'cannot be directly previewed', 'binary nature', or 'requires extraction'. If a file is an image or zip without deep text, deduce its purpose intelligently from its filename and context.",
-		"3. CONCISE & PUNCHY: Do not waste tokens on filler words. Get straight to the insights to avoid truncation.",
-		"4. COMPLETE ANALYSIS: You MUST generate a complete JSON object covering EVERY file in the manifest.",
-		"",
-		"[TRANSFER METADATA]",
-		`Total Files: ${fileCount}`,
-		`Total Size: ${formatSizeMB(totalSize)}`,
-		`Primary File: ${primaryFilename} (${primaryMime})`,
-		`Keywords: ${keywords.length ? keywords.join(", ") : "None"}`,
-		"",
-		"[FILE MANIFEST]",
-		manifest,
-		"",
-		"[DETAILED FILE CONTENT TO ANALYZE]",
-		preview,
-	].join("\n");
+  return [
+    "You are a file analysis engine for SwiftShare, a file-sharing platform.",
+    "Analyze the transferred files below and return a JSON object.",
+    "",
+    "Your job: Read the ACTUAL extracted content, understand what the files ARE about, and provide specific, useful analysis.",
+    "",
+    "Analysis rules by file type:",
+    "- PDF/Document: Identify the main topic, thesis, or purpose. Extract key headings, names, dates, or figures mentioned in the text.",
+    "- Code: Explain what the code does functionally. Name the key functions, classes, or endpoints. Identify the framework/language.",
+    "- Image: If OCR text was extracted, summarize what the text says. If no text, describe the image purpose based on filename/metadata.",
+    "- Spreadsheet/CSV: Identify column names, data subject, and row count.",
+    "- Archive/ZIP: Summarize the structure and likely purpose based on contained filenames.",
+    "- Video/Audio: Infer purpose from filename, size, and format.",
+    "",
+    "JSON schema:",
+    "{",
+    '  "overall_summary": "2-3 specific sentences. State what this transfer contains and its purpose. Reference actual content (names, topics, functions) found in the extracted text.",',
+    '  "suggested_filename": "descriptive-kebab-case-name, max 50 chars, based on actual content",',
+    '  "category": "ONE of: Assignment, Notes, Invoice, Report, Image, Video, Audio, Code, Presentation, Spreadsheet, Other",',
+    '  "imageDescription": "If image with meaningful visual/text content, describe it. Otherwise null.",',
+    '  "detected_intent": "2-4 word phrase describing why this was shared (e.g., Homework submission, API documentation, Photo backup)",',
+    '  "risk_flags": ["Only include REAL risks: PII exposure, executable code, sensitive credentials. Empty array if none."],',
+    '  "files": [',
+    '    {',
+    '      "name": "exact original filename",',
+    '      "type": "specific type like JavaScript source, PDF report, JPEG photo",',
+    '      "summary": "One sentence: what this specific file contains or does, referencing actual content",',
+    '      "key_points": ["2-4 specific observations from the content, max 8 words each"]',
+    '    }',
+    '  ]',
+    "}",
+    "",
+    "Bad example (generic, useless):",
+    '  "overall_summary": "This transfer contains a PDF file that has been shared for document purposes."',
+    '  "summary": "A JavaScript file containing code."',
+    "",
+    "Good example (specific, useful):",
+    '  "overall_summary": "Computer Networks assignment covering TCP/IP stack analysis with 5 questions on routing protocols and subnet calculations. Due date referenced: March 15."',
+    '  "summary": "Express.js REST API with 6 endpoints handling user authentication via JWT, using bcrypt for password hashing and MongoDB for storage."',
+    "",
+    "--- TRANSFER DATA ---",
+    `Files: ${fileCount} | Total size: ${formatSizeMB(totalSize)}`,
+    `Primary file: ${primaryFilename} (${primaryMime})`,
+    keywords.length ? `Detected keywords: ${keywords.join(", ")}` : "",
+    "",
+    "File manifest:",
+    manifest,
+    "",
+    "Extracted content (analyze this carefully):",
+    preview,
+  ].filter(line => line !== "").join("\n");
 }
 
 async function buildTransferContext(files) {
