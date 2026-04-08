@@ -384,32 +384,36 @@ function connectMongoWithRetry() {
 	return tryConnect();
 }
 
-async function printStartupStatus(port) {
+function printStartupStatus(port, host) {
 	logEvent("SwiftShare Server Starting");
+	logSuccess("Cleanup Job Running");
+	logSuccess(`Server Running on ${host}:${port}`);
 
-	const mongoConnected = await connectMongoWithRetry();
-	const [redisStatus, r2Status] = await Promise.all([
+	void connectMongoWithRetry().then((mongoConnected) => {
+		if (!mongoConnected) {
+			logError("MongoDB Failed", null);
+		}
+	});
+
+	void Promise.all([
 		getRedisStatus(),
 		getR2Status(),
-	]);
+	]).then(([redisStatus, r2Status]) => {
+		if (redisStatus === "connected") {
+			logSuccess("Redis Connected");
+		} else {
+			logError("Redis Failed", null);
+		}
+
+		if (r2Status === "connected") {
+			logSuccess("R2 Connected");
+		} else {
+			logError("R2 Failed", null);
+		}
+	});
+
 	const geminiStatus = checkGeminiConnection() ? "connected" : "disconnected";
 	const sentryEnabled = Boolean(process.env.SENTRY_DSN);
-
-	if (!mongoConnected) {
-		logError("MongoDB Failed", null);
-	}
-
-	if (redisStatus === "connected") {
-		logSuccess("Redis Connected");
-	} else {
-		logError("Redis Failed", null);
-	}
-
-	if (r2Status === "connected") {
-		logSuccess("R2 Connected");
-	} else {
-		logError("R2 Failed", null);
-	}
 
 	if (geminiStatus === "connected") {
 		logSuccess("Gemini Connected");
@@ -418,15 +422,13 @@ async function printStartupStatus(port) {
 	}
 
 	logSuccess(`Sentry ${sentryEnabled ? "Enabled" : "Disabled"}`);
-
-	logSuccess("Cleanup Job Running");
-	logSuccess(`Server Running on PORT ${port}`);
 }
 
 function startServer() {
 	initSocket(server);
 
 	const port = Number(process.env.PORT) || 3001;
+	const host = process.env.HOST || "0.0.0.0";
 	let retryTimer = null;
 	const isNodemonRuntime = Boolean(process.env.nodemon)
 		|| /nodemon/i.test(String(process.env.npm_lifecycle_script || ""));
@@ -445,7 +447,7 @@ function startServer() {
 				retryTimer = setTimeout(() => {
 					retryTimer = null;
 					if (!isShuttingDown) {
-						server.listen(port);
+						server.listen(port, host);
 					}
 				}, 1200);
 			}
@@ -456,9 +458,9 @@ function startServer() {
 		logError("Server failed to start", error);
 	});
 
-	server.listen(port, async () => {
+	server.listen(port, host, () => {
 		startCleanupJob();
-		await printStartupStatus(port);
+		printStartupStatus(port, host);
 	});
 }
 
