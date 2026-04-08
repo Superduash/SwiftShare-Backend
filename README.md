@@ -1,84 +1,97 @@
-﻿<div align="center">
-  <img src="https://raw.githubusercontent.com/Superduash/SwiftShare/main/public/vite.svg" alt="Backend Logo" width="100" />
-  
-  # SwiftShare Backend
+<p align="center">
+  <img src="https://capsule-render.vercel.app/api?type=rect&height=180&color=0:1E293B,100:0F766E&text=SwiftShare%20Backend&fontSize=44&fontColor=ffffff&desc=Express%20API%20for%20secure%20temporary%20transfers&descAlignY=70" alt="SwiftShare Backend banner" />
+</p>
 
-  ![Version](https://img.shields.io/badge/version-1.0.0-blue.svg?style=for-the-badge)
-  ![Node.js](https://img.shields.io/badge/node.js-22.x-green.svg?style=for-the-badge&logo=node.js&logoColor=white)
-  ![Express.js](https://img.shields.io/badge/express.js-%23404d59.svg?style=for-the-badge&logo=express&logoColor=%2361DAFB)
-  ![MongoDB](https://img.shields.io/badge/MongoDB-%234ea94b.svg?style=for-the-badge&logo=mongodb&logoColor=white)
-
-  **The powerhouse backend operating SwiftShare's lightning-fast secure temporary file transfers.**
-  <br />
-  Featuring Socket.io real-time syncing, AI integrations, and automatic burn-on-download storage.
-
-</div>
+<p align="center">
+  <img src="https://img.shields.io/badge/Node-%3E%3D22-3C873A?style=for-the-badge&logo=node.js&logoColor=white" alt="Node >=22" />
+  <img src="https://img.shields.io/badge/Framework-Express%205-111827?style=for-the-badge&logo=express" alt="Express 5" />
+  <img src="https://img.shields.io/badge/DB-MongoDB-0B7D3E?style=for-the-badge&logo=mongodb&logoColor=white" alt="MongoDB" />
+  <img src="https://img.shields.io/badge/Realtime-Socket.IO-111111?style=for-the-badge&logo=socket.io" alt="Socket.IO" />
+  <img src="https://img.shields.io/badge/Object%20Storage-Cloudflare%20R2-F38020?style=for-the-badge" alt="Cloudflare R2" />
+</p>
 
 ---
 
-<br />
+## Overview
 
-## Backend Features ✨
+SwiftShare Backend powers transfer creation, secure download flows, and lifecycle cleanup.
+It exposes REST endpoints under `/api/*`, emits real-time socket events, and manages temporary transfer state in MongoDB + R2.
 
-* **Real-time Event Architecture**: Built on Socket.io for instantaneous transfer updates and progress tracking.
-* **Auto-Shred Sessions**: Implements true "burn-after-reading" logic. Once the claimant downloads a session or closes the tab, the objects (and MongoDB documents) are purged.
-* **S3-Compatible Object Storage**: Optimized blob storage utilizing Cloudflare R2 (via @aws-sdk/client-s3) without excessive egress fees.
-* **Stateful Fingerprinting**: SHA-256 IP/UA request fingerprinting limits session access to securely prevent hijacking.
-* **Generative AI Summaries**: Integrates with Google's Gemini (@google/generative-ai) to read documents (PDFs, Word) using pdf-parse/mammoth and extract intelligent summaries.
-* **Automated Packaging**: On-the-fly .zip bundling of multi-file streams via dm-zip and rchiver.
-* **Robust Rate Limiting**: Redis-backed limits (@upstash/ratelimit) ensure API safety from bot attacks and abuse.
+## Key Backend Features
+
+- Upload and metadata pipelines for multi-file sessions.
+- Password verification endpoint for protected transfers.
+- Burn-after-download flow with claim ownership and explicit finalize endpoint.
+- File preview and document preview conversion routes.
+- Real-time transfer updates via Socket.IO rooms.
+- Automatic cleanup job for expired/deleted transfers.
+- Optional AI summary support through Gemini.
+- Optional rate limiting via Upstash Redis.
+- Production error monitoring through Sentry integration.
+
+## API Surface
+
+Mounted route groups:
+
+- `/api/upload`
+- `/api/file`
+- `/api/download`
+- `/api/transfer`
+- `/api/nearby`
+- `/api/stats`
+
+Utility endpoints:
+
+- `GET /api/ping`
+- `GET /api/health`
+
+## Run Locally
+
+```bash
+cd Backend
+npm install
+cp .env.example .env
+npm run dev
+```
+
+Default port: `3001`
+
+## Environment Variables
+
+Minimum required in `.env`:
+
+```env
+MONGODB_URI=
+R2_ACCOUNT_ID=
+R2_ACCESS_KEY_ID=
+R2_SECRET_ACCESS_KEY=
+R2_BUCKET_NAME=swiftshare
+FRONTEND_URL=https://your-frontend.vercel.app
+SHARE_BASE_URL=https://your-frontend.vercel.app
+```
+
+Optional:
+
+- `GEMINI_API_KEY`, `GEMINI_MODEL`
+- `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`
+- `SENTRY_DSN`
+- tuning values such as `SESSION_EXPIRY_MINUTES`, `MAX_FILE_SIZE_MB`, `MAX_FILE_COUNT`
+
+## Scripts
+
+```bash
+npm run dev    # nodemon development server (with port guard)
+npm start      # production start
+```
+
+## Operational Notes
+
+- `FRONTEND_URL` supports comma-separated origins for preview + production domains.
+- CORS allows loopback/private hosts in non-production for easier local testing.
+- Health checks include MongoDB, Redis, R2, Gemini, active transfer count, uptime, and version.
 
 ---
 
-> *"Security, speed, and real-time synchronization elegantly packed into a single Node.js runtime."*
-
----
-
-### Tech Stack 💻
-
-| Tool | Purpose |
-|------|---------|
-| **Node.js 22** | Core Javascript Runtime |
-| **Express.js** | Next-generation routing and API layer |
-| **MongoDB / Mongoose** | Schema-enforced NoSQL sessions and logs |
-| **Redis (Upstash)** | High-speed cache for rate limits |
-| **Socket.io** | Bidirectional WebSocket communication |
-| **AWS S3 Client** | R2 Object Storage connector |
-
-<br />
-
-## Getting Started 🚀
-
-### Prerequisites
-Make sure you have Node >= 22.x installed and a MongoDB instance running. Ensure you have the .env file populated.
-
-### Installation & Run
-
-1. **Clone the repository:**
-   `ash
-   git clone https://github.com/Superduash/SwiftShare-Backend.git
-   `
-2. **Navigate to the Backend directory:**
-   `ash
-   cd SwiftShare/Backend
-   `
-3. **Install dependencies:**
-   `ash
-   npm install
-   `
-4. **Boot up in Dev Mode:**
-   `ash
-   npm run dev
-   `
-
-*(Ensure ports 3001 or your configured options are available).*
-
-<br />
-
-## Environment Variables 🔐
-
-Requires configuration for Redis, MongoDB, R2, Gemini, Sentry, and custom CORS scopes. See .env.example in the repo for templates.
-
-<div align="center">
-  <sub>Built with ❤️ by Superduash</sub>
-</div>
+<p align="center">
+  Backend maintained by Superduash
+</p>
