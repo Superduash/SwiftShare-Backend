@@ -1,6 +1,6 @@
 const express = require("express");
 const multer = require("multer");
-const bcrypt = require("bcrypt");
+const bcrypt = require("bcryptjs");
 
 const Transfer = require("../models/Transfer");
 const { uploadBufferToR2 } = require("../services/fileManager");
