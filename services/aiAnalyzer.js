@@ -12,11 +12,34 @@ const { logEvent, logError } = require("../utils/logger");
 
 const ALLOWED_CATEGORIES = new Set([
 	"Codebase",
+	"Media",
+	"Documents",
+	"Mixed",
+	"Other",
+	// Backward compatibility with older category names
 	"Asset-Bundle",
 	"Mixed-Media",
 	"Document",
-	"Other",
 ]);
+
+function normalizeCategoryName(value) {
+	const raw = String(value || "").trim();
+	if (!raw) {
+		return "Other";
+	}
+
+	const key = raw.toLowerCase();
+	if (key === "asset-bundle") return "Mixed";
+	if (key === "mixed-media") return "Media";
+	if (key === "document") return "Documents";
+	if (key === "codebase") return "Codebase";
+	if (key === "media") return "Media";
+	if (key === "documents") return "Documents";
+	if (key === "mixed") return "Mixed";
+	if (key === "other") return "Other";
+
+	return raw;
+}
 
 const CODE_EXTENSIONS = new Set([".js", ".mjs", ".cjs", ".py", ".java", ".cpp", ".c", ".h", ".hpp", ".html", ".css", ".ts", ".tsx", ".jsx", ".go", ".rs", ".php", ".rb", ".swift", ".kt", ".sql", ".json", ".yaml", ".yml", ".xml"]);
 const PRESENTATION_EXTENSIONS = new Set([".ppt", ".pptx", ".key"]);
@@ -261,6 +284,26 @@ function normalizeKeyPoints(input, fallback = []) {
 		: [];
 }
 
+function cleanInsightText(value, maxChars = 220) {
+	return cleanPreviewText(String(value || ""), maxChars)
+		.replace(/\b(this file contains|this file is a|appears to be)\b/gi, "")
+		.replace(/\b(mime|format|extension|file size|size)\b\s*[:\-]?/gi, "")
+		.replace(/\b\d+(?:\.\d+)?\s*(kb|mb|gb|bytes?)\b/gi, "")
+		.replace(/\s{2,}/g, " ")
+		.trim();
+}
+
+function cleanInsightPoints(input) {
+	if (!Array.isArray(input)) {
+		return [];
+	}
+
+	return input
+		.map((item) => cleanInsightText(item, 140))
+		.filter((item) => item.length > 2)
+		.slice(0, 5);
+}
+
 function detectCategoryWithoutAI(filename, mimeType, previewText = "") {
 	const ext = String(path.extname(filename || "")).toLowerCase();
 	const lowerMime = String(mimeType || "").toLowerCase();
@@ -452,8 +495,8 @@ async function preprocessPdfFile({ buffer, name, size }) {
 			typeLabel: "pdf",
 			preview: cleanPreviewText(buildMetadataSummary({ name, mime: "application/pdf", size })),
 			promptText: cleanPreviewText(buildMetadataSummary({ name, mime: "application/pdf", size }), MAX_PROMPT_TEXT_CHARS),
-			localSummary: `Document analyzed using metadata and filename context for ${name} (${formatSize(size)}).`,
-			keyPoints: ["PDF format", `Size: ${formatSize(size)}`, "Document analyzed using metadata and filename context"],
+			localSummary: `Document purpose inferred from filename and transfer context for ${name}.`,
+			keyPoints: ["Document context inferred", "Use surrounding files for purpose"],
 			imageDescription: null,
 			riskFlags: ["pdf_text_extraction_failed"],
 		};
@@ -587,7 +630,7 @@ function preprocessZipFile({ buffer, name, size }) {
 			.slice(0, 6)
 			.map(([ext, count]) => `${ext} (${count})`);
 
-		const summary = `ZIP archive containing ${allEntries.length} files${sortedTypes.length ? ` with main file types ${sortedTypes.join(", ")}` : ""}.`;
+		const summary = "Bundle combining project files, media, and utilities for setup or sharing.";
 		const preview = [
 			summary,
 			"Sample entries:",
@@ -605,10 +648,9 @@ function preprocessZipFile({ buffer, name, size }) {
 			promptText: cleanPreviewText(preview, MAX_PROMPT_TEXT_CHARS),
 			localSummary: summary,
 			keyPoints: [
-				`Files in archive: ${allEntries.length}`,
-				sortedTypes.length ? `Top types: ${sortedTypes.slice(0, 4).join(", ")}` : "Mixed file types",
-				sampledNames.length ? `Representative paths: ${sampledNames.slice(0, 5).join(", ")}` : "No file entries",
-				`Archive size: ${formatSize(size)}`,
+				allEntries.length > 1 ? `${allEntries.length} related files grouped` : "Single-item bundle",
+				sampledNames.length ? `Includes ${sampledNames.slice(0, 3).join(", ")}` : "Prepared for easy sharing",
+				sortedTypes.length ? "Mix of assets and project files" : "Reusable packaged content",
 			],
 			imageDescription: null,
 			riskFlags,
@@ -788,9 +830,9 @@ function pickDominantCategory(enrichedFiles) {
 
 function inferDetectedIntent(category, fileCount) {
 	if (category === "Codebase") return "project handoff";
-	if (category === "Asset-Bundle") return "asset distribution";
-	if (category === "Document") return "document handoff";
-	if (category === "Mixed-Media") return fileCount > 1 ? "media bundle share" : "media share";
+	if (category === "Documents") return "document handoff";
+	if (category === "Media") return fileCount > 1 ? "media sharing" : "media share";
+	if (category === "Mixed") return "bundle handoff";
 	return "file transfer";
 }
 
@@ -800,51 +842,65 @@ function buildFallbackSummary({ fileCount, totalSize, category, keywords, detect
 		: "";
 
 	if (fileCount > 1) {
-		return `${fileCount} files (${formatSize(totalSize)}) centered on ${category.toLowerCase()} material, likely shared for ${detectedIntent}.${keywordText}`.trim();
+		return `${fileCount} related files centered on ${category.toLowerCase()} content, likely shared for ${detectedIntent}.${keywordText}`.trim();
 	}
 
-	return `Single ${category.toLowerCase()} file (${formatSize(totalSize)}) likely shared for ${detectedIntent}.${keywordText}`.trim();
+	return `Single ${category.toLowerCase()} file likely shared for ${detectedIntent}.${keywordText}`.trim();
 }
 
 function buildPrompt({ fileCount, totalSize, primaryFilename, primaryMime, manifest, preview, keywords }) {
-	return `You are SwiftShare Intelligence. Your only job is to analyze file transfers and extract the REAL-WORLD PURPOSE in strict JSON format.
-
-CRITICAL RULES:
-1. NO AI ROBOT-SPEAK: BANNED PHRASES include "Document analyzed using", "ZIP archive containing", "This file is a", "appears to be", or "media bundle".
-2. INFER LIKE A HUMAN: Look at the whole picture. If there is a 'modcombiner.py' and an MP4 video, the video is likely a demo of the mod. Say that. Don't just say "video/mp4 asset".
-3. RUTHLESS NAMING: The suggested_filename must be highly specific based on the core value. "minecraft-mod-script-assets" is great. "mixed-media-share" is terrible. Max 40 chars, kebab-case.
-4. NO EXCUSES: If text extraction failed for a PDF, deduce its purpose from its name and the surrounding files.
-
-OUTPUT STRICTLY IN THIS EXACT JSON FORMAT:
-{
-  "overall_summary": "Two sharp sentences explaining exactly what this collection is and why it was grouped together.",
-  "suggested_filename": "highly-specific-kebab-case-name",
-  "category": "Codebase | Asset-Bundle | Mixed-Media | Document | Other",
-  "detected_intent": "Max 4 words explaining the goal (e.g., 'Game mod management')",
-  "risk_flags": ["Real risks only like 'Exposed local paths' or 'Executable script'. Empty array [] if safe."],
-  "files": [
-    {
-      "name": "exact-filename.ext",
-      "type": "file extension",
-      "summary": "One sharp, specific sentence explaining what this file actually does or represents in the context of the bundle.",
-      "key_points": ["Insight 1 (Max 6 words)", "Insight 2 (Max 6 words)"]
-    }
-  ]
-}
-
-<CONTEXT>
-Total Files: ${fileCount} | Total Size: ${formatSize(totalSize)}
-Primary File: ${primaryFilename} (${primaryMime})
-Keywords: ${keywords.length ? keywords.join(", ") : "None"}
-</CONTEXT>
-
-<MANIFEST>
-${manifest}
-</MANIFEST>
-
-<EXTRACTED_CONTENT>
-${preview}
-</EXTRACTED_CONTENT>`;
+	return [
+		"System: You are SwiftShare Intelligence — you analyze file transfers like a senior engineer reviewing real content.",
+		"Your job is to extract MEANING, PURPOSE, and VALUE — not describe file types.",
+		"",
+		"CRITICAL: Output STRICT JSON ONLY. No markdown. No extra text.",
+		"",
+		"{",
+		'  "overall_summary": "2-3 sharp sentences explaining what this bundle is about, what it contains in terms of real content, and why it was shared.",',
+		'  "suggested_filename": "short kebab-case name (max 50 chars)",',
+		'  "category": "ONE of: Codebase, Media, Documents, Mixed, Other",',
+		'  "detected_intent": "max 3 words (e.g. Project share, Personal media, Mod setup)",',
+		'  "risk_flags": ["ONLY real risks if meaningful"],',
+		'  "files": [',
+		"    {",
+		'      "name": "filename",',
+		'      "summary": "ONE meaningful sentence describing WHAT THIS FILE IS USED FOR (not what type it is)",',
+		'      "key_points": ["2 short insights about content or purpose"]',
+		"    }",
+		"  ]",
+		"}",
+		"",
+		"STRICT RULES:",
+		"",
+		"1. DO NOT mention:",
+		"   - file size",
+		"   - file extension",
+		"   - MIME type",
+		"   - 'this file contains'",
+		"",
+		"2. DO NOT repeat obvious metadata",
+		"",
+		"3. ALWAYS explain PURPOSE:",
+		"   - PDF -> what info it contains",
+		"   - Image -> what it shows",
+		"   - Code -> what it does",
+		"   - ZIP -> what kind of bundle it is",
+		"",
+		"4. BE DIRECT AND USEFUL:",
+		"   No filler. No repetition.",
+		"",
+		"5. EVERY FILE MUST HAVE REAL VALUE IN SUMMARY",
+		"",
+		"[TRANSFER DATA]",
+		`Files: ${fileCount}`,
+		`Primary: ${primaryFilename}`,
+		"",
+		"[MANIFEST]",
+		manifest,
+		"",
+		"[CONTENT]",
+		preview,
+	].join("\n");
 }
 
 async function buildTransferContext(files) {
@@ -862,7 +918,7 @@ async function buildTransferContext(files) {
 		const processed = await preprocessFileContent(file);
 
 		const combinedText = `${processed.preview || ""}\n${processed.localSummary || ""}`;
-		const categoryGuess = detectCategoryWithoutAI(name, mime, combinedText);
+		const categoryGuess = normalizeCategoryName(detectCategoryWithoutAI(name, mime, combinedText));
 
 		enrichedFiles.push({
 			name,
@@ -874,7 +930,7 @@ async function buildTransferContext(files) {
 			preview: cleanPreviewText(processed.preview || processed.localSummary || ""),
 			promptText: cleanPreviewText(processed.promptText || processed.preview || processed.localSummary || "", MAX_PROMPT_TEXT_CHARS),
 			localSummary: normalizeSummary(processed.localSummary, buildMetadataSummary({ name, mime, size })),
-			localKeyPoints: normalizeKeyPoints(processed.keyPoints, [`Size: ${formatSize(size)}`]),
+			localKeyPoints: normalizeKeyPoints(processed.keyPoints, []),
 			imageDescription: processed.imageDescription ? cleanPreviewText(processed.imageDescription, 220) : null,
 			riskFlags: Array.isArray(processed.riskFlags)
 				? processed.riskFlags.map((flag) => cleanPreviewText(String(flag || ""), 80)).filter(Boolean)
@@ -891,10 +947,10 @@ async function buildTransferContext(files) {
 	const aggregateText = cleanPreviewText(enrichedFiles.map((file) => file.promptText || file.preview || file.localSummary).join("\n\n"), MAX_PDF_CHARS);
 	const keywords = keywordHintsFromText(aggregateText, 10);
 	const manifest = enrichedFiles
-		.map((file, idx) => `${idx + 1}. ${file.name} | ${file.mime} | ${formatSize(file.size)} | guessed=${file.categoryGuess}`)
+		.map((file, idx) => `${idx + 1}. ${file.name} | guessed=${file.categoryGuess}`)
 		.join("\n");
 
-	const topCategory = pickDominantCategory(enrichedFiles);
+	const topCategory = normalizeCategoryName(pickDominantCategory(enrichedFiles));
 	const detectedIntent = inferDetectedIntent(topCategory, enrichedFiles.length);
 	const riskFlags = [...new Set(enrichedFiles.flatMap((file) => file.riskFlags))].slice(0, 8);
 
@@ -911,12 +967,8 @@ async function buildTransferContext(files) {
 					const snippet = cleanPreviewText(file.promptText || file.preview || file.localSummary, MAX_PROMPT_CHARS_PER_FILE);
 					return [
 						`--- FILE ${idx + 1}: ${file.name} ---`,
-						`Type: ${file.typeLabel}`,
-						`MIME: ${file.mime}`,
-						`Size: ${formatSize(file.size)}`,
 						`Guessed category: ${file.categoryGuess}`,
-						`Local analysis: ${file.localSummary}`,
-						`Local key points: ${file.localKeyPoints.join(" | ")}`,
+						`Purpose hints: ${file.localSummary}`,
 						"Extracted content snippet:",
 						snippet,
 					].join("\n");
@@ -944,13 +996,13 @@ function normalizeAiResult(parsed, context) {
 	const fallbackCategory = context.category;
 	const fallbackName = sanitizeSuggestedName(path.parse(context.primaryFilename || "file").name || "file");
 
-	const parsedCategory = typeof parsed?.category === "string" ? parsed.category.trim() : "";
+	const parsedCategory = typeof parsed?.category === "string" ? normalizeCategoryName(parsed.category) : "";
 	const category = ALLOWED_CATEGORIES.has(parsedCategory)
 		? parsedCategory
-		: fallbackCategory;
+		: normalizeCategoryName(fallbackCategory);
 
 	const rawSummary = parsed?.overall_summary || parsed?.summary;
-	const summary = normalizeSummary(rawSummary, fallbackSummary);
+	const summary = cleanInsightText(normalizeSummary(rawSummary, fallbackSummary), 1200) || fallbackSummary;
 	const rawSuggestedName = parsed?.suggested_filename || parsed?.suggestedName;
 	const suggestedName = sanitizeSuggestedName(rawSuggestedName, fallbackName);
 
@@ -966,11 +1018,13 @@ function normalizeAiResult(parsed, context) {
 
 	const files = context.enrichedFiles.map((file, index) => {
 		const candidate = findAiFile(file.name, index);
+		const cleanFileSummary = cleanInsightText(normalizeSummary(candidate?.summary, file.localSummary), 700)
+			|| cleanInsightText(file.localSummary, 700);
 		return {
 			name: String(file.name || "").slice(0, 128),
-			type: cleanPreviewText(String(candidate?.type || file.typeLabel || file.mime || "file"), 64),
-			summary: normalizeSummary(candidate?.summary, file.localSummary),
-			key_points: normalizeKeyPoints(candidate?.key_points, file.localKeyPoints),
+			type: cleanPreviewText(String(candidate?.type || ""), 64),
+			summary: cleanFileSummary,
+			key_points: cleanInsightPoints(normalizeKeyPoints(candidate?.key_points, [])),
 		};
 	});
 
@@ -984,7 +1038,7 @@ function normalizeAiResult(parsed, context) {
 	const riskFlags = [...new Set([...(context.riskFlags || []), ...aiRiskFlags])].slice(0, 8);
 
 	let imageDescription = null;
-	if (category === "Image" || context.primaryMime.startsWith("image/")) {
+	if (category === "Media" || context.primaryMime.startsWith("image/")) {
 		const aiImageDescription = cleanPreviewText(parsed?.imageDescription || "", 220);
 		const fallbackImageDescription = context.enrichedFiles.find((file) => file.imageDescription)?.imageDescription || null;
 		imageDescription = aiImageDescription || fallbackImageDescription;
