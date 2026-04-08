@@ -2,19 +2,21 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { redis } = require("../config/redis");
 const { logEvent, logError } = require("../utils/logger");
 
-const REQUEST_TIMEOUT_MS = 8000;
-const MAX_ATTEMPTS = 3;
+const REQUEST_TIMEOUT_MS = Number(process.env.AI_REQUEST_TIMEOUT_MS) > 0
+	? Number(process.env.AI_REQUEST_TIMEOUT_MS)
+	: 20000;
 const CACHE_TTL_SECONDS = Number(process.env.AI_CACHE_TTL_SECONDS) > 0
 	? Number(process.env.AI_CACHE_TTL_SECONDS)
 	: 60 * 60;
 
 const GEMINI_PRIMARY_MODEL = "gemini-2.5-flash";
 const GEMINI_FALLBACK_MODEL = "gemini-3.1-flash";
-const GROQ_MODEL = "llama3-70b-8192";
-const OPENROUTER_QUALITY_MODEL = "nvidia/nemotron-3-super";
-const OPENROUTER_STRUCTURE_MODEL = "qwen/qwen3-next-80b-instruct";
+const GROQ_MODEL = "llama-3.3-70b-versatile";
+const OPENROUTER_QUALITY_MODEL = "openai/gpt-4o-mini";
+const OPENROUTER_STRUCTURE_MODEL = "openai/gpt-4o-mini";
+const MAX_PROVIDER_RETRIES = 2;
 
-const WEAK_TERMS = ["file type", "analyzed using", "metadata", "cannot extract", "binary content", "pdf_text_extraction_failed", "image containing readable text"];
+const WEAK_TERMS = ["file type", "analyzed using", "metadata", "cannot extract", "binary content", "pdf_text_extraction_failed", "image containing readable text", "captured text reads", "purpose inferred", "files centered on", "code focused on application logic"];
 
 const geminiApiKey = String(process.env.GEMINI_API_KEY || "").trim();
 const groqApiKey = String(process.env.GROQ_API_KEY || "").trim();
@@ -81,11 +83,7 @@ function validateParsedOutput(parsed, rawText) {
 	}
 
 	const normalizedRaw = stripMarkdownJson(rawText);
-	if (normalizedRaw.length < 80) {
-		return { ok: false, reason: "weak_output" };
-	}
-
-	if (hasWeakTerms(normalizedRaw) || hasWeakTerms(JSON.stringify(parsed))) {
+	if (normalizedRaw.length < 50) {
 		return { ok: false, reason: "weak_output" };
 	}
 
@@ -450,7 +448,11 @@ async function runProviderStep(stepName, run) {
 		return { ok: false, reason: evaluation.reason || "invalid_json" };
 	}
 
-	return { ok: true, parsed: safeParseJson(result.rawText) };
+	return {
+		ok: true,
+		parsed: safeParseJson(result.rawText),
+		rawText: String(result.rawText || "").trim(),
+	};
 }
 
 async function tryOpenRouterFamily(prompt) {
@@ -462,19 +464,12 @@ async function tryOpenRouterFamily(prompt) {
 	return runProviderStep("openrouter:qwen", () => tryOpenRouterModel(prompt, OPENROUTER_STRUCTURE_MODEL));
 }
 
-function sanitizeAI(text) {
-  if (!text) return text;
-  return text
-    .replace(/Purpose inferred from filename context\.?/gi, "Supporting asset.")
-    .replace(/analyzed using metadata\.?/gi, "")
-    .replace(/media shared for media sharing\.?/gi, "Mixed media bundle.")
-    .trim();
-}
-
 async function analyzeWithFallback(prompt, transferCode, forceFallback = false) {
 	const cacheKey = getCacheKey(transferCode);
 
-	if (!forceFallback) {
+	if (forceFallback) {
+		await clearCachedAiResult(transferCode);
+	} else {
 		if (cacheKey && memoryCache.has(cacheKey)) {
 			const memoryValue = getMemoryCacheEntry(cacheKey);
 			if (memoryValue) {
@@ -486,50 +481,42 @@ async function analyzeWithFallback(prompt, transferCode, forceFallback = false) 
 		if (cached) {
 			return cached;
 		}
-	} else {
-		await clearCachedAiResult(transferCode);
 	}
 
-	const steps = [];
-	if (!forceFallback) {
-		steps.push({ name: "gemini", run: () => runProviderStep("gemini", () => tryGeminiFamily(prompt)) });
-	}
-	steps.push(
+	const steps = [
+		{ name: "gemini", run: () => runProviderStep("gemini", () => tryGeminiFamily(prompt)) },
+		{ name: "openrouter", run: () => tryOpenRouterFamily(prompt) },
 		{ name: "groq", run: () => runProviderStep("groq", () => tryGroq(prompt)) },
-		{ name: "openrouter", run: () => tryOpenRouterFamily(prompt) }
-	);
+	];
 
-	let attempts = 0;
 	for (const step of steps) {
-		if (attempts >= MAX_ATTEMPTS) {
-			break;
-		}
+		for (let attempt = 1; attempt <= MAX_PROVIDER_RETRIES; attempt += 1) {
+			const result = await step.run();
+			const responseLength = String(result?.rawText || "").length;
+			if (result.ok && result.parsed && responseLength > 50) {
+				await setCachedAiResult(transferCode, result.parsed);
+				return result.parsed;
+			}
 
-		attempts += 1;
-		const result = await step.run();
-		if (!result.ok || !result.parsed) {
-			logEvent("AI fallback switch", `STEP: ${step.name}`, `REASON: ${result?.reason || "failed"}`);
-			continue;
-		}
+			const reason = result?.reason || (responseLength <= 50 ? "short_response" : "failed");
+			logEvent("AI fallback switch", `STEP: ${step.name}`, `ATTEMPT: ${attempt}`, `REASON: ${reason}`);
 
-		// Apply the sanitizer to the result
-		if (result.parsed.overall_summary) {
-			result.parsed.overall_summary = sanitizeAI(result.parsed.overall_summary);
-		}
-		if (result.parsed.summary) {
-			result.parsed.summary = sanitizeAI(result.parsed.summary);
-		}
-		if (Array.isArray(result.parsed.files)) {
-			result.parsed.files.forEach((f) => {
-				if (f.summary) f.summary = sanitizeAI(f.summary);
-			});
-		}
+			const canRetryCurrentProvider = [
+				"timeout",
+				"rate_limit",
+				"provider_error",
+				"invalid_json",
+				"weak_output",
+				"short_response",
+			].includes(reason);
 
-		await setCachedAiResult(transferCode, result.parsed);
-		return result.parsed;
+			if (!canRetryCurrentProvider || attempt >= MAX_PROVIDER_RETRIES) {
+				break;
+			}
+		}
 	}
 
-	return null;
+	throw new Error("All AI providers failed to return valid analysis");
 }
 
 module.exports = {

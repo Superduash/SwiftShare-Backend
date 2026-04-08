@@ -35,12 +35,78 @@ const { version } = require("./package.json");
 
 const app = express();
 const server = http.createServer(app);
+const isProduction = String(process.env.NODE_ENV || "").toLowerCase() === "production";
 
 function getAllowedFrontendOrigins() {
 	return String(process.env.FRONTEND_URL || "")
 		.split(",")
 		.map((origin) => origin.trim())
 		.filter(Boolean);
+}
+
+function parseOrigin(origin) {
+	try {
+		return new URL(origin);
+	} catch {
+		return null;
+	}
+}
+
+function isLoopbackHost(hostname) {
+	return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+}
+
+function isPrivateNetworkHost(hostname) {
+	if (!hostname) {
+		return false;
+	}
+
+	if (/^10\./.test(hostname)) {
+		return true;
+	}
+
+	if (/^192\.168\./.test(hostname)) {
+		return true;
+	}
+
+	const match172 = /^172\.(\d{1,3})\./.exec(hostname);
+	if (match172) {
+		const second = Number(match172[1]);
+		return Number.isFinite(second) && second >= 16 && second <= 31;
+	}
+
+	return false;
+}
+
+function isDevOriginAllowed(origin) {
+	const parsed = parseOrigin(origin);
+	if (!parsed) {
+		return false;
+	}
+
+	return isLoopbackHost(parsed.hostname) || isPrivateNetworkHost(parsed.hostname);
+}
+
+function originsMatch(requestOrigin, configuredOrigin) {
+	const reqParsed = parseOrigin(requestOrigin);
+	const cfgParsed = parseOrigin(configuredOrigin);
+	if (!reqParsed || !cfgParsed) {
+		return requestOrigin === configuredOrigin;
+	}
+
+	if (reqParsed.protocol !== cfgParsed.protocol) {
+		return false;
+	}
+
+	if (reqParsed.port !== cfgParsed.port) {
+		return false;
+	}
+
+	if (reqParsed.hostname === cfgParsed.hostname) {
+		return true;
+	}
+
+	return isLoopbackHost(reqParsed.hostname) && isLoopbackHost(cfgParsed.hostname);
 }
 
 const allowedFrontendOrigins = getAllowedFrontendOrigins();
@@ -51,7 +117,15 @@ function corsOrigin(origin, callback) {
 		return;
 	}
 
-	if (allowedFrontendOrigins.length === 0 || allowedFrontendOrigins.includes(origin)) {
+	if (!isProduction && isDevOriginAllowed(origin)) {
+		callback(null, true);
+		return;
+	}
+
+	if (
+		allowedFrontendOrigins.length === 0
+		|| allowedFrontendOrigins.some((configuredOrigin) => originsMatch(origin, configuredOrigin))
+	) {
 		callback(null, true);
 		return;
 	}

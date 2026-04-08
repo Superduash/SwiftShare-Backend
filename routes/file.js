@@ -10,6 +10,15 @@ const { analyzeTransfer } = require("../services/aiAnalyzer");
 
 const router = express.Router();
 
+function isUsableAiResult(aiResult) {
+	if (!aiResult || aiResult.success === false) {
+		return false;
+	}
+
+	const summary = String(aiResult.overall_summary || aiResult.summary || "").trim();
+	return Boolean(summary && Array.isArray(aiResult.files) && aiResult.files.length > 0);
+}
+
 router.post("/:code/analyze", rateLimitMetadata, validateCode, async (req, res, next) => {
 	try {
 		const { code } = req.params;
@@ -48,7 +57,7 @@ router.post("/:code/analyze", rateLimitMetadata, validateCode, async (req, res, 
 		}
 
 		const aiResult = await analyzeTransfer(incomingFiles, code, Boolean(forceFallback));
-		if (aiResult) {
+		if (isUsableAiResult(aiResult)) {
 			await Transfer.updateOne(
 				{ code },
 				{
@@ -63,9 +72,14 @@ router.post("/:code/analyze", rateLimitMetadata, validateCode, async (req, res, 
 					},
 				}
 			);
+
+			return res.status(200).json({ success: true, ai: aiResult });
 		}
 
-		return res.status(200).json({ success: true, ai: aiResult });
+		return res.status(200).json({
+			success: false,
+			warning: aiResult?.warning || "AI analysis unavailable",
+		});
 	} catch (error) {
 		return next(error);
 	}

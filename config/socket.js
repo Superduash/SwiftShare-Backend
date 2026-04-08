@@ -5,6 +5,7 @@ const { logEvent, logError } = require("../utils/logger");
 
 let ioInstance;
 const countdownMap = new Map();
+const isProduction = String(process.env.NODE_ENV || "").toLowerCase() === "production";
 
 function normalizeCode(code) {
 	return String(code || "").trim().toUpperCase();
@@ -13,6 +14,71 @@ function normalizeCode(code) {
 function roomName(code) {
 	const normalizedCode = normalizeCode(code);
 	return normalizedCode ? `room:${normalizedCode}` : "";
+}
+
+function parseOrigin(origin) {
+	try {
+		return new URL(origin);
+	} catch {
+		return null;
+	}
+}
+
+function isLoopbackHost(hostname) {
+	return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+}
+
+function isPrivateNetworkHost(hostname) {
+	if (!hostname) {
+		return false;
+	}
+
+	if (/^10\./.test(hostname)) {
+		return true;
+	}
+
+	if (/^192\.168\./.test(hostname)) {
+		return true;
+	}
+
+	const match172 = /^172\.(\d{1,3})\./.exec(hostname);
+	if (match172) {
+		const second = Number(match172[1]);
+		return Number.isFinite(second) && second >= 16 && second <= 31;
+	}
+
+	return false;
+}
+
+function isDevOriginAllowed(origin) {
+	const parsed = parseOrigin(origin);
+	if (!parsed) {
+		return false;
+	}
+
+	return isLoopbackHost(parsed.hostname) || isPrivateNetworkHost(parsed.hostname);
+}
+
+function originsMatch(requestOrigin, configuredOrigin) {
+	const reqParsed = parseOrigin(requestOrigin);
+	const cfgParsed = parseOrigin(configuredOrigin);
+	if (!reqParsed || !cfgParsed) {
+		return requestOrigin === configuredOrigin;
+	}
+
+	if (reqParsed.protocol !== cfgParsed.protocol) {
+		return false;
+	}
+
+	if (reqParsed.port !== cfgParsed.port) {
+		return false;
+	}
+
+	if (reqParsed.hostname === cfgParsed.hostname) {
+		return true;
+	}
+
+	return isLoopbackHost(reqParsed.hostname) && isLoopbackHost(cfgParsed.hostname);
 }
 
 function emitToRoom(code, event, data = {}) {
@@ -142,7 +208,27 @@ function initSocket(server) {
 
 	ioInstance = new Server(server, {
 		cors: {
-			origin: allowedOrigins.length > 0 ? allowedOrigins : true,
+			origin: (origin, callback) => {
+				if (!origin) {
+					callback(null, true);
+					return;
+				}
+
+				if (!isProduction && isDevOriginAllowed(origin)) {
+					callback(null, true);
+					return;
+				}
+
+				if (
+					allowedOrigins.length === 0
+					|| allowedOrigins.some((configuredOrigin) => originsMatch(origin, configuredOrigin))
+				) {
+					callback(null, true);
+					return;
+				}
+
+				callback(new Error("Origin not allowed by Socket.IO CORS"));
+			},
 			methods: ["GET", "POST"],
 		},
 	});

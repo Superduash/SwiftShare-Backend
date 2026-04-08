@@ -94,6 +94,15 @@ function createAppError(status, errorCode, message) {
 	return error;
 }
 
+function isUsableAiResult(aiResult) {
+	if (!aiResult || aiResult.success === false) {
+		return false;
+	}
+
+	const summary = String(aiResult.overall_summary || aiResult.summary || "").trim();
+	return Boolean(summary && Array.isArray(aiResult.files) && aiResult.files.length > 0);
+}
+
 async function validateIncomingFiles(files) {
 	if (!Array.isArray(files) || files.length === 0) {
 		throw createAppError(400, ERROR_CODES.NO_FILE_UPLOADED, "No file uploaded");
@@ -266,21 +275,37 @@ async function processUploadFlow({
 			logEvent("AI analysis started", `CODE: ${code}`, `FILES: ${incomingFiles.length}`);
 			const aiResult = await analyzeTransfer(incomingFiles, code);
 
-			await Transfer.updateOne({ code }, { $set: { ai: aiResult || null } });
+			if (!isUsableAiResult(aiResult)) {
+				emitToRoom(code, "ai-ready", {
+					summary: null,
+					category: null,
+					suggestedName: null,
+					imageDescription: null,
+					files: [],
+					detectedIntent: null,
+					riskFlags: [],
+					warning: aiResult?.warning || "AI analysis unavailable",
+				});
+
+				logEvent("AI analysis completed", `CODE: ${code}`, "READY: false");
+				return;
+			}
+
+			await Transfer.updateOne({ code }, { $set: { ai: aiResult } });
 
 			emitToRoom(code, "ai-ready", {
-				summary: aiResult?.summary || null,
-				category: aiResult?.category || null,
-				suggestedName: aiResult?.suggestedName || null,
-				imageDescription: aiResult?.imageDescription || null,
-				files: aiResult?.files || [],
-				detectedIntent: aiResult?.detectedIntent || null,
-				riskFlags: aiResult?.riskFlags || [],
+				summary: aiResult.summary || aiResult.overall_summary || null,
+				category: aiResult.category || null,
+				suggestedName: aiResult.suggestedName || aiResult.suggested_filename || null,
+				imageDescription: aiResult.imageDescription || null,
+				files: aiResult.files || [],
+				detectedIntent: aiResult.detectedIntent || aiResult.detected_intent || null,
+				riskFlags: aiResult.riskFlags || aiResult.risk_flags || [],
 			});
 
-			logEvent("AI analysis completed", `CODE: ${code}`, `READY: ${Boolean(aiResult)}`);
+			logEvent("AI analysis completed", `CODE: ${code}`, "READY: true");
 		} catch (aiError) {
-			logError("AI analysis completed", aiError, `CODE: ${code}`, "READY: false");
+			logError("AI analysis failed", aiError, `CODE: ${code}`, "READY: false");
 		}
 	})();
 

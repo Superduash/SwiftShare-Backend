@@ -1,1442 +1,894 @@
 const path = require("path");
-const pdfParseLib = require("pdf-parse");
-// pdf-parse v1.x exports the function directly; v2.x may export as .default or .PDFParse
-const pdfParse = typeof pdfParseLib === 'function'
-	? pdfParseLib
-	: (pdfParseLib.default || pdfParseLib.PDFParse || pdfParseLib);
 const mammoth = require("mammoth");
 const AdmZip = require("adm-zip");
-const Tesseract = require("tesseract.js");
+
 const { analyzeWithFallback } = require("./aiRouter");
+const { generateAIResponse } = require("../config/gemini");
 const { logEvent, logError } = require("../utils/logger");
 
-const ALLOWED_CATEGORIES = new Set([
-	"Codebase",
-	"Media",
-	"Documents",
-	"Mixed",
-	"Other",
-	// Backward compatibility with older category names
-	"Asset-Bundle",
-	"Mixed-Media",
-	"Document",
-]);
-
-function normalizeCategoryName(value) {
-	const raw = String(value || "").trim();
-	if (!raw) {
-		return "Other";
+function loadPdfParser() {
+	try {
+		return require("pdf-parse/lib/pdf-parse.js");
+	} catch (error) {
+		return require("pdf-parse");
 	}
-
-	const key = raw.toLowerCase();
-	if (key === "asset-bundle") return "Mixed";
-	if (key === "mixed-media") return "Media";
-	if (key === "document") return "Documents";
-	if (key === "codebase") return "Codebase";
-	if (key === "media") return "Media";
-	if (key === "documents") return "Documents";
-	if (key === "mixed") return "Mixed";
-	if (key === "other") return "Other";
-
-	return raw;
 }
 
-const CODE_EXTENSIONS = new Set([".js", ".mjs", ".cjs", ".py", ".java", ".cpp", ".c", ".h", ".hpp", ".html", ".css", ".ts", ".tsx", ".jsx", ".go", ".rs", ".php", ".rb", ".swift", ".kt", ".sql", ".json", ".yaml", ".yml", ".xml"]);
-const PRESENTATION_EXTENSIONS = new Set([".ppt", ".pptx", ".key"]);
-const SPREADSHEET_EXTENSIONS = new Set([".xls", ".xlsx", ".csv", ".tsv", ".ods"]);
-const VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".avi", ".mkv", ".webm"]);
-const AUDIO_EXTENSIONS = new Set([".mp3", ".wav", ".flac", ".m4a", ".ogg"]);
-const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg", ".heic"]);
-const TEXT_EXTENSIONS = new Set([".txt", ".md", ".rtf", ".log"]);
-const ARCHIVE_EXTENSIONS = new Set([".zip"]);
-const DOCUMENT_EXTENSIONS = new Set([
-	...TEXT_EXTENSIONS,
-	...PRESENTATION_EXTENSIONS,
-	...SPREADSHEET_EXTENSIONS,
-	".pdf",
-	".doc",
-	".docx",
-	".odt",
-]);
-const ARCHIVE_TAG_EXTENSIONS = new Set([".zip", ".rar", ".7z", ".tar", ".gz"]);
-const KEY_FILE_PRIORITIES = [".py", ".js", ".pdf"];
-const GAME_MOD_HINTS = ["mod", "mods", "forge", "fabric", "shader", "resourcepack", "resource-pack", "minecraft", "curseforge", "pack"];
+const pdfParserModule = loadPdfParser();
 
-const KEYWORD_STOPWORDS = new Set([
-	"a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "have", "in", "is", "it", "its",
-	"of", "on", "or", "that", "the", "to", "was", "were", "with", "this", "these", "those", "your", "you",
-	"will", "can", "not", "null", "true", "false", "let", "const", "var", "function", "class", "import", "export",
-]);
-
-const MAX_PREVIEW_CHARS = 8000;
-const MAX_PROMPT_CHARS_PER_FILE = 6000;
-const MAX_PROMPT_TEXT_CHARS = 40000;
-const MAX_TEXT_CHARS = 120000;
-const MAX_PDF_CHARS = 240000;
-const MAX_CODE_CHARS = 180000;
-const MAX_ZIP_ENTRIES = 500;
-const MAX_ZIP_NAME_SAMPLES = 28;
-const MAX_OCR_TIMEOUT_MS = Number(process.env.AI_OCR_TIMEOUT_MS) > 0 ? Number(process.env.AI_OCR_TIMEOUT_MS) : 25000;
-const MAX_OCR_BYTES = Number(process.env.AI_OCR_MAX_BYTES) > 0 ? Number(process.env.AI_OCR_MAX_BYTES) : 8 * 1024 * 1024;
-const OCR_ENABLED = String(process.env.AI_OCR_ENABLED || "true").toLowerCase() !== "false";
-
-const EXTENSION_LANGUAGE = {
-	".js": "JavaScript",
-	".mjs": "JavaScript",
-	".cjs": "JavaScript",
-	".ts": "TypeScript",
-	".tsx": "TypeScript",
-	".jsx": "JavaScript",
-	".py": "Python",
-	".java": "Java",
-	".cpp": "C++",
-	".c": "C",
-	".h": "C/C++ Header",
-	".hpp": "C++ Header",
-	".go": "Go",
-	".rs": "Rust",
-	".php": "PHP",
-	".rb": "Ruby",
-	".swift": "Swift",
-	".kt": "Kotlin",
-	".sql": "SQL",
-	".json": "JSON",
-	".yaml": "YAML",
-	".yml": "YAML",
-	".xml": "XML",
-	".html": "HTML",
-	".css": "CSS",
-};
-
-let currentWindowStart = Date.now();
-let requestCountInWindow = 0;
-
-function getAiAnalyzerMaxRequests() {
-	const configured = Number(process.env.AI_ANALYZER_MAX_RPM);
-	if (Number.isFinite(configured) && configured > 0) {
-		return Math.max(1, Math.floor(configured));
+async function parsePdfBuffer(buffer) {
+	if (typeof pdfParserModule === "function") {
+		return pdfParserModule(buffer);
 	}
 
-	return 14;
+	if (pdfParserModule && typeof pdfParserModule.default === "function") {
+		return pdfParserModule.default(buffer);
+	}
+
+	if (pdfParserModule && typeof pdfParserModule.PDFParse === "function") {
+		const parser = new pdfParserModule.PDFParse({ data: buffer });
+		try {
+			const result = await parser.getText();
+			return { text: String(result?.text || "") };
+		} finally {
+			if (typeof parser.destroy === "function") {
+				await parser.destroy().catch(() => {});
+			}
+		}
+	}
+
+	throw new Error("Unsupported pdf-parse API shape");
 }
 
-function canUseAI() {
-	const now = Date.now();
-	if (now - currentWindowStart >= 60_000) {
-		currentWindowStart = now;
-		requestCountInWindow = 0;
-	}
+const HUMAN_REVIEW_PROMPT = `You are a human reviewing actual file contents.
 
-	if (requestCountInWindow >= getAiAnalyzerMaxRequests()) {
-		return false;
-	}
+Explain what each file contains based on its real meaning.
 
-	requestCountInWindow += 1;
-	return true;
-}
+Write naturally like a developer explaining to another person.
 
-function cleanPreviewText(text, maxChars = MAX_PREVIEW_CHARS) {
-	return String(text || "")
+Rules:
+- 1 sentence per file
+- no metadata descriptions
+- no file extensions
+- no 'this file contains'
+- no repetition
+
+Focus on purpose and meaning.`;
+
+const REWRITE_PROMPT = "Rewrite this in a more natural, human way. Remove generic phrases.";
+const OPENROUTER_VISION_MODEL = "openai/gpt-4o-mini";
+
+const GENERIC_PHRASES = [
+	"file named",
+	"this file contains",
+	"purpose inferred",
+	"media sharing",
+	"analyzed using",
+	"contains image",
+	"bundle of files",
+	"bundle contains",
+	"metadata",
+	"mime type",
+	"file extension",
+	"visual context",
+];
+
+const METADATA_STYLE_RE = /\b(pdf|png|jpg|jpeg|gif|webp|mp4|mov|avi|mkv|mime|extension)\b/i;
+
+const STOP_WORDS = new Set([
+	"the", "and", "for", "that", "this", "with", "from", "into", "your", "their", "about", "after", "before",
+	"have", "has", "are", "was", "were", "will", "been", "being", "into", "onto", "over", "under", "than",
+	"using", "used", "they", "them", "its", "only", "also", "very", "just", "then", "when", "where", "what",
+	"which", "while", "such", "there", "here", "most", "more", "less", "each", "every", "between", "within",
+	"about", "like", "code", "file", "files",
+]);
+
+const CODE_EXTENSIONS = new Set([".js", ".jsx", ".ts", ".tsx", ".py", ".java", ".go", ".rb", ".php", ".c", ".cpp", ".cs", ".rs", ".swift", ".sh"]);
+
+function normalizeWhitespace(value) {
+	return String(value || "")
+		.replace(/\r/g, "\n")
 		.replace(/\u0000/g, "")
-		.replace(/\r\n?/g, "\n")
+		.replace(/[ \t]+/g, " ")
 		.replace(/\n{3,}/g, "\n\n")
-		.trim()
-		.slice(0, maxChars);
+		.trim();
 }
 
-function safeTextFromBuffer(buffer, maxChars = MAX_TEXT_CHARS) {
-	if (!buffer) {
+function clipText(value, maxLength = 260) {
+	const text = normalizeWhitespace(value);
+	if (text.length <= maxLength) {
+		return text;
+	}
+
+	let clipped = text.slice(0, Math.max(0, maxLength));
+	const boundary = clipped.lastIndexOf(" ");
+	if (boundary >= Math.floor(maxLength * 0.6)) {
+		clipped = clipped.slice(0, boundary);
+	}
+
+	clipped = clipped.trim();
+	if (!/[.!?]$/.test(clipped)) {
+		clipped = `${clipped}.`;
+	}
+
+	return clipped;
+}
+
+function ensureSentence(value) {
+	const sentences = toSentences(value);
+	return sentences.length ? sentences[0] : "";
+}
+
+function toSentences(value) {
+	const text = normalizeWhitespace(value);
+	if (!text) {
+		return [];
+	}
+
+	return text
+		.split(/(?<=[.!?])\s+/)
+		.map((item) => item.trim())
+		.filter(Boolean)
+		.map((item) => {
+			if (/[.!?]$/.test(item)) {
+				return item;
+			}
+			return `${item}.`;
+		});
+}
+
+function containsGenericPhrase(value) {
+	const lower = String(value || "").toLowerCase();
+	return GENERIC_PHRASES.some((phrase) => lower.includes(phrase));
+}
+
+function unwrapAiText(value) {
+	const raw = normalizeWhitespace(value);
+	if (!raw) {
 		return "";
 	}
 
 	try {
-		return cleanPreviewText(Buffer.from(buffer).toString("utf8"), maxChars);
+		const parsed = JSON.parse(raw);
+		if (typeof parsed === "string") {
+			return normalizeWhitespace(parsed);
+		}
+		if (parsed && typeof parsed === "object") {
+			const preferred = parsed.explanation || parsed.summary || parsed.caption || parsed.description;
+			if (typeof preferred === "string") {
+				return normalizeWhitespace(preferred);
+			}
+		}
 	} catch (error) {
-		return "";
-	}
-}
-
-function extractJsonBlock(text) {
-	const raw = String(text || "").trim();
-
-	const fencedMatch = raw.match(/```json\s*([\s\S]*?)```/i);
-	if (fencedMatch) {
-		return fencedMatch[1].trim();
-	}
-
-	const firstBrace = raw.indexOf("{");
-	const lastBrace = raw.lastIndexOf("}");
-	if (firstBrace >= 0 && lastBrace > firstBrace) {
-		return raw.slice(firstBrace, lastBrace + 1);
+		// Keep raw text when it's not JSON.
 	}
 
 	return raw;
 }
 
-function parseAiJson(responseText) {
-	const base = extractJsonBlock(responseText);
-	const candidates = [
-		base,
-		base.replace(/[“”]/g, '"').replace(/[‘’]/g, "'"),
-		base.replace(/,\s*([}\]])/g, "$1"),
-	];
+function extractChatContent(messageContent) {
+	if (typeof messageContent === "string") {
+		return messageContent;
+	}
 
-	for (const candidate of candidates) {
-		try {
-			return JSON.parse(candidate);
-		} catch (error) {
-			// Try next candidate.
+	if (Array.isArray(messageContent)) {
+		return messageContent
+			.map((part) => {
+				if (typeof part === "string") {
+					return part;
+				}
+				if (part && typeof part.text === "string") {
+					return part.text;
+				}
+				return "";
+			})
+			.join("\n");
+	}
+
+	return "";
+}
+
+function getFileName(file) {
+	return String(file?.originalname || file?.filename || "file");
+}
+
+function getFileExt(name) {
+	return path.extname(String(name || "")).toLowerCase();
+}
+
+function getMeaningfulParagraphs(rawText, minLength = 80, maxParagraphs = 5) {
+	const paragraphs = String(rawText || "")
+		.replace(/\r/g, "\n")
+		.split(/\n\s*\n/)
+		.map((item) => normalizeWhitespace(item))
+		.filter((item) => item.length >= minLength && /[a-zA-Z]/.test(item));
+
+	if (paragraphs.length >= 2) {
+		return paragraphs.slice(0, maxParagraphs);
+	}
+
+	const sentenceChunks = toSentences(rawText)
+		.filter((item) => item.length > 30)
+		.reduce((acc, sentence) => {
+			const previous = acc[acc.length - 1] || "";
+			if (!previous || previous.length > 220) {
+				acc.push(sentence);
+			} else {
+				acc[acc.length - 1] = `${previous} ${sentence}`;
+			}
+			return acc;
+		}, [])
+		.filter((item) => item.length >= minLength);
+
+	return sentenceChunks.slice(0, Math.max(2, maxParagraphs));
+}
+
+function detectLikelyHeadings(rawText) {
+	const lines = String(rawText || "")
+		.replace(/\r/g, "\n")
+		.split("\n")
+		.map((line) => line.trim())
+		.filter(Boolean);
+
+	const headings = [];
+	for (const line of lines.slice(0, 120)) {
+		const isShortLine = line.length >= 4 && line.length <= 70;
+		const isLikelyHeading = /^[A-Z][A-Za-z0-9\s:&/-]{3,}$/.test(line)
+			|| /^[A-Z0-9\s:&/-]{4,}$/.test(line)
+			|| /:$/.test(line);
+		if (isShortLine && isLikelyHeading) {
+			headings.push(line.replace(/:$/, ""));
+		}
+		if (headings.length >= 5) {
+			break;
 		}
 	}
 
-	return null;
+	return Array.from(new Set(headings));
 }
 
-function sanitizeSuggestedName(value, fallback = "file") {
-	const parsedBase = path.parse(String(value || "")).name;
-	const raw = (parsedBase || fallback || "file").toLowerCase();
-	const slug = raw
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "")
-		.slice(0, 64);
-
-	if (!slug) {
-		const safeFallback = String(fallback || "file").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-		return safeFallback || "file";
-	}
-
-	return slug;
-}
-
-function formatSize(bytes) {
-	const value = Number(bytes || 0);
-	if (!value) {
-		return "0 B";
-	}
-
-	const units = ["B", "KB", "MB", "GB"];
-	const exponent = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
-	const amount = value / Math.pow(1024, exponent);
-	return `${amount.toFixed(exponent === 0 ? 0 : 1)} ${units[exponent]}`;
-}
-
-function formatSizeMB(bytes) {
-	const value = Number(bytes || 0);
-	if (!Number.isFinite(value) || value <= 0) {
-		return "0 MB";
-	}
-
-	return `${(value / (1024 * 1024)).toFixed(value >= 10 * 1024 * 1024 ? 1 : 2)} MB`;
-}
-
-function keywordHintsFromText(text, limit = 6) {
-	const words = String(text || "")
+function extractTopKeywords(value, limit = 6) {
+	const words = normalizeWhitespace(value)
 		.toLowerCase()
-		.match(/[a-z][a-z0-9_-]{2,24}/g) || [];
+		.match(/\b[a-z][a-z0-9-]{2,}\b/g) || [];
 
 	const counts = new Map();
 	for (const word of words) {
-		if (KEYWORD_STOPWORDS.has(word)) {
+		if (STOP_WORDS.has(word)) {
 			continue;
 		}
-
 		counts.set(word, (counts.get(word) || 0) + 1);
 	}
 
-	return [...counts.entries()]
-		.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+	return Array.from(counts.entries())
+		.sort((a, b) => b[1] - a[1])
 		.slice(0, limit)
 		.map(([word]) => word);
 }
 
-function chunkText(text, chunkChars = 3500, maxChunks = 20) {
-	const raw = cleanPreviewText(text || "", MAX_PDF_CHARS);
-	if (!raw) {
-		return [];
+function inferDocumentMeaning(text, headings = []) {
+	const normalized = normalizeWhitespace(text);
+	const lower = normalized.toLowerCase();
+
+	if (!normalized) {
+		return "";
 	}
 
-	const chunks = [];
-	let cursor = 0;
-	while (cursor < raw.length && chunks.length < maxChunks) {
-		let end = Math.min(cursor + chunkChars, raw.length);
-		if (end < raw.length) {
-			const boundary = raw.lastIndexOf(" ", end);
-			if (boundary > cursor + Math.floor(chunkChars * 0.5)) {
-				end = boundary;
-			}
+	if (lower.includes("swiftshare")) {
+		return "A document outlining the features and architecture of the SwiftShare platform.";
+	}
+	if (/\b(invoice|payment|billing|amount due)\b/.test(lower)) {
+		return "A document focused on billing details and payment information.";
+	}
+	if (/\b(report|analysis|summary|findings|conclusion)\b/.test(lower)) {
+		return "A document presenting findings, analysis, and conclusions on a topic.";
+	}
+	if (/\bguide|manual|instructions|steps\b/.test(lower)) {
+		return "A document that explains a process through step-by-step guidance.";
+	}
+
+	const firstSentence = ensureSentence(normalized);
+	if (firstSentence && firstSentence.length >= 30) {
+		return clipText(firstSentence, 220);
+	}
+
+	const keywords = extractTopKeywords(`${headings.join(" ")} ${normalized}`, 4);
+	if (keywords.length >= 2) {
+		return `A document discussing ${keywords.join(", ")}.`;
+	}
+
+	return "";
+}
+
+async function extractPdfMeaning(buffer) {
+	try {
+		const parsed = await parsePdfBuffer(buffer);
+		const rawText = String(parsed?.text || "");
+		if (!normalizeWhitespace(rawText)) {
+			return "";
 		}
 
-		chunks.push(raw.slice(cursor, end).trim());
-		cursor = end;
-	}
+		const paragraphs = getMeaningfulParagraphs(rawText, 80, 5).slice(0, 5);
+		const headings = detectLikelyHeadings(rawText).slice(0, 5);
+		const paragraphText = paragraphs.join(" ");
+		const inferred = inferDocumentMeaning(paragraphText || rawText, headings);
 
-	return chunks.filter(Boolean);
+		if (inferred) {
+			return inferred;
+		}
+
+		if (paragraphs.length >= 2) {
+			return clipText(paragraphs.slice(0, 2).join(" "), 220);
+		}
+
+		return "";
+	} catch (error) {
+		logError("PDF extraction failed", error);
+		return "";
+	}
 }
 
-function normalizeSummary(value, fallbackSummary) {
-	const cleaned = cleanPreviewText(String(value || ""), 1200).replace(/\n+/g, " ").trim();
-	if (!cleaned || cleaned.length < 24) {
-		return fallbackSummary;
+async function extractDocxMeaning(buffer) {
+	try {
+		const parsed = await mammoth.extractRawText({ buffer });
+		const rawText = String(parsed?.value || "");
+		const paragraphs = getMeaningfulParagraphs(rawText, 60, 5).slice(0, 5);
+		return inferDocumentMeaning(paragraphs.join(" ") || rawText);
+	} catch (error) {
+		logError("DOCX extraction failed", error);
+		return "";
 	}
-
-	return cleaned;
 }
 
-function normalizeKeyPoints(input, fallback = []) {
-	const normalized = Array.isArray(input)
-		? input.map((item) => cleanPreviewText(String(item || ""), 140)).filter(Boolean)
-		: [];
-
-	if (normalized.length > 0) {
-		return normalized.slice(0, 5);
-	}
-
-	return Array.isArray(fallback)
-		? fallback.map((item) => cleanPreviewText(String(item || ""), 140)).filter(Boolean).slice(0, 5)
-		: [];
-}
-
-function inferPurposeFromFilename(name) {
-	const stem = path.parse(String(name || "")).name;
-	const normalizedStem = cleanPreviewText(stem.replace(/[_-]+/g, " "), 120);
-	const keywords = keywordHintsFromText(normalizedStem, 4);
-
-	if (keywords.length) {
-		return `Related to ${keywords.join(", ")}.`;
-	}
-
-	if (normalizedStem) {
-		return `Named \"${normalizedStem}\" — purpose inferred from context.`;
-	}
-
-	return "Shared as part of a file transfer bundle.";
-}
-
-const BANNED_PHRASES = [
-	"analyzed using", "purpose inferred", "file type", "this file contains",
-	"this file is a", "appears to be", "cannot extract", "cannot be previewed",
-	"is a placeholder", "binary content", "pdf_text_extraction_failed",
-	"image containing readable text", "analyzed image", "metadata-based",
-	"text extraction failed", "files centered on", "code focused on application logic",
-];
-
-function cleanAiText(value) {
-	let result = String(value || "");
-	for (const phrase of BANNED_PHRASES) {
-		result = result.replace(new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), "");
-	}
-	return result
-		.replace(/analyzed using.*?\./gi, "")
-		.replace(/file type.*?\./gi, "")
-		.replace(/\bmetadata\b/gi, "")
-		.replace(/\s{2,}/g, " ")
-		.replace(/^[\s.,;:]+/, "")
-		.trim();
-}
-
-function isBadOutput(text) {
-	const lower = String(text || "").toLowerCase();
-	if (!lower || lower.length < 12) return true;
-	for (const phrase of BANNED_PHRASES) {
-		if (lower.includes(phrase)) return true;
-	}
-	// Check for excessive repetition (same word 4+ times)
-	const words = lower.match(/[a-z]{3,}/g) || [];
-	const counts = new Map();
-	for (const w of words) {
-		counts.set(w, (counts.get(w) || 0) + 1);
-		if (counts.get(w) >= 4 && !KEYWORD_STOPWORDS.has(w)) return true;
-	}
-	return false;
-}
-
-function dedupeRepeatedSentences(value, maxChars = 220) {
-	const text = cleanPreviewText(String(value || ""), maxChars);
+function extractTextMeaning(buffer) {
+	const text = normalizeWhitespace(buffer?.toString("utf8") || "");
 	if (!text) {
 		return "";
 	}
 
-	const parts = text
-		.split(/[.!?\n]+/)
-		.map((item) => item.trim())
-		.filter(Boolean);
-
-	if (!parts.length) {
-		return text;
+	const paragraphs = getMeaningfulParagraphs(text, 50, 5).slice(0, 5);
+	const inferred = inferDocumentMeaning(paragraphs.join(" ") || text);
+	if (inferred) {
+		return inferred;
 	}
 
-	const seen = new Set();
-	const unique = [];
-	for (const part of parts) {
-		const normalized = part.toLowerCase().replace(/[^a-z0-9\s-]+/g, "").replace(/\s+/g, " ").trim();
-		if (!normalized || seen.has(normalized)) {
-			continue;
+	return ensureSentence(text);
+}
+
+function extractFunctionNames(codeText) {
+	const patterns = [
+		/function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g,
+		/(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>/g,
+		/def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g,
+		/class\s+([A-Za-z_][A-Za-z0-9_]*)\b/g,
+	];
+
+	const names = new Set();
+	for (const regex of patterns) {
+		let match = regex.exec(codeText);
+		while (match) {
+			if (match[1]) {
+				names.add(match[1]);
+			}
+			match = regex.exec(codeText);
+		}
+	}
+
+	return Array.from(names).slice(0, 8);
+}
+
+function extractCommentSnippets(codeText) {
+	const comments = [];
+	const lines = String(codeText || "").split(/\r?\n/);
+	for (const line of lines) {
+		const trimmed = line.trim();
+		if (trimmed.startsWith("//") || trimmed.startsWith("#")) {
+			comments.push(trimmed.replace(/^(\/\/|#)\s*/, ""));
+		}
+		if (comments.length >= 4) {
+			break;
+		}
+	}
+
+	const blockCommentMatches = String(codeText || "").match(/\/\*[\s\S]*?\*\//g) || [];
+	for (const block of blockCommentMatches) {
+		if (comments.length >= 4) {
+			break;
+		}
+		const cleaned = normalizeWhitespace(block.replace(/^\/\*|\*\/$/g, "").replace(/\*/g, " "));
+		if (cleaned.length > 8) {
+			comments.push(cleaned);
+		}
+	}
+
+	return comments;
+}
+
+function inferCodeAction(codeText, functionNames, commentSnippets) {
+	const lowerCode = String(codeText || "").toLowerCase();
+	const lowerComments = commentSnippets.join(" ").toLowerCase();
+	const combined = `${lowerCode} ${lowerComments}`;
+
+	const hasScan = /\b(scan|scans|scanner|list|walk|iterate)\b/.test(combined);
+	const hasExport = /\b(export|save|write|output|csv|json|txt)\b/.test(combined);
+	const hasMods = /\bmods?|minecraft|\.jar\b/.test(combined);
+	const hasFetch = /\b(fetch|axios|request|http|api|client)\b/.test(combined);
+	const hasReadWrite = /\b(read|write|fs\.|open\(|load|dump)\b/.test(combined);
+	const hasSocket = /\b(socket|websocket|io\.|emit|on\()\b/.test(combined);
+	const hasDb = /\b(sql|query|mongoose|mongodb|sequelize|insert|update|delete)\b/.test(combined);
+
+	if (hasScan && hasExport && hasMods) {
+		return "scans a mods folder and exports a list of installed Minecraft mods";
+	}
+	if (hasScan && hasExport) {
+		return "scans folders and exports a structured list of discovered items";
+	}
+	if (hasFetch) {
+		return "fetches data from APIs and transforms the response into usable output";
+	}
+	if (hasReadWrite) {
+		return "reads source data and writes processed results";
+	}
+	if (hasSocket) {
+		return "handles realtime socket communication and transfer events";
+	}
+	if (hasDb) {
+		return "queries and updates database records for an application workflow";
+	}
+	if (functionNames.length) {
+		return "organizes project logic into reusable functions";
+	}
+
+	return "implements project logic for an application workflow";
+}
+
+function extractCodeMeaning(buffer) {
+	try {
+		const codeText = String(buffer?.toString("utf8") || "").slice(0, 15000);
+		const functionNames = extractFunctionNames(codeText);
+		const commentSnippets = extractCommentSnippets(codeText);
+		const action = inferCodeAction(codeText, functionNames, commentSnippets);
+
+		if (functionNames.length) {
+			const fnPreview = functionNames.slice(0, 3).join(", ");
+			return `Script that ${action}, with core functions like ${fnPreview}.`;
 		}
 
-		seen.add(normalized);
-		unique.push(part);
-	}
-
-	if (!unique.length) {
+		return `Script that ${action}.`;
+	} catch (error) {
+		logError("Code extraction failed", error);
 		return "";
 	}
-
-	return cleanPreviewText(`${unique.join(". ")}.`, maxChars);
 }
 
-function cleanInsightText(value, maxChars = 220) {
-	const cleaned = cleanPreviewText(cleanAiText(String(value || "")), maxChars)
-		.replace(/\b(this file contains|this file is a|appears to be)\b/gi, "")
-		.replace(/\b(mime|format|extension|file size|size)\b\s*[:\-]?/gi, "")
-		.replace(/\b\d+(?:\.\d+)?\s*(kb|mb|gb|bytes?)\b/gi, "")
-		.replace(/\s{2,}/g, " ")
-		.trim();
+function summarizeZipMeaning(buffer) {
+	try {
+		const zip = new AdmZip(buffer);
+		const entries = zip
+			.getEntries()
+			.filter((entry) => !entry.isDirectory);
 
-	return dedupeRepeatedSentences(cleaned, maxChars);
-}
-
-function cleanInsightPoints(input) {
-	if (!Array.isArray(input)) {
-		return [];
-	}
-
-	const deduped = [];
-	const seen = new Set();
-
-	for (const item of input
-		.map((item) => cleanInsightText(item, 140))
-		.filter((item) => item.length > 2)) {
-		const normalized = item.toLowerCase().replace(/[^a-z0-9\s-]+/g, "").replace(/\s+/g, " ").trim();
-		if (!normalized || seen.has(normalized)) {
-			continue;
+		if (!entries.length) {
+			return "Archive containing an empty folder structure.";
 		}
 
-		seen.add(normalized);
-		deduped.push(item);
-		if (deduped.length >= 5) {
-			break;
+		const typeCounts = new Map();
+		for (const entry of entries) {
+			const ext = path.extname(entry.entryName).toLowerCase() || "(no-ext)";
+			typeCounts.set(ext, (typeCounts.get(ext) || 0) + 1);
+		}
+
+		const topTypes = Array.from(typeCounts.entries())
+			.sort((a, b) => b[1] - a[1])
+			.slice(0, 3)
+			.map(([ext, count]) => `${count} ${ext}`)
+			.join(", ");
+
+		const allNames = entries.map((entry) => entry.entryName.toLowerCase());
+		const mediaCount = entries.filter((entry) => /\.(png|jpg|jpeg|gif|webp|mp4|mov|mp3|wav)$/i.test(entry.entryName)).length;
+		const hasProjectSignals = allNames.some((name) => name.includes("package.json") || name.includes("src/") || name.includes("README".toLowerCase()));
+		const hasBackupSignals = allNames.some((name) => name.includes("backup") || name.includes("archive") || name.includes("old"));
+
+		let likelyPurpose = "a grouped file package";
+		if (hasProjectSignals) {
+			likelyPurpose = "a project source bundle";
+		} else if (mediaCount >= Math.ceil(entries.length * 0.6)) {
+			likelyPurpose = "a media or design asset pack";
+		} else if (hasBackupSignals) {
+			likelyPurpose = "a backup archive";
+		}
+
+		return `Archive containing ${entries.length} files (${topTypes}), likely ${likelyPurpose}.`;
+	} catch (error) {
+		logError("ZIP extraction failed", error);
+		return "Archive shared for transfer.";
+	}
+}
+
+async function extractImageMeaning(buffer, mimeType) {
+	const prompt = "Explain what this image shows and what it represents in real-world context in ONE sentence.";
+
+	for (let attempt = 1; attempt <= 2; attempt += 1) {
+		try {
+			const responseText = await generateAIResponse(prompt, buffer, mimeType || "image/png");
+			const cleaned = ensureSentence(unwrapAiText(responseText));
+			if (cleaned) {
+				return cleaned;
+			}
+		} catch (error) {
+			logError("Image vision analysis failed", error, `ATTEMPT: ${attempt}`);
 		}
 	}
 
-	return deduped;
+	try {
+		const openRouterApiKey = String(process.env.OPENROUTER_API_KEY || "").trim();
+		if (!openRouterApiKey) {
+			return "";
+		}
+
+		const dataUrl = `data:${mimeType || "image/png"};base64,${Buffer.from(buffer).toString("base64")}`;
+		const payload = {
+			model: OPENROUTER_VISION_MODEL,
+			temperature: 0.1,
+			messages: [
+				{
+					role: "user",
+					content: [
+						{ type: "text", text: prompt },
+						{ type: "image_url", image_url: { url: dataUrl } },
+					],
+				},
+			],
+		};
+
+		const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${openRouterApiKey}`,
+				"HTTP-Referer": process.env.OPENROUTER_SITE_URL || "https://swiftshare.local",
+				"X-Title": process.env.OPENROUTER_APP_NAME || "SwiftShare Backend",
+			},
+			body: JSON.stringify(payload),
+		});
+
+		if (!response.ok) {
+			return "";
+		}
+
+		const json = await response.json();
+		const rawContent = extractChatContent(json?.choices?.[0]?.message?.content);
+		return ensureSentence(unwrapAiText(rawContent));
+	} catch (error) {
+		logError("Image vision fallback failed", error);
+	}
+
+	return "";
 }
 
-function summarizeFileSignal(file) {
-	const name = String(file?.name || "");
-	const lowerName = name.toLowerCase();
-	const ext = path.extname(lowerName);
-	const summaryText = String(file?.summary || "").toLowerCase();
-	const keyPointsText = Array.isArray(file?.key_points)
-		? file.key_points.join(" ").toLowerCase()
-		: "";
-	const combined = `${lowerName} ${summaryText} ${keyPointsText}`;
+function inferCategoryFromContext(context) {
+	const types = context.map((item) => item.type);
+	const codeCount = types.filter((type) => type === "code").length;
+	const mediaCount = types.filter((type) => type === "image" || type === "video" || type === "audio").length;
+	const docCount = types.filter((type) => type === "pdf" || type === "docx" || type === "text").length;
 
-	const isCode = CODE_EXTENSIONS.has(ext) || /\b(api|script|service|backend|frontend|code|function|module)\b/.test(combined);
-	const isMedia = IMAGE_EXTENSIONS.has(ext)
-		|| VIDEO_EXTENSIONS.has(ext)
-		|| AUDIO_EXTENSIONS.has(ext)
-		|| /\b(photo|image|video|audio|clip|media)\b/.test(combined);
-	const isArchive = ARCHIVE_TAG_EXTENSIONS.has(ext) || /\barchive|bundle|compressed\b/.test(combined);
-	const isDocs = DOCUMENT_EXTENSIONS.has(ext)
-		|| /\b(report|notes|document|summary|manual|readme|guide|invoice)\b/.test(combined);
-	const hasGameModHint = ext === ".jar" || GAME_MOD_HINTS.some((hint) => combined.includes(hint));
+	if (codeCount > types.length / 2) {
+		return "Codebase";
+	}
+	if (mediaCount > types.length / 2) {
+		return "Media";
+	}
+	if (docCount > types.length / 2) {
+		return "Documents";
+	}
+	if (types.length > 1) {
+		return "Mixed";
+	}
+	return "Other";
+}
+
+function inferIntentFromContext(context) {
+	const types = context.map((item) => item.type);
+	if (types.includes("code")) {
+		return "Development";
+	}
+	if (types.includes("pdf") || types.includes("docx") || types.includes("text")) {
+		return "Documentation";
+	}
+	if (types.includes("image") || types.includes("video") || types.includes("audio")) {
+		return "Media";
+	}
+	if (types.includes("zip")) {
+		return "Archive";
+	}
+	return "File sharing";
+}
+
+function buildSuggestedFilename(context) {
+	const priority = context.find((item) => item.type === "code")
+		|| context.find((item) => item.type === "pdf")
+		|| context[0];
+
+	const stem = path.parse(priority?.name || "swiftshare-transfer").name;
+	const cleaned = stem.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+	return cleaned || "swiftshare-transfer";
+}
+
+function buildAnalysisPrompt(context) {
+	const contextText = context
+		.map((item) => `File: ${item.name}\nMeaning: ${item.meaning}`)
+		.join("\n\n");
+
+	return `${HUMAN_REVIEW_PROMPT}\n\n${contextText}\n\nReturn JSON only in this format:\n{\n  "overall_summary": "2 sentences explaining what this bundle actually is",\n  "files": [\n    { "name": "exact filename", "summary": "one sentence" }\n  ]\n}`;
+}
+
+function buildRewritePrompt(context, previousOutput) {
+	return `${buildAnalysisPrompt(context)}\n\n${REWRITE_PROMPT}\n\nPrevious output:\n${JSON.stringify(previousOutput, null, 2)}`;
+}
+
+function mapFilesToContext(context, aiFiles) {
+	const remaining = Array.isArray(aiFiles) ? [...aiFiles] : [];
+
+	return context.map((item, index) => {
+		const matchIndex = remaining.findIndex((candidate) => {
+			const candidateName = String(candidate?.name || "").toLowerCase();
+			return candidateName === item.name.toLowerCase();
+		});
+
+		let picked;
+		if (matchIndex >= 0) {
+			picked = remaining.splice(matchIndex, 1)[0];
+		} else {
+			picked = remaining.shift() || aiFiles?.[index] || {};
+		}
+
+		return {
+			name: item.name,
+			summary: clipText(ensureSentence(picked?.summary || ""), 220),
+		};
+	});
+}
+
+function normalizeAiOutput(output, context) {
+	const overallSummary = clipText(String(output?.overall_summary || output?.summary || ""), 420);
+	const files = mapFilesToContext(context, output?.files);
 
 	return {
-		isCode,
-		isMedia,
-		isArchive,
-		isDocs,
-		hasGameModHint,
-		ext,
+		overall_summary: overallSummary,
+		files,
 	};
 }
 
-function collectFileSignals(files) {
-	const safeFiles = Array.isArray(files) ? files : [];
-	const stats = {
-		total: safeFiles.length,
-		codeCount: 0,
-		mediaCount: 0,
-		docsCount: 0,
-		archiveCount: 0,
-		modHintCount: 0,
-	};
-
-	for (const file of safeFiles) {
-		const signal = summarizeFileSignal(file);
-		if (signal.isCode) stats.codeCount += 1;
-		if (signal.isMedia) stats.mediaCount += 1;
-		if (signal.isDocs) stats.docsCount += 1;
-		if (signal.isArchive) stats.archiveCount += 1;
-		if (signal.hasGameModHint) stats.modHintCount += 1;
-	}
-
-	return stats;
-}
-
-function detectPurpose(files) {
-	const stats = collectFileSignals(files);
-	const total = Math.max(1, stats.total);
-	const codeRatio = stats.codeCount / total;
-	const mediaRatio = stats.mediaCount / total;
-
-	if (stats.modHintCount > 0 && (stats.archiveCount > 0 || stats.total > 1)) {
-		return "Game Mod Setup";
-	}
-
-	if (codeRatio >= 0.5 && stats.mediaCount <= 1) {
-		return "Developer Tool";
-	}
-
-	if (mediaRatio >= 0.5 && stats.codeCount <= 1) {
-		return "Media Bundle";
-	}
-
-	return "Mixed Files";
-}
-
-function detectTags(files) {
-	const stats = collectFileSignals(files);
-	const tags = [];
-
-	if (stats.codeCount > 0) tags.push("Code");
-	if (stats.mediaCount > 0) tags.push("Media");
-	if (stats.docsCount > 0) tags.push("Docs");
-	if (stats.archiveCount > 0) tags.push("Archive");
-
-	return tags;
-}
-
-function calculateConfidence(aiJson) {
-	const files = Array.isArray(aiJson?.files) ? aiJson.files : [];
-	const stats = collectFileSignals(files);
-	const total = Math.max(1, stats.total);
-	const codeRatio = stats.codeCount / total;
-	const mediaRatio = stats.mediaCount / total;
-
-	if (codeRatio >= 0.5) {
-		const score = 90 + Math.round(Math.min(8, codeRatio * 8));
-		return Math.max(90, Math.min(98, score));
-	}
-
-	if (mediaRatio >= 0.5) {
-		const score = 70 + Math.round(Math.min(15, mediaRatio * 15));
-		return Math.max(70, Math.min(85, score));
-	}
-
-	const mixedBoost = (stats.archiveCount > 0 ? 4 : 0) + (stats.docsCount > 0 ? 3 : 0) + (stats.codeCount > 0 ? 2 : 0) + (stats.mediaCount > 0 ? 1 : 0);
-	const score = 80 + Math.min(10, mixedBoost);
-	return Math.max(80, Math.min(90, score));
-}
-
-function highlightKeyFile(files) {
-	const safeFiles = Array.isArray(files)
-		? files.map((file) => ({ ...file }))
-		: [];
-
-	if (!safeFiles.length) {
-		return [];
-	}
-
-	let keyIndex = -1;
-	for (const ext of KEY_FILE_PRIORITIES) {
-		keyIndex = safeFiles.findIndex((file) => path.extname(String(file?.name || "").toLowerCase()) === ext);
-		if (keyIndex >= 0) {
-			break;
+function hasHeavyRepetition(value) {
+	const words = String(value || "").toLowerCase().match(/\b[a-z]{4,}\b/g) || [];
+	const counts = new Map();
+	for (const word of words) {
+		if (STOP_WORDS.has(word)) {
+			continue;
 		}
+		counts.set(word, (counts.get(word) || 0) + 1);
 	}
 
-	if (keyIndex < 0) {
-		keyIndex = safeFiles
-			.map((file, index) => ({ index, score: String(file?.summary || "").length }))
-			.sort((a, b) => b.score - a.score)[0]?.index ?? 0;
-	}
-
-	return safeFiles.map((file, index) => ({
-		...file,
-		isKeyFile: index === keyIndex,
-	}));
-}
-
-function looksLikeRawFilename(name, files) {
-	const slug = sanitizeSuggestedName(name, "");
-	if (!slug) {
-		return true;
-	}
-
-	const normalizedStems = (Array.isArray(files) ? files : [])
-		.map((file) => sanitizeSuggestedName(path.parse(String(file?.name || "")).name, ""))
-		.filter(Boolean);
-
-	if (normalizedStems.includes(slug)) {
-		return true;
-	}
-
-	const compact = slug.replace(/-/g, "");
-	if (/^[a-z0-9]{4,}$/.test(compact) && !slug.includes("-")) {
-		return true;
+	for (const count of counts.values()) {
+		if (count >= 4) {
+			return true;
+		}
 	}
 
 	return false;
 }
 
-function generateSmartName(aiName, files) {
-	const purpose = detectPurpose(files);
-	const tags = detectTags(files);
-	const candidate = sanitizeSuggestedName(aiName, "");
+function validateHumanQuality(output, context) {
+	const issues = [];
+	const overall = String(output?.overall_summary || "");
+	const overallSentenceCount = toSentences(overall).length;
 
-	if (candidate && !looksLikeRawFilename(candidate, files) && candidate.length >= 8) {
-		return candidate;
+	if (!overall) {
+		issues.push("Missing overall summary");
+	} else {
+		if (overallSentenceCount !== 2) {
+			issues.push("Overall summary must be exactly 2 sentences");
+		}
+		if (containsGenericPhrase(overall)) {
+			issues.push("Overall summary contains generic phrasing");
+		}
+		if (hasHeavyRepetition(overall)) {
+			issues.push("Overall summary has heavy repetition");
+		}
 	}
 
-	const purposeBase = {
-		"Developer Tool": "developer-tool",
-		"Media Bundle": "media-bundle",
-		"Game Mod Setup": "mod-setup",
-		"Mixed Files": "mixed-files",
-	}[purpose] || "swiftshare-transfer";
-
-	let suffix = "bundle";
-	if (tags.includes("Code")) {
-		suffix = "toolkit";
-	} else if (tags.includes("Media")) {
-		suffix = "pack";
-	} else if (tags.includes("Docs")) {
-		suffix = "brief";
-	}
-
-	const combined = purposeBase.endsWith(`-${suffix}`) ? purposeBase : `${purposeBase}-${suffix}`;
-	return sanitizeSuggestedName(combined, "swiftshare-transfer");
-}
-
-function detectCategoryWithoutAI(filename, mimeType, previewText = "") {
-	const ext = String(path.extname(filename || "")).toLowerCase();
-	const lowerMime = String(mimeType || "").toLowerCase();
-	const lowerName = String(filename || "").toLowerCase();
-	const lowerPreview = String(previewText || "").toLowerCase();
-
-	if (IMAGE_EXTENSIONS.has(ext) || lowerMime.startsWith("image/")) {
-		return "Mixed-Media";
-	}
-
-	if (CODE_EXTENSIONS.has(ext)) {
-		return "Codebase";
-	}
-
-	if (PRESENTATION_EXTENSIONS.has(ext) || lowerMime.includes("presentation")) {
-		return "Document";
-	}
-
-	if (SPREADSHEET_EXTENSIONS.has(ext) || lowerMime.includes("spreadsheet") || lowerMime.includes("csv") || lowerMime.includes("excel")) {
-		return "Document";
-	}
-
-	if (VIDEO_EXTENSIONS.has(ext) || lowerMime.startsWith("video/")) {
-		return "Mixed-Media";
-	}
-
-	if (AUDIO_EXTENSIONS.has(ext) || lowerMime.startsWith("audio/")) {
-		return "Mixed-Media";
-	}
-
-	if (/invoice|receipt|bill|quotation/.test(lowerName) || /invoice|subtotal|tax|amount due|bill to/.test(lowerPreview)) {
-		return "Document";
-	}
-
-	if (/assignment|homework|coursework|lab/.test(lowerName) || /question\s*\d+|submission|deadline|student/.test(lowerPreview)) {
-		return "Document";
-	}
-
-	if (/report|analysis|findings|executive/.test(lowerName) || /executive summary|methodology|conclusion/.test(lowerPreview)) {
-		return "Document";
-	}
-
-	if (/notes|meeting|minutes|lecture/.test(lowerName) || /agenda|notes|minutes/.test(lowerPreview)) {
-		return "Document";
-	}
-
-	if (TEXT_EXTENSIONS.has(ext) || lowerMime.startsWith("text/")) {
-		return "Document";
-	}
-
-	if (ARCHIVE_EXTENSIONS.has(ext) || lowerMime.includes("zip")) {
-		return "Asset-Bundle";
-	}
-
-	return "Other";
-}
-
-function detectCodeLanguage(filename, mimeType) {
-	const ext = String(path.extname(filename || "")).toLowerCase();
-	if (EXTENSION_LANGUAGE[ext]) {
-		return EXTENSION_LANGUAGE[ext];
-	}
-
-	const lowerMime = String(mimeType || "").toLowerCase();
-	if (lowerMime.includes("javascript")) return "JavaScript";
-	if (lowerMime.includes("typescript")) return "TypeScript";
-	if (lowerMime.includes("python")) return "Python";
-	if (lowerMime.includes("java")) return "Java";
-	if (lowerMime.includes("json")) return "JSON";
-	if (lowerMime.includes("xml")) return "XML";
-	if (lowerMime.includes("yaml")) return "YAML";
-	return "Code";
-}
-
-function extractCodeSymbols(text, limit = 12) {
-	const source = String(text || "");
-	if (!source) {
-		return [];
-	}
-
-	const patterns = [
-		/function\s+([A-Za-z_$][\w$]*)\s*\(/g,
-		/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>/g,
-		/def\s+([A-Za-z_][\w]*)\s*\(/g,
-		/class\s+([A-Za-z_$][\w$]*)/g,
-		/(?:public|private|protected|static|async|final|virtual|inline|\s)+[A-Za-z_$][\w$<>\[\]]*\s+([A-Za-z_$][\w$]*)\s*\([^;{}]*\)\s*\{/g,
-	];
-
-	const seen = new Set();
-	for (const pattern of patterns) {
-		let match = pattern.exec(source);
-		while (match) {
-			const symbol = String(match[1] || "").trim();
-			if (symbol && symbol.length <= 80) {
-				seen.add(symbol);
-				if (seen.size >= limit) {
-					return [...seen];
-				}
+	if (!Array.isArray(output?.files) || output.files.length !== context.length) {
+		issues.push("File summaries count does not match context");
+	} else {
+		for (const file of output.files) {
+			const summary = String(file?.summary || "").trim();
+			if (!summary) {
+				issues.push(`Missing summary for ${file?.name || "file"}`);
+				continue;
 			}
-			match = pattern.exec(source);
-		}
-	}
-
-	return [...seen];
-}
-
-function extractCodeDependencies(text, limit = 8) {
-	const source = String(text || "");
-	const deps = new Set();
-
-	const importRegex = /import\s+[^\n]*?from\s+["']([^"']+)["']/g;
-	let importMatch = importRegex.exec(source);
-	while (importMatch) {
-		deps.add(importMatch[1]);
-		if (deps.size >= limit) return [...deps];
-		importMatch = importRegex.exec(source);
-	}
-
-	const requireRegex = /require\(\s*["']([^"']+)["']\s*\)/g;
-	let requireMatch = requireRegex.exec(source);
-	while (requireMatch) {
-		deps.add(requireMatch[1]);
-		if (deps.size >= limit) return [...deps];
-		requireMatch = requireRegex.exec(source);
-	}
-
-	return [...deps];
-}
-
-function inferCodePurpose(text) {
-	const lower = String(text || "").toLowerCase();
-	if (!lower) {
-		return "application logic";
-	}
-
-	if (/(express|router\.|app\.get\(|app\.post\(|middleware)/.test(lower)) {
-		return "http api and server routing";
-	}
-	if (/(socket\.io|websocket|emit\(|on\()/.test(lower)) {
-		return "real-time communication";
-	}
-	if (/(react|useeffect|usestate|jsx|tsx)/.test(lower)) {
-		return "frontend component behavior";
-	}
-	if (/(select\s+.+\s+from|insert\s+into|update\s+.+\s+set|mongoose|sequelize|typeorm)/.test(lower)) {
-		return "database access and data modeling";
-	}
-	if (/(describe\(|it\(|expect\(|assert\.)/.test(lower)) {
-		return "automated testing";
-	}
-	return "application logic";
-}
-
-function buildMetadataSummary({ name, mime, size }) {
-	const extension = path.extname(name || "").toLowerCase() || "[no extension]";
-	return `${name} is a ${mime || "file"} asset (${formatSize(size)}) with extension ${extension}.`;
-}
-
-async function preprocessPdfFile({ buffer, name }) {
-	let extractedText = "";
-
-	try {
-		const parsed = await pdfParse(buffer);
-		extractedText = cleanPreviewText(parsed?.text || "", MAX_PDF_CHARS);
-	} catch (error) {
-		logError("PDF preprocessing failed", error, `FILE: ${name}`);
-		extractedText = "";
-	}
-
-	const chunks = chunkText(extractedText, 3500, 24);
-	const keywords = keywordHintsFromText(extractedText, 8);
-	const summary = extractedText
-		? `Document focused on ${keywords.length ? keywords.slice(0, 4).join(", ") : "written content and instructions"}.`
-		: inferPurposeFromFilename(name);
-
-	return {
-		typeLabel: "pdf",
-		preview: cleanPreviewText(chunks.slice(0, 3).join("\n\n") || extractedText || ""),
-		promptText: cleanPreviewText(chunks.join("\n\n") || extractedText || "", MAX_PROMPT_TEXT_CHARS),
-		localSummary: summary,
-		keyPoints: keywords.length
-			? [`Topics: ${keywords.slice(0, 5).join(", ")}`]
-			: ["Context derived from naming and bundle"],
-		imageDescription: null,
-		riskFlags: [],
-	};
-}
-
-async function preprocessDocxFile({ buffer, name }) {
-	let extractedText = "";
-
-	try {
-		const parsed = await mammoth.extractRawText({ buffer });
-		extractedText = cleanPreviewText(parsed?.value || "", MAX_TEXT_CHARS);
-	} catch (error) {
-		logError("DOCX preprocessing failed", error, `FILE: ${name}`);
-		extractedText = "";
-	}
-
-	const keywords = keywordHintsFromText(extractedText, 8);
-
-	return {
-		typeLabel: "docx",
-		preview: cleanPreviewText(extractedText),
-		promptText: cleanPreviewText(extractedText, MAX_PROMPT_TEXT_CHARS),
-		localSummary: extractedText
-			? `Document focused on ${keywords.length ? keywords.slice(0, 4).join(", ") : "written content"}.`
-			: inferPurposeFromFilename(name),
-		keyPoints: keywords.length
-			? [`Topics: ${keywords.slice(0, 5).join(", ")}`]
-			: ["Context derived from naming and bundle"],
-		imageDescription: null,
-		riskFlags: [],
-	};
-}
-
-async function extractImageTextWithOcr(buffer, name) {
-	if (!OCR_ENABLED) {
-		return { text: "", skippedReason: "ocr_disabled" };
-	}
-
-	if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
-		return { text: "", skippedReason: "empty_image_buffer" };
-	}
-
-	if (buffer.length > MAX_OCR_BYTES) {
-		return { text: "", skippedReason: "ocr_size_limit" };
-	}
-
-	const timeoutPromise = new Promise((_, reject) => {
-		setTimeout(() => reject(new Error("OCR timeout")), MAX_OCR_TIMEOUT_MS);
-	});
-
-	try {
-		const result = await Promise.race([
-			Tesseract.recognize(buffer, "eng", { logger: () => {} }),
-			timeoutPromise,
-		]);
-
-		const text = cleanPreviewText(result?.data?.text || "", MAX_TEXT_CHARS);
-		if (!text) {
-			return { text: "", skippedReason: "ocr_no_text_detected" };
-		}
-
-		return { text, skippedReason: "" };
-	} catch (error) {
-		logError("Image OCR failed", error, `FILE: ${name}`);
-		return { text: "", skippedReason: "ocr_failed" };
-	}
-}
-
-async function preprocessImageFile({ buffer, name }) {
-	const ocr = await extractImageTextWithOcr(buffer, name);
-	const text = ocr.text;
-	const keywords = keywordHintsFromText(text, 6);
-	const riskFlags = ocr.skippedReason ? [ocr.skippedReason] : [];
-
-	if (text) {
-		// Summarize the actual meaning of the OCR text, not just "image with text"
-		const firstLine = text.split(/\n+/).find((line) => line.trim().length > 0) || "";
-		const summary = keywords.length >= 2
-			? `Screenshot or graphic covering ${keywords.slice(0, 4).join(", ")}.`
-			: (firstLine
-				? `Captured text reads: \"${cleanPreviewText(firstLine, 80)}\"`
-				: "Visual with embedded readable content.");
-
-		return {
-			typeLabel: "image",
-			preview: cleanPreviewText(text),
-			promptText: cleanPreviewText(text, MAX_PROMPT_TEXT_CHARS),
-			localSummary: summary,
-			keyPoints: [
-				keywords.length ? `Topics: ${keywords.slice(0, 5).join(", ")}` : "Text detected via OCR",
-				firstLine ? `Reads: ${cleanPreviewText(firstLine, 120)}` : null,
-			].filter(Boolean),
-			imageDescription: firstLine
-				? `Visual with text: ${cleanPreviewText(firstLine, 180)}`
-				: `Graphic with embedded text about ${keywords.slice(0, 3).join(", ") || "various topics"}.`,
-			riskFlags,
-		};
-	}
-
-	return {
-		typeLabel: "image",
-		preview: "",
-		promptText: "",
-		localSummary: "Stylized graphic or visual asset with no clear readable text.",
-		keyPoints: ["Visual content shared as-is"],
-		imageDescription: "Stylized graphic or visual asset.",
-		riskFlags,
-	};
-}
-
-function preprocessZipFile({ buffer, name, size }) {
-	try {
-		const zip = new AdmZip(buffer);
-		const allEntries = zip.getEntries().filter((entry) => !entry.isDirectory);
-		const entries = allEntries.slice(0, MAX_ZIP_ENTRIES);
-		const typeCounts = new Map();
-		const sampledNames = entries.slice(0, MAX_ZIP_NAME_SAMPLES).map((entry) => entry.entryName);
-
-		for (const entry of entries) {
-			const ext = path.extname(entry.entryName || "").toLowerCase() || "[no-ext]";
-			typeCounts.set(ext, (typeCounts.get(ext) || 0) + 1);
-		}
-
-		const sortedTypes = [...typeCounts.entries()]
-			.sort((a, b) => b[1] - a[1])
-			.slice(0, 6)
-			.map(([ext, count]) => `${ext} (${count})`);
-
-		const summary = "Bundle combining project files, media, and utilities for setup or sharing.";
-		const preview = [
-			summary,
-			"Sample entries:",
-			...sampledNames,
-		].join("\n");
-
-		const riskFlags = [];
-		if (allEntries.length > MAX_ZIP_ENTRIES) {
-			riskFlags.push("large_archive_entry_count");
-		}
-
-		return {
-			typeLabel: "zip archive",
-			preview: cleanPreviewText(preview),
-			promptText: cleanPreviewText(preview, MAX_PROMPT_TEXT_CHARS),
-			localSummary: summary,
-			keyPoints: [
-				allEntries.length > 1 ? `${allEntries.length} related files grouped` : "Single-item bundle",
-				sampledNames.length ? `Includes ${sampledNames.slice(0, 3).join(", ")}` : "Prepared for easy sharing",
-				sortedTypes.length ? "Mix of assets and project files" : "Reusable packaged content",
-			],
-			imageDescription: null,
-			riskFlags,
-		};
-	} catch (error) {
-		logError("ZIP preprocessing failed", error, `FILE: ${name}`);
-		return {
-			typeLabel: "zip archive",
-			preview: "",
-			promptText: "",
-			localSummary: inferPurposeFromFilename(name),
-			keyPoints: ["Bundle context derived from naming and entries"],
-			imageDescription: null,
-			riskFlags: [],
-		};
-	}
-}
-
-function preprocessTabularFile({ buffer, name, ext, size }) {
-	const delimiter = ext === ".tsv" ? "\t" : ",";
-	const text = safeTextFromBuffer(buffer, MAX_TEXT_CHARS);
-	const lines = text.split(/\r?\n/).filter((line) => line.trim().length > 0);
-	const header = lines[0] || "";
-	const headerCells = header ? header.split(delimiter).map((cell) => cell.trim()).filter(Boolean) : [];
-	const rowCount = Math.max(0, lines.length - (header ? 1 : 0));
-
-	const summary = `Tabular dataset with ${rowCount} row${rowCount === 1 ? "" : "s"}${headerCells.length ? ` and columns ${headerCells.slice(0, 6).join(", ")}` : ""}.`;
-
-	return {
-		typeLabel: ext === ".tsv" ? "tsv" : "csv",
-		preview: cleanPreviewText(lines.slice(0, 24).join("\n") || summary),
-		promptText: cleanPreviewText(text || summary, MAX_PROMPT_TEXT_CHARS),
-		localSummary: summary,
-		keyPoints: [
-			`Rows: ${rowCount}`,
-			headerCells.length ? `Columns: ${headerCells.slice(0, 8).join(", ")}` : "Column headers unavailable",
-			`Size: ${formatSize(size)}`,
-		],
-		imageDescription: null,
-		riskFlags: [],
-	};
-}
-
-function preprocessCodeFile({ buffer, name, mime }) {
-	const source = safeTextFromBuffer(buffer, MAX_CODE_CHARS);
-	const language = detectCodeLanguage(name, mime);
-	const symbols = extractCodeSymbols(source, 12);
-	const deps = extractCodeDependencies(source, 8);
-	const purpose = inferCodePurpose(source);
-	const keywords = keywordHintsFromText(source, 8);
-
-	const summary = `Code focused on ${purpose}${keywords.length ? ` with notable terms ${keywords.slice(0, 4).join(", ")}` : ""}.`;
-
-	return {
-		typeLabel: `${language.toLowerCase()} code`,
-		preview: cleanPreviewText(source),
-		promptText: cleanPreviewText(source, MAX_PROMPT_TEXT_CHARS),
-		localSummary: summary,
-		keyPoints: [
-			`Purpose: ${purpose}`,
-			symbols.length ? `Functions/classes: ${symbols.slice(0, 7).join(", ")}` : "No explicit symbols extracted",
-			deps.length ? `Dependencies: ${deps.slice(0, 6).join(", ")}` : "No external dependencies extracted",
-		],
-		imageDescription: null,
-		riskFlags: [],
-	};
-}
-
-function preprocessTextFile({ buffer, name, mime }) {
-	const text = safeTextFromBuffer(buffer, MAX_TEXT_CHARS);
-	const keywords = keywordHintsFromText(text, 8);
-
-	return {
-		typeLabel: mime?.includes("markdown") ? "markdown" : "text",
-		preview: cleanPreviewText(text),
-		promptText: cleanPreviewText(text, MAX_PROMPT_TEXT_CHARS),
-		localSummary: text
-			? `Written content focused on ${keywords.length ? keywords.slice(0, 5).join(", ") : "general written context"}.`
-			: inferPurposeFromFilename(name),
-		keyPoints: [
-			keywords.length ? `Topics: ${keywords.slice(0, 6).join(", ")}` : "Readable text available",
-		],
-		imageDescription: null,
-		riskFlags: [],
-	};
-}
-
-function preprocessMetadataOnlyFile({ name, mime }) {
-	const summary = inferPurposeFromFilename(name);
-
-	return {
-		typeLabel: mime || path.extname(name || "").replace(".", "") || "file",
-		preview: "",
-		promptText: "",
-		localSummary: summary,
-		keyPoints: ["Context derived from naming and bundle"],
-		imageDescription: null,
-		riskFlags: [],
-	};
-}
-
-async function preprocessFileContent(file) {
-	const name = file.originalname || file.filename || "file";
-	const mime = String(file.mimetype || file.mimeType || "application/octet-stream").toLowerCase();
-	const size = Number(file.size || (file.buffer ? file.buffer.length : 0) || 0);
-	const ext = String(path.extname(name || "")).toLowerCase();
-
-	if (mime.includes("pdf") || ext === ".pdf") {
-		return preprocessPdfFile({ buffer: file.buffer, name, size });
-	}
-
-	if (IMAGE_EXTENSIONS.has(ext) || mime.startsWith("image/")) {
-		return preprocessImageFile({ buffer: file.buffer, name, mime, size });
-	}
-
-	if (ARCHIVE_EXTENSIONS.has(ext) || mime.includes("zip")) {
-		return preprocessZipFile({ buffer: file.buffer, name, size });
-	}
-
-	if (mime.includes("wordprocessingml") || ext === ".docx") {
-		return preprocessDocxFile({ buffer: file.buffer, name, size });
-	}
-
-	if (ext === ".csv" || ext === ".tsv" || mime.includes("csv") || mime.includes("tsv")) {
-		return preprocessTabularFile({ buffer: file.buffer, name, ext: ext === ".tsv" ? ".tsv" : ".csv", size });
-	}
-
-	if (CODE_EXTENSIONS.has(ext)) {
-		return preprocessCodeFile({ buffer: file.buffer, name, mime, size });
-	}
-
-	if (mime.startsWith("text/") || TEXT_EXTENSIONS.has(ext)) {
-		return preprocessTextFile({ buffer: file.buffer, name, mime, size });
-	}
-
-	return preprocessMetadataOnlyFile({ name, mime, size });
-}
-
-function pickDominantCategory(enrichedFiles) {
-	const priorityOrder = [
-		"Codebase",
-		"Asset-Bundle",
-		"Document",
-		"Mixed-Media",
-		"Other",
-	];
-
-	const priority = new Map(priorityOrder.map((name, idx) => [name, idx]));
-	const scores = new Map();
-
-	for (const file of enrichedFiles) {
-		const category = file.categoryGuess || "Other";
-		const countWeight = 10;
-		const sizeWeight = Math.max(0, Number(file.size || 0)) / (1024 * 1024);
-		const score = (scores.get(category) || 0) + countWeight + sizeWeight;
-		scores.set(category, score);
-	}
-
-	return [...scores.entries()]
-		.sort((a, b) => {
-			if (b[1] !== a[1]) {
-				return b[1] - a[1];
+			if (toSentences(summary).length !== 1) {
+				issues.push(`File summary must be one sentence for ${file.name}`);
 			}
-
-			const pa = priority.has(a[0]) ? priority.get(a[0]) : Number.MAX_SAFE_INTEGER;
-			const pb = priority.has(b[0]) ? priority.get(b[0]) : Number.MAX_SAFE_INTEGER;
-			return pa - pb;
-		})[0]?.[0] || "Other";
-}
-
-function inferDetectedIntent(category, fileCount) {
-	if (category === "Codebase") return "project handoff";
-	if (category === "Documents") return "document handoff";
-	if (category === "Media") return fileCount > 1 ? "media sharing" : "media share";
-	if (category === "Mixed") return "bundle handoff";
-	return "file transfer";
-}
-
-function buildFallbackSummary({ fileCount, category, keywords, detectedIntent }) {
-	const keywordText = Array.isArray(keywords) && keywords.length
-		? ` Key topics detected: ${keywords.slice(0, 5).join(", ")}.`
-		: "";
-
-	if (fileCount > 1) {
-		return `${fileCount} related files centered on ${category.toLowerCase()} content, shared for ${detectedIntent}.${keywordText}`.trim();
+			if (/^this\b/i.test(summary)) {
+				issues.push(`File summary is too generic for ${file.name}`);
+			}
+			if (/^image\b/i.test(summary)) {
+				issues.push(`File summary is too generic for ${file.name}`);
+			}
+			if (METADATA_STYLE_RE.test(summary)) {
+				issues.push(`Metadata-heavy wording detected for ${file.name}`);
+			}
+			if (containsGenericPhrase(summary)) {
+				issues.push(`Generic phrasing detected for ${file.name}`);
+			}
+			if (hasHeavyRepetition(summary)) {
+				issues.push(`Repetition detected for ${file.name}`);
+			}
+		}
 	}
 
-	return `Single ${category.toLowerCase()} file shared for ${detectedIntent}.${keywordText}`.trim();
+	return {
+		ok: issues.length === 0,
+		issues,
+	};
 }
 
-function buildPrompt({ fileCount, totalSize, primaryFilename, manifest, preview }) {
-  return `You are a Senior Software Engineer reviewing a file transfer bundle. 
-Your ONLY job is to deduce the real-world purpose of these files and explain it in plain, human English.
-
-CRITICAL RULES:
-1. NO ROBOT SPEAK. BANNED PHRASES: "inferred from", "analyzed using", "focused on application logic", "media sharing", "this file contains", "readable text".
-2. GUESS THE CONTEXT. If you see a Python script and an MP4, it's a dev tool and a demo video. Act like a human deducing the obvious.
-3. BE SPECIFIC. Do not say "source code". Say "Python script for mod management."
-
---- EXAMPLES OF BAD VS GOOD SUMMARIES ---
-❌ BAD: "5 related files centered on media content, shared for media sharing."
-✅ GOOD: "A mixed bundle containing a Python utility script, likely for mod management, bundled with personal media."
-
-❌ BAD: "Purpose inferred from filename context."
-✅ GOOD: "Supporting documentation for the SwiftShare platform."
-
-❌ BAD: "Code focused on application logic with notable terms."
-✅ GOOD: "A Python script that scans directories and exports a list of .jar mods."
-
---- OUTPUT FORMAT (STRICT JSON ONLY) ---
-{
-  "overall_summary": "1-2 punchy sentences explaining what this bundle actually is in the real world.",
-  "suggested_filename": "smart-kebab-case-name",
-  "category": "Codebase | Media | Documents | Mixed | Other",
-  "detected_intent": "Max 3 words (e.g., 'Game mod setup')",
-  "risk_flags": ["Real risks only, else empty array"],
-  "files": [
-    {
-      "name": "exact-filename.ext",
-      "summary": "1 sharp sentence explaining what this file is for. No filler.",
-      "key_points": ["Insight 1", "Insight 2"]
-    }
-  ]
+function isCodeFile(ext) {
+	return CODE_EXTENSIONS.has(ext);
 }
 
-MANIFEST:
-${manifest}
+async function buildAIContext(files) {
+	const context = [];
 
-PREVIEW CONTENT:
-${preview}`;
-}
+	for (const file of files || []) {
+		const name = getFileName(file);
+		const ext = getFileExt(name);
+		const mime = String(file?.mimetype || "").toLowerCase();
+		const buffer = file?.buffer;
 
-async function buildTransferContext(files, transferCode) {
-	const validFiles = Array.isArray(files) ? files.filter(Boolean) : [];
-	if (!validFiles.length) {
-		return null;
-	}
+		let meaning = "";
+		let type = "file";
 
-	const enrichedFiles = [];
-	for (let idx = 0; idx < validFiles.length; idx += 1) {
-		const file = validFiles[idx];
-		const name = file.originalname || file.filename || "file";
-		const mime = String(file.mimetype || file.mimeType || "application/octet-stream").toLowerCase();
-		const size = Number(file.size || (file.buffer ? file.buffer.length : 0) || 0);
-		const processed = await preprocessFileContent(file);
+		if (!buffer || !Buffer.isBuffer(buffer)) {
+			context.push({ name, meaning: "Shared file with limited readable content.", type });
+			continue;
+		}
 
-		const combinedText = `${processed.preview || ""}\n${processed.localSummary || ""}`;
-		const categoryGuess = normalizeCategoryName(detectCategoryWithoutAI(name, mime, combinedText));
+		if (ext === ".pdf" || mime.includes("pdf")) {
+			type = "pdf";
+			meaning = await extractPdfMeaning(buffer);
+			if (!meaning) {
+				meaning = "Document shared for review.";
+			}
+		} else if (mime.startsWith("image/")) {
+			type = "image";
+			meaning = await extractImageMeaning(buffer, mime);
+			if (!meaning) {
+				meaning = "Image shared for visual context.";
+			}
+		} else if (isCodeFile(ext)) {
+			type = "code";
+			meaning = extractCodeMeaning(buffer);
+			if (!meaning) {
+				meaning = "Script that handles project logic.";
+			}
+		} else if (ext === ".zip" || mime.includes("zip")) {
+			type = "zip";
+			meaning = summarizeZipMeaning(buffer);
+		} else if (mime.startsWith("video/") || [".mp4", ".mov", ".avi", ".mkv", ".webm"].includes(ext)) {
+			type = "video";
+			meaning = "Short video clip, likely personal recording or shared media.";
+		} else if (mime.startsWith("audio/") || [".mp3", ".wav", ".aac", ".m4a", ".ogg"].includes(ext)) {
+			type = "audio";
+			meaning = "Audio clip shared as part of a conversation or media drop.";
+		} else if (ext === ".docx" || mime.includes("wordprocessingml")) {
+			type = "docx";
+			meaning = await extractDocxMeaning(buffer);
+			if (!meaning) {
+				meaning = "Document shared for review.";
+			}
+		} else if (ext === ".txt" || ext === ".md" || mime.startsWith("text/")) {
+			type = "text";
+			meaning = extractTextMeaning(buffer);
+			if (!meaning) {
+				meaning = "Text note shared in the transfer.";
+			}
+		} else {
+			type = "file";
+			meaning = "Shared file with limited readable content.";
+		}
 
-		enrichedFiles.push({
+		context.push({
 			name,
-			mime,
-			size,
-			buffer: file.buffer,
-			categoryGuess,
-			typeLabel: cleanPreviewText(processed.typeLabel || mime || "file", 64),
-			preview: cleanPreviewText(processed.preview || processed.localSummary || ""),
-			promptText: cleanPreviewText(processed.promptText || processed.preview || processed.localSummary || "", MAX_PROMPT_TEXT_CHARS),
-			localSummary: normalizeSummary(processed.localSummary, buildMetadataSummary({ name, mime, size })),
-			localKeyPoints: normalizeKeyPoints(processed.keyPoints, []),
-			imageDescription: processed.imageDescription ? cleanPreviewText(processed.imageDescription, 220) : null,
-			riskFlags: Array.isArray(processed.riskFlags)
-				? processed.riskFlags.map((flag) => cleanPreviewText(String(flag || ""), 80)).filter(Boolean)
-				: [],
+			meaning: clipText(meaning, 190),
+			type,
 		});
-
-		if (idx % 2 === 1) {
-			await new Promise((resolve) => setImmediate(resolve));
-		}
 	}
 
-	const totalSize = enrichedFiles.reduce((sum, file) => sum + Number(file.size || 0), 0);
-	const primary = enrichedFiles[0];
-	const aggregateText = cleanPreviewText(enrichedFiles.map((file) => file.promptText || file.preview || file.localSummary).join("\n\n"), MAX_PDF_CHARS);
-	const keywords = keywordHintsFromText(aggregateText, 10);
-	const manifest = enrichedFiles
-		.map((file, idx) => `${idx + 1}. ${file.name}`)
-		.join("\n");
-
-	const topCategory = normalizeCategoryName(pickDominantCategory(enrichedFiles));
-	const detectedIntent = inferDetectedIntent(topCategory, enrichedFiles.length);
-	const riskFlags = [...new Set(enrichedFiles.flatMap((file) => file.riskFlags))].slice(0, 8);
-
-	return {
-		fileCount: enrichedFiles.length,
-		transferCode: String(transferCode || "").trim().toUpperCase() || "",
-		totalSize,
-		primaryFilename: primary.name,
-		primaryMime: String(primary.mime || "").toLowerCase(),
-		primaryBuffer: primary.buffer,
-		manifest,
-		preview: cleanPreviewText(
-			enrichedFiles
-				.map((file, idx) => {
-					const snippet = cleanPreviewText(file.promptText || file.preview || file.localSummary, MAX_PROMPT_CHARS_PER_FILE);
-					return [
-						`--- FILE ${idx + 1}: ${file.name} ---`,
-						snippet || "",
-					].join("\n");
-				})
-				.join("\n\n"),
-			MAX_PROMPT_TEXT_CHARS,
-		),
-		keywords,
-		category: topCategory,
-		detectedIntent,
-		localOverallSummary: buildFallbackSummary({
-			fileCount: enrichedFiles.length,
-			totalSize,
-			category: topCategory,
-			keywords,
-			detectedIntent,
-		}),
-		riskFlags,
-		enrichedFiles,
-	};
+	return context;
 }
 
-function normalizeAiResult(parsed, context) {
-	const fallbackSummary = context.localOverallSummary;
-	const fallbackCategory = context.category;
-	const fallbackName = sanitizeSuggestedName(path.parse(context.primaryFilename || "file").name || "file");
-	const hasValidAiFiles = Array.isArray(parsed?.files) && parsed.files.length > 0;
+async function runAnalysisWithValidation(context, transferCode, forceFallback) {
+	let output = await analyzeWithFallback(buildAnalysisPrompt(context), transferCode, forceFallback);
+	let normalized = normalizeAiOutput(output, context);
+	let quality = validateHumanQuality(normalized, context);
+	let retries = 0;
 
-	const parsedCategory = typeof parsed?.category === "string" ? normalizeCategoryName(parsed.category) : "";
-	const category = ALLOWED_CATEGORIES.has(parsedCategory)
-		? parsedCategory
-		: normalizeCategoryName(fallbackCategory);
-
-	const rawSummary = parsed?.overall_summary || parsed?.summary;
-	let summary = cleanInsightText(normalizeSummary(cleanAiText(rawSummary), fallbackSummary), 1200)
-		|| cleanInsightText(fallbackSummary, 1200)
-		|| fallbackSummary;
-	// Final quality gate: if summary still contains banned output, use fallback
-	if (isBadOutput(summary)) {
-		summary = cleanInsightText(fallbackSummary, 1200) || "Mixed files shared together.";
-	}
-	const rawSuggestedName = parsed?.suggested_filename || parsed?.suggestedName;
-	const suggestedName = sanitizeSuggestedName(rawSuggestedName, fallbackName);
-
-	const aiFiles = hasValidAiFiles ? parsed.files : [];
-	const findAiFile = (targetName, index) => {
-		const normalizedTarget = String(targetName || "").trim().toLowerCase();
-		const byName = aiFiles.find((item) => String(item?.name || "").trim().toLowerCase() === normalizedTarget);
-		if (byName) {
-			return byName;
-		}
-		return aiFiles[index] || null;
-	};
-
-	const files = context.enrichedFiles.map((file, index) => {
-		const candidate = findAiFile(file.name, index);
-		const fallbackFileSummary = cleanInsightText(file.localSummary || inferPurposeFromFilename(file.name), 700)
-			|| "Context derived from naming and bundle.";
-		let cleanFileSummary = cleanInsightText(
-			normalizeSummary(cleanAiText(candidate?.summary), fallbackFileSummary),
-			700,
-		) || fallbackFileSummary;
-		// Quality gate per file
-		if (isBadOutput(cleanFileSummary)) {
-			cleanFileSummary = fallbackFileSummary;
-		}
-		const cleanedKeyPoints = cleanInsightPoints(
-			normalizeKeyPoints(candidate?.key_points || candidate?.keyPoints, file.localKeyPoints),
-		);
-		return {
-			name: String(file.name || "").slice(0, 128),
-			type: cleanPreviewText(String(candidate?.type || ""), 64),
-			summary: cleanFileSummary,
-			key_points: cleanedKeyPoints.length
-				? cleanedKeyPoints
-				: ["Context derived from naming and bundle"],
-		};
-	});
-
-	const normalizedSummary = hasValidAiFiles
-		? summary
-		: (cleanInsightText(fallbackSummary, 1200) || "Mixed files shared together.");
-
-	const detectedIntent = typeof parsed?.detected_intent === "string"
-		? cleanPreviewText(cleanAiText(parsed.detected_intent), 120)
-		: context.detectedIntent;
-
-	const aiRiskFlags = Array.isArray(parsed?.risk_flags)
-		? parsed.risk_flags.map((flag) => cleanPreviewText(String(flag || ""), 80)).filter(Boolean)
-		: [];
-	const riskFlags = [...new Set([...(context.riskFlags || []), ...aiRiskFlags])].slice(0, 8);
-
-	let imageDescription = null;
-	if (category === "Media" || context.primaryMime.startsWith("image/")) {
-		const aiImageDescription = cleanPreviewText(parsed?.imageDescription || "", 220);
-		const fallbackImageDescription = context.enrichedFiles.find((file) => file.imageDescription)?.imageDescription || null;
-		imageDescription = aiImageDescription || fallbackImageDescription;
+	while (!quality.ok && retries < 2) {
+		retries += 1;
+		output = await analyzeWithFallback(buildRewritePrompt(context, normalized), transferCode, true);
+		normalized = normalizeAiOutput(output, context);
+		quality = validateHumanQuality(normalized, context);
 	}
 
-	const highlightedFiles = highlightKeyFile(files);
-	const purpose = detectPurpose(highlightedFiles);
-	const tags = detectTags(highlightedFiles);
-	const smartSuggestedFilename = generateSmartName(rawSuggestedName || suggestedName, highlightedFiles);
-	const confidenceScore = calculateConfidence({
-		files: highlightedFiles,
-		category,
-		purpose,
-		tags,
-	});
+	if (!quality.ok) {
+		throw new Error(`AI output failed quality checks: ${quality.issues.join("; ")}`);
+	}
 
-	return {
-		// Backward compat
-		summary: normalizedSummary,
-		suggestedName: smartSuggestedFilename,
-		category,
-		imageDescription,
-		// New structured fields
-		files: highlightedFiles,
-		detectedIntent,
-		riskFlags,
-		overall_summary: normalizedSummary,
-		suggested_filename: smartSuggestedFilename,
-		detected_intent: detectedIntent,
-		risk_flags: riskFlags,
-		purpose,
-		tags,
-		confidence_score: confidenceScore,
-	};
+	return normalized;
 }
 
 async function analyzeTransfer(files, transferCode, forceFallback = false) {
-	let context = null;
-
 	try {
-		context = await buildTransferContext(files, transferCode);
-		if (!context) {
-			return null;
+		if (!Array.isArray(files) || files.length === 0) {
+			return {
+				success: false,
+				warning: "AI analysis unavailable",
+			};
 		}
 
-		if (!canUseAI()) {
-			logEvent("AI analysis skipped", "local rate safety limit reached");
-			return normalizeAiResult(null, context);
+		logEvent("AI analysis started", `CODE: ${transferCode}`, `FILES: ${files.length}`);
+
+		const context = await buildAIContext(files);
+		console.log("AI CONTEXT:", context);
+
+		if (!context.length) {
+			throw new Error("No file context could be built for analysis");
 		}
 
-		const prompt = buildPrompt({
-			fileCount: context.fileCount,
-			totalSize: context.totalSize,
-			primaryFilename: context.primaryFilename,
-			manifest: context.manifest,
-			preview: context.preview,
-		});
+		const normalized = await runAnalysisWithValidation(context, transferCode, forceFallback);
+		const overallSummary = normalized.overall_summary;
+		const suggestedFilename = buildSuggestedFilename(context);
+		const category = inferCategoryFromContext(context);
+		const detectedIntent = inferIntentFromContext(context);
 
-		const parsed = await analyzeWithFallback(prompt, context.transferCode, forceFallback);
-		if (!parsed) {
-			return normalizeAiResult(null, context);
-		}
+		const result = {
+			success: true,
+			overall_summary: overallSummary,
+			summary: overallSummary,
+			files: normalized.files,
+			category,
+			suggested_filename: suggestedFilename,
+			suggestedName: suggestedFilename,
+			detected_intent: detectedIntent,
+			detectedIntent,
+		};
 
-		const normalized = normalizeAiResult(parsed, context);
-		if (!Array.isArray(normalized?.files) || normalized.files.length === 0) {
-			return normalizeAiResult(null, context);
-		}
-
-		return normalized;
+		console.log("AI OUTPUT:", result);
+		logEvent("AI analysis completed", `CODE: ${transferCode}`, `FILES: ${normalized.files.length}`);
+		return result;
 	} catch (error) {
-		logError("AI transfer analysis failed", error);
-
-		try {
-			if (!context) {
-				context = await buildTransferContext(files, transferCode);
-			}
-
-			if (!context) {
-				return null;
-			}
-
-			return normalizeAiResult(null, context);
-		} catch (fallbackError) {
-			logError("AI transfer fallback failed", fallbackError);
-			return null;
-		}
+		logError("AI analysis failed", error, `CODE: ${transferCode}`);
+		return {
+			success: false,
+			warning: "AI analysis unavailable",
+		};
 	}
 }
 
 async function analyzeFile(buffer, filename, mimeType) {
-	if (!buffer) {
-		return null;
-	}
-
 	return analyzeTransfer([
 		{
 			buffer,
 			originalname: filename,
 			mimetype: mimeType,
-			size: Buffer.isBuffer(buffer) ? buffer.length : 0,
+			size: buffer?.length || 0,
 		},
-	]);
+	], "SINGLE_FILE", false);
 }
 
 module.exports = {
 	analyzeFile,
 	analyzeTransfer,
+	buildAIContext,
 };
-
