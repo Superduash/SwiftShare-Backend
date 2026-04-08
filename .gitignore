@@ -1,23 +1,42 @@
-﻿node_modules/
+﻿# Dependencies
+node_modules/
 
 # Secrets / local env
 .env
 .env.*
 !.env.example
 
+# Deployment manifests (must stay tracked)
+!render.yaml
+
 # Logs
+logs/
 *.log
 npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Build / coverage / runtime artifacts
+coverage/
+.nyc_output/
+dist/
+build/
+.cache/
+.tmp*/
+tmp/
+temp/
+
+# Local deploy/tooling state
+.render/
+.vercel/
 
 # OS/editor junk
 .DS_Store
 Thumbs.db
+.vscode/
+.idea/
 
-# Local temp / generated artifacts
-.tmp*/
-tmp/
-coverage/
-dist/
-build/
+# Project-local generated files
 backendcode.txt
 swiftshare-fix-prompt.md
