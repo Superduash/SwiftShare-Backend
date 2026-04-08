@@ -16,25 +16,81 @@ function loadPdfParser() {
 
 const pdfParserModule = loadPdfParser();
 
+function isCtorInvocationError(error) {
+	const message = String(error?.message || "").toLowerCase();
+	return message.includes("cannot be invoked without 'new'")
+		|| message.includes("cannot be invoked without \"new\"")
+		|| message.includes("class constructor");
+}
+
+function toPdfTextResult(value) {
+	if (value && typeof value === "object") {
+		if (typeof value.text === "string") {
+			return { text: value.text };
+		}
+
+		if (typeof value.value === "string") {
+			return { text: value.value };
+		}
+	}
+
+	if (typeof value === "string") {
+		return { text: value };
+	}
+
+	return { text: "" };
+}
+
+async function parseWithParserClass(ParserClass, buffer) {
+	const parser = new ParserClass({ data: buffer });
+	try {
+		if (typeof parser.getText === "function") {
+			const result = await parser.getText();
+			return toPdfTextResult(result);
+		}
+
+		if (typeof parser.parseBuffer === "function") {
+			const result = await parser.parseBuffer(buffer);
+			return toPdfTextResult(result);
+		}
+
+		throw new Error("Unsupported parser class API");
+	} finally {
+		if (typeof parser.destroy === "function") {
+			await parser.destroy().catch(() => {});
+		}
+	}
+}
+
 async function parsePdfBuffer(buffer) {
 	if (typeof pdfParserModule === "function") {
-		return pdfParserModule(buffer);
+		try {
+			const result = await pdfParserModule(buffer);
+			return toPdfTextResult(result);
+		} catch (error) {
+			if (isCtorInvocationError(error)) {
+				return parseWithParserClass(pdfParserModule, buffer);
+			}
+
+			throw error;
+		}
 	}
 
 	if (pdfParserModule && typeof pdfParserModule.default === "function") {
-		return pdfParserModule.default(buffer);
+		try {
+			const result = await pdfParserModule.default(buffer);
+			return toPdfTextResult(result);
+		} catch (error) {
+			if (isCtorInvocationError(error)) {
+				return parseWithParserClass(pdfParserModule.default, buffer);
+			}
+
+			throw error;
+		}
 	}
 
 	if (pdfParserModule && typeof pdfParserModule.PDFParse === "function") {
-		const parser = new pdfParserModule.PDFParse({ data: buffer });
-		try {
-			const result = await parser.getText();
-			return { text: String(result?.text || "") };
-		} finally {
-			if (typeof parser.destroy === "function") {
-				await parser.destroy().catch(() => {});
-			}
-		}
+		return parseWithParserClass(pdfParserModule.PDFParse, buffer);
 	}
 
 	throw new Error("Unsupported pdf-parse API shape");
