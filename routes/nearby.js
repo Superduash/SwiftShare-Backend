@@ -1,12 +1,13 @@
-﻿const express = require("express");
+const express = require("express");
 
 const Transfer = require("../models/Transfer");
 const { getClientIp, getSubnet } = require("../utils/helpers");
 const { logEvent } = require("../utils/logger");
+const { rateLimitMetadata } = require("../middleware/rateLimiter");
 
 const router = express.Router();
 
-router.get("/", async (req, res, next) => {
+router.get("/", rateLimitMetadata, async (req, res, next) => {
 	try {
 		const clientIp = getClientIp(req);
 		const subnet = getSubnet(clientIp);

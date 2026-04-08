@@ -5,6 +5,9 @@ const { getClientIp } = require("../utils/helpers");
 const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
 const { logEvent, logError } = require("../utils/logger");
 
+const isProduction = String(process.env.NODE_ENV || "").toLowerCase() === "production";
+let devBypassLogged = false;
+
 function createRedisClient() {
 	const url = process.env.UPSTASH_REDIS_REST_URL;
 	const token = process.env.UPSTASH_REDIS_REST_TOKEN;
@@ -39,10 +42,19 @@ const uploadLimiter = createLimiter(30, "1 h", "swiftshare:rl:upload");
 const downloadLimiter = createLimiter(60, "1 h", "swiftshare:rl:download");
 const metadataLimiter = createLimiter(120, "1 h", "swiftshare:rl:metadata");
 const statsLimiter = createLimiter(30, "1 h", "swiftshare:rl:stats");
+const RATE_LIMIT_MESSAGE = "Rate limit active: You are sending files too quickly. Please wait a moment.";
 
 function createRateLimitMiddleware(limiter) {
 	return async (req, res, next) => {
 		try {
+			if (!isProduction) {
+				if (!devBypassLogged) {
+					devBypassLogged = true;
+					logEvent("Dev Mode: rate limiting disabled");
+				}
+				return next();
+			}
+
 			if (!limiter) {
 				return next();
 			}
@@ -56,9 +68,13 @@ function createRateLimitMiddleware(limiter) {
 					`IP: ${ip}`,
 					`PATH: ${req.method} ${req.originalUrl}`,
 				);
+				const payload = buildErrorResponse(
+					ERROR_CODES.RATE_LIMIT_EXCEEDED,
+					RATE_LIMIT_MESSAGE,
+				);
 				return res
 					.status(429)
-					.json(buildErrorResponse(ERROR_CODES.RATE_LIMIT_EXCEEDED));
+					.json({ ...payload, message: RATE_LIMIT_MESSAGE });
 			}
 
 			return next();
