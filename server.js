@@ -37,6 +37,17 @@ const app = express();
 const server = http.createServer(app);
 const isProduction = String(process.env.NODE_ENV || "").toLowerCase() === "production";
 const allowAllOrigins = String(process.env.CORS_ALLOW_ALL_ORIGINS || "").toLowerCase() === "true";
+const HEALTH_CACHE_TTL_MS = Number(process.env.HEALTH_CACHE_TTL_MS) > 0
+	? Number(process.env.HEALTH_CACHE_TTL_MS)
+	: 15_000;
+const HEALTH_CHECK_TIMEOUT_MS = Number(process.env.HEALTH_CHECK_TIMEOUT_MS) > 0
+	? Number(process.env.HEALTH_CHECK_TIMEOUT_MS)
+	: 4_000;
+
+let healthCache = {
+	expiresAt: 0,
+	payload: null,
+};
 
 function getAllowedFrontendOrigins() {
 	const configured = `${String(process.env.FRONTEND_URL || "")},${String(process.env.CORS_EXTRA_ORIGINS || "")}`;
@@ -294,6 +305,22 @@ async function getGeminiStatus() {
 	return (await checkGeminiConnectionLive()) ? "connected" : "disconnected";
 }
 
+async function withTimeout(promise, timeoutMs, fallbackValue) {
+	let timerId;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise((resolve) => {
+				timerId = setTimeout(() => resolve(fallbackValue), timeoutMs);
+			}),
+		]);
+	} finally {
+		if (timerId) {
+			clearTimeout(timerId);
+		}
+	}
+}
+
 function formatUptimeHuman(totalSeconds) {
 	const safeSeconds = Math.max(0, Math.floor(totalSeconds));
 	const hours = Math.floor(safeSeconds / 3600);
@@ -312,26 +339,57 @@ function formatUptimeHuman(totalSeconds) {
 }
 
 app.get("/api/health", async (req, res) => {
-	const [redisStatus, r2Status, geminiStatus, activeTransfers] = await Promise.all([
-		getRedisStatus(),
-		getR2Status(),
-		getGeminiStatus(),
-		Transfer.countDocuments({ isDeleted: false, expiresAt: { $gt: new Date() } }),
-	]);
-	const uptime = process.uptime();
+	try {
+		if (healthCache.payload && healthCache.expiresAt > Date.now()) {
+			return res.json(healthCache.payload);
+		}
 
-	res.json({
-		status: "ok",
-		version,
-		uptime,
-		uptimeHuman: formatUptimeHuman(uptime),
-		mongodb: getMongoStatus(),
-		redis: redisStatus,
-		r2: r2Status,
-		gemini: geminiStatus,
-		activeTransfers,
-		timestamp: Date.now(),
-	});
+		const now = new Date();
+		const [redisStatus, r2Status, geminiStatus, activeTransfers] = await Promise.all([
+			withTimeout(getRedisStatus(), HEALTH_CHECK_TIMEOUT_MS, "disconnected"),
+			withTimeout(getR2Status(), HEALTH_CHECK_TIMEOUT_MS, "disconnected"),
+			withTimeout(getGeminiStatus(), HEALTH_CHECK_TIMEOUT_MS, "disconnected"),
+			withTimeout(
+				Transfer.countDocuments({ isDeleted: false, expiresAt: { $gt: now } }),
+				HEALTH_CHECK_TIMEOUT_MS,
+				0,
+			),
+		]);
+		const uptime = process.uptime();
+		const payload = {
+			status: "ok",
+			version,
+			uptime,
+			uptimeHuman: formatUptimeHuman(uptime),
+			mongodb: getMongoStatus(),
+			redis: redisStatus,
+			r2: r2Status,
+			gemini: geminiStatus,
+			activeTransfers,
+			timestamp: Date.now(),
+		};
+
+		healthCache = {
+			expiresAt: Date.now() + HEALTH_CACHE_TTL_MS,
+			payload,
+		};
+
+		return res.json(payload);
+	} catch (error) {
+		logError("Health check failed", error);
+		return res.status(200).json({
+			status: "ok",
+			version,
+			uptime: process.uptime(),
+			uptimeHuman: formatUptimeHuman(process.uptime()),
+			mongodb: getMongoStatus(),
+			redis: "disconnected",
+			r2: "disconnected",
+			gemini: "disconnected",
+			activeTransfers: 0,
+			timestamp: Date.now(),
+		});
+	}
 });
 
 app.use((req, res) => {
@@ -393,6 +451,8 @@ function printStartupStatus(port, host) {
 		if (!mongoConnected) {
 			logError("MongoDB Failed", null);
 		}
+	}).catch((error) => {
+		logError("MongoDB startup check failed", error);
 	});
 
 	void Promise.all([
@@ -410,6 +470,8 @@ function printStartupStatus(port, host) {
 		} else {
 			logError("R2 Failed", null);
 		}
+	}).catch((error) => {
+		logError("Service startup checks failed", error);
 	});
 
 	const geminiStatus = checkGeminiConnection() ? "connected" : "disconnected";

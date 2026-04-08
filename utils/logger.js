@@ -6,6 +6,28 @@
 	return `${hh}:${mm}:${ss}`;
 }
 
+const LOG_LEVELS = {
+	error: 0,
+	warn: 1,
+	info: 2,
+	debug: 3,
+};
+
+function getConfiguredLogLevel() {
+	const rawLevel = String(process.env.LOG_LEVEL || "").trim().toLowerCase();
+	if (Object.prototype.hasOwnProperty.call(LOG_LEVELS, rawLevel)) {
+		return rawLevel;
+	}
+
+	const isProduction = String(process.env.NODE_ENV || "").trim().toLowerCase() === "production";
+	return isProduction ? "warn" : "info";
+}
+
+function shouldLog(level) {
+	const configured = getConfiguredLogLevel();
+	return LOG_LEVELS[level] <= LOG_LEVELS[configured];
+}
+
 function withTimestamp(message) {
 	return `[${getTimestamp()}] ${message}`;
 }
@@ -36,6 +58,10 @@ function logSuccess(message, useTimestamp = false) {
 }
 
 function logInfo(message, useTimestamp = false) {
+	if (!shouldLog("info")) {
+		return;
+	}
+
 	const line = `[•] ${message}`;
 	writeStdout(useTimestamp ? withTimestamp(line) : line);
 }
@@ -45,6 +71,10 @@ function logEvent(event, ...parts) {
 }
 
 function logError(event, error, ...parts) {
+	if (!shouldLog("error")) {
+		return;
+	}
+
 	const hasError = error !== undefined && error !== null;
 	const message = hasError
 		? (error.message ? error.message : String(error))
