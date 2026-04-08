@@ -161,6 +161,55 @@ function isDocxFile(file) {
 	return mime.includes("wordprocessingml") || name.endsWith(".docx");
 }
 
+const PREVIEW_EXTENSION_MIME_MAP = {
+	mp3: "audio/mpeg",
+	wav: "audio/wav",
+	m4a: "audio/mp4",
+	aac: "audio/aac",
+	ogg: "audio/ogg",
+	opus: "audio/opus",
+	flac: "audio/flac",
+	mp4: "video/mp4",
+	webm: "video/webm",
+	mov: "video/quicktime",
+	m4v: "video/x-m4v",
+	mkv: "video/x-matroska",
+	avi: "video/x-msvideo",
+};
+
+function isGenericBinaryMimeType(mimeType) {
+	const normalized = String(mimeType || "")
+		.trim()
+		.toLowerCase()
+		.split(";")[0]
+		.trim();
+
+	return !normalized
+		|| normalized === "application/octet-stream"
+		|| normalized === "binary/octet-stream";
+}
+
+function resolvePreviewContentType(file, r2ContentType) {
+	if (!isGenericBinaryMimeType(r2ContentType)) {
+		return String(r2ContentType).trim();
+	}
+
+	if (!isGenericBinaryMimeType(file?.mimeType)) {
+		return String(file.mimeType).trim();
+	}
+
+	const originalName = String(file?.originalName || "").trim().toLowerCase();
+	const extensionMatch = /\.([a-z0-9]+)$/.exec(originalName);
+	if (extensionMatch) {
+		const inferredType = PREVIEW_EXTENSION_MIME_MAP[extensionMatch[1]];
+		if (inferredType) {
+			return inferredType;
+		}
+	}
+
+	return "application/octet-stream";
+}
+
 function parseRangeHeader(rangeHeader, totalBytes) {
 	const rawRange = typeof rangeHeader === "string" ? rangeHeader.trim() : "";
 	if (!rawRange) {
@@ -573,10 +622,16 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 		);
 		const stream = await toReadable(objectResponse.Body);
 
-		const contentType = objectResponse.ContentType || file.mimeType || "application/octet-stream";
+		const contentType = resolvePreviewContentType(file, objectResponse.ContentType);
+		const normalizedContentType = String(contentType).toLowerCase().split(";")[0].trim();
+		const isMediaContentType = normalizedContentType.startsWith("audio/") || normalizedContentType.startsWith("video/");
+
 		res.setHeader("Content-Type", contentType);
 		res.setHeader("Content-Disposition", `inline; filename="${sanitizeFilename(file.originalName || "preview")}"`);
-		res.setHeader("Cache-Control", "private, max-age=300");
+		res.setHeader("Cache-Control", isMediaContentType ? "private, max-age=300, no-transform" : "private, max-age=300");
+		if (isMediaContentType) {
+			res.removeHeader("X-Content-Type-Options");
+		}
 		res.setHeader("Accept-Ranges", "bytes");
 		res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
 
