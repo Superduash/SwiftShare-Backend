@@ -35,7 +35,16 @@ function getMaxFileCount() {
 
 function getMaxFileSizeBytes() {
 	const maxSizeMb = Number(process.env.MAX_FILE_SIZE_MB);
-	const safeMb = Number.isFinite(maxSizeMb) && maxSizeMb > 0 ? maxSizeMb : 100;
+	const runtimeMemoryMb = Number(
+		process.env.RUNTIME_MEMORY_MB
+			|| process.env.RENDER_MEMORY_MB
+			|| process.env.MEMORY_LIMIT_MB,
+	);
+	const isConstrainedHost = Boolean(process.env.RENDER)
+		|| (Number.isFinite(runtimeMemoryMb) && runtimeMemoryMb > 0 && runtimeMemoryMb <= 768);
+	// multer.memoryStorage() keeps each upload fully in RAM.
+	const defaultMb = isConstrainedHost ? 50 : 100;
+	const safeMb = Number.isFinite(maxSizeMb) && maxSizeMb > 0 ? maxSizeMb : defaultMb;
 	const cappedMb = Math.min(safeMb, 100);
 	return cappedMb * 1024 * 1024;
 }

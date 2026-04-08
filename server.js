@@ -226,7 +226,19 @@ app.use(morgan((tokens, req, res) => {
 app.use(express.json({ limit: "6mb" }));
 
 app.use((req, res, next) => {
-	req.setTimeout(30000, () => {
+	// Upload/download routes need longer timeout on constrained hardware (Render 0.1 CPU)
+	const isUploadOrDownload = /^\/(api\/(upload|download))/i.test(req.path);
+	const defaultUploadTimeoutMs = process.env.RENDER ? 180000 : 120000;
+	const defaultRequestTimeoutMs = process.env.RENDER ? 90000 : 60000;
+	const uploadTimeoutMs = Number(process.env.UPLOAD_REQUEST_TIMEOUT_MS) > 0
+		? Number(process.env.UPLOAD_REQUEST_TIMEOUT_MS)
+		: defaultUploadTimeoutMs;
+	const requestTimeoutMs = Number(process.env.REQUEST_TIMEOUT_MS) > 0
+		? Number(process.env.REQUEST_TIMEOUT_MS)
+		: defaultRequestTimeoutMs;
+	const timeoutMs = isUploadOrDownload ? uploadTimeoutMs : requestTimeoutMs;
+
+	req.setTimeout(timeoutMs, () => {
 		if (!res.headersSent) {
 			res
 				.status(408)
