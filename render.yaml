@@ -26,6 +26,8 @@ services:
         sync: false
       - key: R2_REGION
         value: auto
+      - key: R2_ENDPOINT
+        sync: false
       - key: FRONTEND_URL
         sync: false
       - key: SHARE_BASE_URL
@@ -34,17 +36,37 @@ services:
         sync: false
       - key: UPSTASH_REDIS_REST_TOKEN
         sync: false
+      - key: CORS_EXTRA_ORIGINS
+        sync: false
+      - key: CORS_ALLOW_ALL_ORIGINS
+        value: "false"
       - key: GEMINI_API_KEY
         sync: false
       - key: GROQ_API_KEY
         sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENROUTER_SITE_URL
+        sync: false
+      - key: OPENROUTER_APP_NAME
+        value: "SwiftShare Backend"
       - key: SENTRY_DSN
         sync: false
+      - key: AI_REQUEST_TIMEOUT_MS
+        value: "20000"
+      - key: AI_CACHE_TTL_SECONDS
+        value: "3600"
+      - key: BURN_IDLE_FINALIZE_MS
+        value: "90000"
       - key: SESSION_EXPIRY_MINUTES
         value: "10"
+      - key: MAX_SESSION_EXPIRY_MINUTES
+        value: "300"
       - key: MAX_FILE_SIZE_MB
         value: "100"
       - key: MAX_FILE_COUNT
         value: "10"
       - key: CODE_LENGTH
         value: "6"
+      - key: QR_BRANDED
+        value: "true"
