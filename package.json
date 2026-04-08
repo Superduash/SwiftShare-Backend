@@ -7,7 +7,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "start": "node server.js",
+    "start": "node --max-old-space-size=384 server.js",
     "predev": "node scripts/ensure-port-free.js 3001",
     "dev": "nodemon --signal SIGTERM --delay 750ms --exitcrash server.js"
   },

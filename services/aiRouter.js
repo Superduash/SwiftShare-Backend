@@ -24,6 +24,7 @@ const openRouterApiKey = String(process.env.OPENROUTER_API_KEY || "").trim();
 const geminiClient = geminiApiKey ? new GoogleGenerativeAI(geminiApiKey) : null;
 
 const memoryCache = new Map();
+const MAX_MEMORY_CACHE_SIZE = 50; // Cap to prevent unbounded growth on constrained hosts
 
 function getCacheKey(transferCode) {
 	const normalized = String(transferCode || "").trim().toUpperCase();
@@ -136,6 +137,20 @@ function getMemoryCacheEntry(key) {
 function setMemoryCacheEntry(key, value) {
 	if (!key || !isValidCachedResult(value)) {
 		return;
+	}
+
+	const now = Date.now();
+	for (const [cachedKey, entry] of memoryCache.entries()) {
+		if (!entry || entry.expiresAt <= now) {
+			memoryCache.delete(cachedKey);
+		}
+	}
+
+	if (!memoryCache.has(key) && memoryCache.size >= MAX_MEMORY_CACHE_SIZE) {
+		const oldestKey = memoryCache.keys().next().value;
+		if (oldestKey) {
+			memoryCache.delete(oldestKey);
+		}
 	}
 
 	memoryCache.set(key, {

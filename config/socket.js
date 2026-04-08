@@ -160,36 +160,38 @@ function bindSocketToRoom(code, socketId) {
 	return true;
 }
 
-function clearTransferCountdown(code) {
-	const normalizedCode = normalizeCode(code);
-	if (!normalizedCode) {
+// ── Consolidated countdown timer ──────────────────────────
+// Instead of one setInterval per transfer (which kills 0.1 CPU on Render),
+// we use a single interval that ticks every 2s and processes all active countdowns.
+let consolidatedTimerId = null;
+const TICK_INTERVAL_MS = 2000;
+
+function ensureConsolidatedTimer() {
+	if (consolidatedTimerId) {
 		return;
 	}
 
-	const existing = countdownMap.get(normalizedCode);
-	if (!existing) {
-		return;
-	}
+	consolidatedTimerId = setInterval(() => {
+		if (countdownMap.size === 0) {
+			clearInterval(consolidatedTimerId);
+			consolidatedTimerId = null;
+			return;
+		}
 
-	clearInterval(existing.intervalId);
-	countdownMap.delete(normalizedCode);
-}
+		const now = Date.now();
+		const expired = [];
 
-function scheduleTransferCountdown(code, expiresAt) {
-	const normalizedCode = normalizeCode(code);
-	if (!normalizedCode || !expiresAt) {
-		return;
-	}
+		for (const [normalizedCode, entry] of countdownMap) {
+			const secondsRemaining = Math.max(0, Math.ceil((entry.endsAt - now) / 1000));
+			emitToRoom(normalizedCode, "countdown-tick", { secondsRemaining });
 
-	clearTransferCountdown(normalizedCode);
+			if (secondsRemaining <= 0) {
+				expired.push(normalizedCode);
+			}
+		}
 
-	const end = new Date(expiresAt).getTime();
-	const intervalId = setInterval(() => {
-		const secondsRemaining = Math.max(0, Math.ceil((end - Date.now()) / 1000));
-		emitToRoom(normalizedCode, "countdown-tick", { secondsRemaining });
-
-		if (secondsRemaining <= 0) {
-			clearTransferCountdown(normalizedCode);
+		for (const normalizedCode of expired) {
+			countdownMap.delete(normalizedCode);
 			emitToRoom(normalizedCode, "transfer-expired", { code: normalizedCode });
 			void Transfer.updateOne(
 				{ code: normalizedCode },
@@ -206,9 +208,31 @@ function scheduleTransferCountdown(code, expiresAt) {
 			);
 			logEvent("Transfer expired", `CODE: ${normalizedCode}`);
 		}
-	}, 1000);
+	}, TICK_INTERVAL_MS);
+}
 
-	countdownMap.set(normalizedCode, { intervalId });
+function clearTransferCountdown(code) {
+	const normalizedCode = normalizeCode(code);
+	if (!normalizedCode) {
+		return;
+	}
+
+	countdownMap.delete(normalizedCode);
+
+	if (countdownMap.size === 0 && consolidatedTimerId) {
+		clearInterval(consolidatedTimerId);
+		consolidatedTimerId = null;
+	}
+}
+
+function scheduleTransferCountdown(code, expiresAt) {
+	const normalizedCode = normalizeCode(code);
+	if (!normalizedCode || !expiresAt) {
+		return;
+	}
+
+	countdownMap.set(normalizedCode, { endsAt: new Date(expiresAt).getTime() });
+	ensureConsolidatedTimer();
 }
 
 function getSocketIp(socket) {
