@@ -178,7 +178,7 @@ async function processUploadFlow({
 		const elapsedSeconds = Math.max((Date.now() - uploadStartedAt) / 1000, 0.001);
 		const denominator = Math.max(totalSize, 1);
 		const percent = Math.min(100, Math.round((uploadedSize / denominator) * 100));
-		const speed = Number(((uploadedSize / (1024 * 1024)) / elapsedSeconds).toFixed(2));
+		const speed = Math.round(uploadedSize / elapsedSeconds);
 
 		emitToRoom(code, "upload-progress", {
 			percent,
