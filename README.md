@@ -12,40 +12,44 @@
 
 ---
 
-## Overview
+## Overview 👋
 
-SwiftShare Backend powers transfer creation, secure download flows, and lifecycle cleanup.
-It exposes REST endpoints under `/api/*`, emits real-time socket events, and manages temporary transfer state in MongoDB + R2.
+SwiftShare Backend is the modern API architecture powering secure file sharing.
+The backend seemingly handles all your traffic in the background, providing you an uninterrupted, clean, and blazing fast experience when serving file streams, AI data, and socket events.
 
-## Key Backend Features
+SwiftShare Backend features robust real-time updates, integrates flawlessly with your frontend themes, and includes a suite of security features like rate limiting and payload verification.
 
-- Upload and metadata pipelines for multi-file sessions.
-- Password verification endpoint for protected transfers.
-- Burn-after-download flow with claim ownership and explicit finalize endpoint.
-- File preview and document preview conversion routes.
-- Real-time transfer updates via Socket.IO rooms.
-- Automatic cleanup job for expired/deleted transfers.
-- Optional AI summary support through Gemini.
-- Optional rate limiting via Upstash Redis.
-- Production error monitoring through Sentry integration.
+## Features ✨
 
-## API Surface
+- 🚀 **Lightning Fast Streams:** Upload and metadata pipelines for multi-file sessions.
+- 🔒 **Password Protection:** Safe verification endpoints for locked transfers.
+- 🔥 **Burn-After-Downloading:** Claimant ownership with explicit finalize endpoints.
+- 👁️ **Media Previews:** Real-time file and document preview conversion routes.
+- ⚡ **Real-Time Sync:** Transfer updates and progress via Socket.IO rooms.
+- 🧹 **Auto-Cleanup:** Scheduled cleanup job for expired/deleted transfers.
+- 🤖 **Generative AI:** Summary support through Google's Gemini Models.
+- 🛡️ **Rate Limiting:** Optional Upstash Redis integrations.
+- 🐛 **Error Tracking:** Production monitoring through Sentry.
+
+> *"Does a better job than what legacy file share websites officially offer."* — **Tech Enthusiast**
+
+## API Surface 🌐
 
 Mounted route groups:
 
-- `/api/upload`
-- `/api/file`
-- `/api/download`
-- `/api/transfer`
-- `/api/nearby`
-- `/api/stats`
+- 📤 `/api/upload` - File uploads
+- 📄 `/api/file` - File metadata & previews
+- 📥 `/api/download` - Stream resolution
+- 🔄 `/api/transfer` - Transfer lifecycle
+- 📡 `/api/nearby` - Local discovery
+- 📊 `/api/stats` - Server metrics
 
 Utility endpoints:
 
-- `GET /api/ping`
-- `GET /api/health`
+- 🏓 `GET /api/ping`
+- 🏥 `GET /api/health`
 
-## Run Locally
+## How to install 📥
 
 ```bash
 cd Backend
@@ -56,7 +60,7 @@ npm run dev
 
 Default port: `3001`
 
-## Environment Variables
+## Environment Variables ⚙️
 
 Minimum required in `.env`:
 
@@ -70,28 +74,27 @@ FRONTEND_URL=https://your-frontend.vercel.app
 SHARE_BASE_URL=https://your-frontend.vercel.app
 ```
 
-Optional:
+Optional Configs:
 
 - `GEMINI_API_KEY`, `GEMINI_MODEL`
 - `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`
 - `SENTRY_DSN`
 - tuning values such as `SESSION_EXPIRY_MINUTES`, `MAX_FILE_SIZE_MB`, `MAX_FILE_COUNT`
 
-## Scripts
+## Credits 🙌
 
-```bash
-npm run dev    # nodemon development server (with port guard)
-npm start      # production start
-```
+- **Superduash** - Backend Architecture & Development
 
-## Operational Notes
+## Dependencies 📦
 
-- `FRONTEND_URL` supports comma-separated origins for preview + production domains.
-- CORS allows loopback/private hosts in non-production for easier local testing.
-- Health checks include MongoDB, Redis, R2, Gemini, active transfer count, uptime, and version.
+- `express`
+- `mongoose`
+- `socket.io`
+- `@aws-sdk/client-s3` (Cloudflare R2)
+- `@google/generative-ai`
 
 ---
 
 <p align="center">
-  Backend maintained by Superduash
+  Backend built with 💖 by Superduash
 </p>
