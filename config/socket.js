@@ -402,11 +402,16 @@ function initSocket(server) {
 	return ioInstance;
 }
 
+function getIo() {
+	return ioInstance;
+}
+
 module.exports = {
 	initSocket,
 	emitToRoom,
 	scheduleTransferCountdown,
 	clearTransferCountdown,
 	bindSocketToRoom,
+	getIo,
 };
 

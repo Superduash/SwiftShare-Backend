@@ -210,7 +210,10 @@ function corsOrigin(origin, callback) {
 app.set("trust proxy", 1);
 
 app.use(cors({ origin: corsOrigin, maxAge: 86400 }));
-app.use(helmet());
+app.use(helmet({
+	crossOriginResourcePolicy: { policy: "cross-origin" },
+	crossOriginEmbedderPolicy: false,
+}));
 app.use(morgan((tokens, req, res) => {
 	const url = (req.originalUrl || "").split("?")[0]; // strip query params to prevent passwords leaking into logs
 	return [
@@ -220,7 +223,7 @@ app.use(morgan((tokens, req, res) => {
 		tokens["response-time"](req, res), "ms",
 	].join(" ");
 }));
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({ limit: "6mb" }));
 
 app.use((req, res, next) => {
 	req.setTimeout(30000, () => {
@@ -535,6 +538,21 @@ async function gracefulShutdown(signal, onComplete) {
 
 	isShuttingDown = true;
 	logEvent(`${signal} received, shutting down gracefully`);
+
+	// Force exit after 8s if graceful shutdown stalls (Render sends SIGKILL at 10s)
+	const forceTimer = setTimeout(() => {
+		logError("Forced exit after shutdown timeout", null);
+		process.exit(1);
+	}, 8000);
+	forceTimer.unref();
+
+	try {
+		const { getIo } = require("./config/socket");
+		const io = typeof getIo === "function" ? getIo() : null;
+		if (io) {
+			await new Promise((resolve) => { io.close(resolve); });
+		}
+	} catch { /* socket cleanup is best-effort */ }
 
 	await new Promise((resolve) => {
 		server.close(() => resolve());
