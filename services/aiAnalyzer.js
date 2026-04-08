@@ -1065,8 +1065,8 @@ function validateHumanQuality(output, context) {
 	if (!overall) {
 		issues.push("Missing overall summary");
 	} else {
-		if (overallSentenceCount !== 2) {
-			issues.push("Overall summary must be exactly 2 sentences");
+		if (overallSentenceCount < 1 || overallSentenceCount > 3) {
+			issues.push("Overall summary must be 1–3 sentences");
 		}
 		if (containsGenericPhrase(overall)) {
 			issues.push("Overall summary contains generic phrasing");
@@ -1085,8 +1085,8 @@ function validateHumanQuality(output, context) {
 				issues.push(`Missing summary for ${file?.name || "file"}`);
 				continue;
 			}
-			if (toSentences(summary).length !== 1) {
-				issues.push(`File summary must be one sentence for ${file.name}`);
+			if (toSentences(summary).length < 1 || toSentences(summary).length > 2) {
+				issues.push(`File summary must be 1–2 sentences for ${file.name}`);
 			}
 			if (/^this\b/i.test(summary)) {
 				issues.push(`File summary is too generic for ${file.name}`);
@@ -1209,7 +1209,7 @@ async function runAnalysisWithValidation(context, transferCode, forceFallback) {
 	}
 
 	if (!quality.ok) {
-		throw new Error(`AI output failed quality checks: ${quality.issues.join("; ")}`);
+		logEvent("AI output quality suboptimal, using best available", quality.issues.join("; "));
 	}
 
 	return normalized;

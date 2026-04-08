@@ -10,7 +10,7 @@ const CACHE_TTL_SECONDS = Number(process.env.AI_CACHE_TTL_SECONDS) > 0
 	: 60 * 60;
 
 const GEMINI_PRIMARY_MODEL = "gemini-2.5-flash";
-const GEMINI_FALLBACK_MODEL = "gemini-3.1-flash";
+const GEMINI_FALLBACK_MODEL = "gemini-1.5-flash";
 const GROQ_MODEL = "llama-3.3-70b-versatile";
 const OPENROUTER_QUALITY_MODEL = "openai/gpt-4o-mini";
 const OPENROUTER_STRUCTURE_MODEL = "openai/gpt-4o-mini";

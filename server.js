@@ -556,6 +556,14 @@ async function gracefulShutdown(signal, onComplete) {
 
 startServer();
 
+// Keep Render free tier awake during active sessions (pings own /api/ping every 10 min)
+const SELF_PING_URL = (process.env.RENDER_EXTERNAL_URL || process.env.BACKEND_URL || "").replace(/\/+$/, "");
+if (SELF_PING_URL && isProduction) {
+	setInterval(() => {
+		fetch(`${SELF_PING_URL}/api/ping`).catch(() => {});
+	}, 10 * 60 * 1000);
+}
+
 process.on("SIGTERM", () => {
 	void gracefulShutdown("SIGTERM");
 });
