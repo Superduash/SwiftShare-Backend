@@ -7,6 +7,7 @@ const { getClientIp, getDeviceName, isTransferExpired, getTransferStatus } = req
 const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
 const { getObjectFromR2 } = require("../services/fileManager");
 const { analyzeTransfer } = require("../services/aiAnalyzer");
+const { emitToRoom } = require("../config/socket");
 
 const router = express.Router();
 
@@ -146,6 +147,8 @@ router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => 
 				},
 			},
 		);
+
+		emitToRoom(code, "activity-updated", { code, event: "viewed" });
 
 		return res.status(200).json({
 			code: transfer.code,

@@ -14,6 +14,7 @@ const { logEvent } = require("../utils/logger");
 const { getClientIp, getDeviceName, isTransferExpired, getTransferStatus } = require("../utils/helpers");
 
 const router = express.Router();
+const MINUTE_MS = 60 * 1000;
 
 function extractPasswordFromRequest(req) {
 	const value = req.body?.password;
@@ -22,6 +23,25 @@ function extractPasswordFromRequest(req) {
 	}
 
 	return value;
+}
+
+function getDefaultSessionExpiryMinutes() {
+	const configuredMinutes = Number(process.env.SESSION_EXPIRY_MINUTES);
+	return Number.isFinite(configuredMinutes) && configuredMinutes > 0
+		? Math.floor(configuredMinutes)
+		: 10;
+}
+
+function inferOriginalSessionMinutes(transfer) {
+	const fallbackMinutes = getDefaultSessionExpiryMinutes();
+	const createdAtMs = transfer?.createdAt ? new Date(transfer.createdAt).getTime() : NaN;
+	const expiresAtMs = transfer?.expiresAt ? new Date(transfer.expiresAt).getTime() : NaN;
+
+	if (!Number.isFinite(createdAtMs) || !Number.isFinite(expiresAtMs) || expiresAtMs <= createdAtMs) {
+		return fallbackMinutes;
+	}
+
+	return Math.max(1, Math.round((expiresAtMs - createdAtMs) / MINUTE_MS));
 }
 
 router.post("/:code/verify-password", validateCode, async (req, res, next) => {
@@ -141,10 +161,12 @@ router.post("/:code/extend", validateCode, async (req, res, next) => {
 			return res.status(409).json(buildErrorResponse(ERROR_CODES.SERVER_ERROR, "Transfer can only be extended once"));
 		}
 
-		const extensionMinutes = Number(process.env.SESSION_EXPIRY_MINUTES) > 0
-			? Number(process.env.SESSION_EXPIRY_MINUTES)
-			: 10;
-		const expiresAt = new Date(Date.now() + extensionMinutes * 60 * 1000);
+		const extensionMinutes = inferOriginalSessionMinutes(transfer);
+		const currentExpiryMs = transfer.expiresAt ? new Date(transfer.expiresAt).getTime() : Date.now();
+		const baseExpiryMs = Number.isFinite(currentExpiryMs)
+			? Math.max(Date.now(), currentExpiryMs)
+			: Date.now();
+		const expiresAt = new Date(baseExpiryMs + extensionMinutes * MINUTE_MS);
 
 		// Clear old countdown BEFORE saving to prevent race condition
 		clearTransferCountdown(code);
@@ -161,13 +183,19 @@ router.post("/:code/extend", validateCode, async (req, res, next) => {
 
 		// Schedule new countdown AFTER save
 		scheduleTransferCountdown(code, expiresAt);
-		emitToRoom(code, "transfer-extended", { code, expiresAt });
-		logEvent("Transfer extended", `CODE: ${code}`, `EXPIRES_AT: ${expiresAt.toISOString()}`);
+		emitToRoom(code, "transfer-extended", { code, expiresAt, extensionMinutes });
+		logEvent(
+			"Transfer extended",
+			`CODE: ${code}`,
+			`EXTENSION_MINUTES: ${extensionMinutes}`,
+			`EXPIRES_AT: ${expiresAt.toISOString()}`,
+		);
 
 		return res.status(200).json({
 			success: true,
 			code,
 			expiresAt,
+			extensionMinutes,
 			extendedOnce: true,
 		});
 	} catch (error) {
