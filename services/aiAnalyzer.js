@@ -284,8 +284,37 @@ function normalizeKeyPoints(input, fallback = []) {
 		: [];
 }
 
+function inferPurposeFromFilename(name) {
+	const stem = path.parse(String(name || "")).name;
+	const normalizedStem = cleanPreviewText(stem.replace(/[_-]+/g, " "), 120);
+	const keywords = keywordHintsFromText(normalizedStem, 4);
+
+	if (keywords.length) {
+		return `Purpose inferred from filename context: ${keywords.join(" ")}.`;
+	}
+
+	if (normalizedStem) {
+		return `Purpose inferred from filename context: ${normalizedStem}.`;
+	}
+
+	return "Purpose inferred from filename context.";
+}
+
+function cleanAiText(value) {
+	return String(value || "")
+		.replace(/analyzed using.*?\./gi, "")
+		.replace(/file type.*?\./gi, "")
+		.replace(/this file contains/gi, "")
+		.replace(/likely/gi, "")
+		.replace(/metadata/gi, "")
+		.replace(/cannot extract/gi, "")
+		.replace(/binary/gi, "")
+		.replace(/\s{2,}/g, " ")
+		.trim();
+}
+
 function cleanInsightText(value, maxChars = 220) {
-	return cleanPreviewText(String(value || ""), maxChars)
+	return cleanPreviewText(cleanAiText(String(value || "")), maxChars)
 		.replace(/\b(this file contains|this file is a|appears to be)\b/gi, "")
 		.replace(/\b(mime|format|extension|file size|size)\b\s*[:\-]?/gi, "")
 		.replace(/\b\d+(?:\.\d+)?\s*(kb|mb|gb|bytes?)\b/gi, "")
@@ -462,79 +491,62 @@ function buildMetadataSummary({ name, mime, size }) {
 	return `${name} is a ${mime || "file"} asset (${formatSize(size)}) with extension ${extension}.`;
 }
 
-async function preprocessPdfFile({ buffer, name, size }) {
+async function preprocessPdfFile({ buffer, name }) {
+	let extractedText = "";
+
 	try {
 		const parsed = await pdfParse(buffer);
-		const fullText = cleanPreviewText(parsed.text || "", MAX_PDF_CHARS);
-		const chunks = chunkText(fullText, 3500, 24);
-		const keywords = keywordHintsFromText(fullText, 8);
-		const pageCount = Number(parsed.numpages || 0);
-
-		const summary = fullText
-			? `PDF document with ${pageCount || "multiple"} pages covering ${keywords.length ? keywords.slice(0, 4).join(", ") : "structured written material"}.`
-			: `PDF document ${name} with ${pageCount || "multiple"} pages and limited extractable text.`;
-
-		const keyPoints = [
-			pageCount > 0 ? `Pages: ${pageCount}` : null,
-			keywords.length ? `Topics: ${keywords.slice(0, 5).join(", ")}` : null,
-			`Size: ${formatSize(size)}`,
-		].filter(Boolean);
-
-		return {
-			typeLabel: "pdf",
-			preview: cleanPreviewText(chunks.slice(0, 3).join("\n\n") || fullText || summary),
-			promptText: cleanPreviewText(chunks.join("\n\n") || fullText || summary, MAX_PROMPT_TEXT_CHARS),
-			localSummary: summary,
-			keyPoints,
-			imageDescription: null,
-			riskFlags: [],
-		};
+		extractedText = cleanPreviewText(parsed?.text || "", MAX_PDF_CHARS);
 	} catch (error) {
 		logError("PDF preprocessing failed", error, `FILE: ${name}`);
-		return {
-			typeLabel: "pdf",
-			preview: cleanPreviewText(buildMetadataSummary({ name, mime: "application/pdf", size })),
-			promptText: cleanPreviewText(buildMetadataSummary({ name, mime: "application/pdf", size }), MAX_PROMPT_TEXT_CHARS),
-			localSummary: `Document purpose inferred from filename and transfer context for ${name}.`,
-			keyPoints: ["Document context inferred", "Use surrounding files for purpose"],
-			imageDescription: null,
-			riskFlags: ["pdf_text_extraction_failed"],
-		};
+		extractedText = "";
 	}
+
+	const chunks = chunkText(extractedText, 3500, 24);
+	const keywords = keywordHintsFromText(extractedText, 8);
+	const summary = extractedText
+		? `Document focused on ${keywords.length ? keywords.slice(0, 4).join(", ") : "written content and instructions"}.`
+		: inferPurposeFromFilename(name);
+
+	return {
+		typeLabel: "pdf",
+		preview: cleanPreviewText(chunks.slice(0, 3).join("\n\n") || extractedText || ""),
+		promptText: cleanPreviewText(chunks.join("\n\n") || extractedText || "", MAX_PROMPT_TEXT_CHARS),
+		localSummary: summary,
+		keyPoints: keywords.length
+			? [`Topics: ${keywords.slice(0, 5).join(", ")}`]
+			: ["Purpose inferred from filename context"],
+		imageDescription: null,
+		riskFlags: [],
+	};
 }
 
-async function preprocessDocxFile({ buffer, name, size }) {
+async function preprocessDocxFile({ buffer, name }) {
+	let extractedText = "";
+
 	try {
 		const parsed = await mammoth.extractRawText({ buffer });
-		const fullText = cleanPreviewText(parsed.value || "", MAX_TEXT_CHARS);
-		const keywords = keywordHintsFromText(fullText, 8);
-
-		return {
-			typeLabel: "docx",
-			preview: cleanPreviewText(fullText),
-			promptText: cleanPreviewText(fullText, MAX_PROMPT_TEXT_CHARS),
-			localSummary: fullText
-				? `DOCX document discussing ${keywords.length ? keywords.slice(0, 4).join(", ") : "written content"}.`
-				: `DOCX document ${name} with very limited extractable text.`,
-			keyPoints: [
-				keywords.length ? `Topics: ${keywords.slice(0, 5).join(", ")}` : "Document text available",
-				`Size: ${formatSize(size)}`,
-			],
-			imageDescription: null,
-			riskFlags: [],
-		};
+		extractedText = cleanPreviewText(parsed?.value || "", MAX_TEXT_CHARS);
 	} catch (error) {
 		logError("DOCX preprocessing failed", error, `FILE: ${name}`);
-		return {
-			typeLabel: "docx",
-			preview: cleanPreviewText(buildMetadataSummary({ name, mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", size })),
-			promptText: cleanPreviewText(buildMetadataSummary({ name, mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", size }), MAX_PROMPT_TEXT_CHARS),
-			localSummary: `DOCX file ${name} (${formatSize(size)}) analyzed using metadata because text extraction failed.`,
-			keyPoints: ["DOCX format", `Size: ${formatSize(size)}`, "Text extraction fallback used"],
-			imageDescription: null,
-			riskFlags: ["docx_text_extraction_failed"],
-		};
+		extractedText = "";
 	}
+
+	const keywords = keywordHintsFromText(extractedText, 8);
+
+	return {
+		typeLabel: "docx",
+		preview: cleanPreviewText(extractedText),
+		promptText: cleanPreviewText(extractedText, MAX_PROMPT_TEXT_CHARS),
+		localSummary: extractedText
+			? `Document focused on ${keywords.length ? keywords.slice(0, 4).join(", ") : "written content"}.`
+			: inferPurposeFromFilename(name),
+		keyPoints: keywords.length
+			? [`Topics: ${keywords.slice(0, 5).join(", ")}`]
+			: ["Purpose inferred from filename context"],
+		imageDescription: null,
+		riskFlags: [],
+	};
 }
 
 async function extractImageTextWithOcr(buffer, name) {
@@ -572,7 +584,7 @@ async function extractImageTextWithOcr(buffer, name) {
 	}
 }
 
-async function preprocessImageFile({ buffer, name, mime, size }) {
+async function preprocessImageFile({ buffer, name }) {
 	const ocr = await extractImageTextWithOcr(buffer, name);
 	const text = ocr.text;
 	const keywords = keywordHintsFromText(text, 6);
@@ -586,11 +598,10 @@ async function preprocessImageFile({ buffer, name, mime, size }) {
 			typeLabel: "image",
 			preview: cleanPreviewText(text),
 			promptText: cleanPreviewText(text, MAX_PROMPT_TEXT_CHARS),
-			localSummary: summary,
+			localSummary: cleanAiText(summary),
 			keyPoints: [
 				keywords.length ? `Topics: ${keywords.slice(0, 5).join(", ")}` : "OCR text extracted",
 				firstLine ? `Leading text: ${cleanPreviewText(firstLine, 120)}` : null,
-				`Size: ${formatSize(size)}`,
 			].filter(Boolean),
 			imageDescription: `Image with extracted text: ${cleanPreviewText(firstLine || text, 180)}`,
 			riskFlags,
@@ -599,15 +610,11 @@ async function preprocessImageFile({ buffer, name, mime, size }) {
 
 	return {
 		typeLabel: "image",
-		preview: cleanPreviewText(`${name}\nType: ${mime || "image"}\nSize: ${formatSize(size)}`),
-		promptText: cleanPreviewText(`Image asset metadata\nName: ${name}\nType: ${mime || "image"}\nSize: ${formatSize(size)}`, MAX_PROMPT_TEXT_CHARS),
-		localSummary: `Image asset (${mime || "image"}) shared as visual content${riskFlags.length ? " with limited OCR text detected" : ""}.`,
-		keyPoints: [
-			`Image format: ${mime || path.extname(name || "").toLowerCase().replace(".", "") || "image"}`,
-			`Size: ${formatSize(size)}`,
-			"Visual asset suitable for image preview",
-		],
-		imageDescription: `Visual image asset (${mime || "image"}) named ${name}.`,
+		preview: "",
+		promptText: "",
+		localSummary: inferPurposeFromFilename(name),
+		keyPoints: ["Purpose inferred from filename context"],
+		imageDescription: `Visual meaning inferred from ${name}.`,
 		riskFlags,
 	};
 }
@@ -659,12 +666,12 @@ function preprocessZipFile({ buffer, name, size }) {
 		logError("ZIP preprocessing failed", error, `FILE: ${name}`);
 		return {
 			typeLabel: "zip archive",
-			preview: cleanPreviewText(buildMetadataSummary({ name, mime: "application/zip", size })),
-			promptText: cleanPreviewText(buildMetadataSummary({ name, mime: "application/zip", size }), MAX_PROMPT_TEXT_CHARS),
-			localSummary: `ZIP archive ${name} (${formatSize(size)}) where entry parsing failed, so metadata-based analysis is used.`,
-			keyPoints: ["ZIP archive", `Size: ${formatSize(size)}`, "Entry parsing fallback used"],
+			preview: "",
+			promptText: "",
+			localSummary: inferPurposeFromFilename(name),
+			keyPoints: ["Bundle purpose inferred from filename context"],
 			imageDescription: null,
-			riskFlags: ["zip_entry_parse_failed"],
+			riskFlags: [],
 		};
 	}
 }
@@ -694,7 +701,7 @@ function preprocessTabularFile({ buffer, name, ext, size }) {
 	};
 }
 
-function preprocessCodeFile({ buffer, name, mime, size }) {
+function preprocessCodeFile({ buffer, name, mime }) {
 	const source = safeTextFromBuffer(buffer, MAX_CODE_CHARS);
 	const language = detectCodeLanguage(name, mime);
 	const symbols = extractCodeSymbols(source, 12);
@@ -702,7 +709,7 @@ function preprocessCodeFile({ buffer, name, mime, size }) {
 	const purpose = inferCodePurpose(source);
 	const keywords = keywordHintsFromText(source, 8);
 
-	const summary = `Source code in ${language} focused on ${purpose}${keywords.length ? ` with notable terms ${keywords.slice(0, 4).join(", ")}` : ""}.`;
+	const summary = `Code focused on ${purpose}${keywords.length ? ` with notable terms ${keywords.slice(0, 4).join(", ")}` : ""}.`;
 
 	return {
 		typeLabel: `${language.toLowerCase()} code`,
@@ -710,18 +717,16 @@ function preprocessCodeFile({ buffer, name, mime, size }) {
 		promptText: cleanPreviewText(source, MAX_PROMPT_TEXT_CHARS),
 		localSummary: summary,
 		keyPoints: [
-			`Language: ${language}`,
 			`Purpose: ${purpose}`,
 			symbols.length ? `Functions/classes: ${symbols.slice(0, 7).join(", ")}` : "No explicit symbols extracted",
 			deps.length ? `Dependencies: ${deps.slice(0, 6).join(", ")}` : "No external dependencies extracted",
-			`Size: ${formatSize(size)}`,
 		],
 		imageDescription: null,
 		riskFlags: [],
 	};
 }
 
-function preprocessTextFile({ buffer, name, mime, size }) {
+function preprocessTextFile({ buffer, name, mime }) {
 	const text = safeTextFromBuffer(buffer, MAX_TEXT_CHARS);
 	const keywords = keywordHintsFromText(text, 8);
 
@@ -730,30 +735,25 @@ function preprocessTextFile({ buffer, name, mime, size }) {
 		preview: cleanPreviewText(text),
 		promptText: cleanPreviewText(text, MAX_PROMPT_TEXT_CHARS),
 		localSummary: text
-			? `Text document discussing ${keywords.length ? keywords.slice(0, 5).join(", ") : "general written content"}.`
-			: `${name} is a text document with very limited readable characters.`,
+			? `Written content focused on ${keywords.length ? keywords.slice(0, 5).join(", ") : "general written context"}.`
+			: inferPurposeFromFilename(name),
 		keyPoints: [
 			keywords.length ? `Topics: ${keywords.slice(0, 6).join(", ")}` : "Readable text available",
-			`Size: ${formatSize(size)}`,
 		],
 		imageDescription: null,
 		riskFlags: [],
 	};
 }
 
-function preprocessMetadataOnlyFile({ name, mime, size }) {
-	const summary = buildMetadataSummary({ name, mime, size });
+function preprocessMetadataOnlyFile({ name, mime }) {
+	const summary = inferPurposeFromFilename(name);
 
 	return {
 		typeLabel: mime || path.extname(name || "").replace(".", "") || "file",
-		preview: cleanPreviewText(summary),
-		promptText: cleanPreviewText(summary, MAX_PROMPT_TEXT_CHARS),
-		localSummary: `${summary} File is analyzed using metadata, naming, and transfer context.`,
-		keyPoints: [
-			`MIME: ${mime || "application/octet-stream"}`,
-			`Size: ${formatSize(size)}`,
-			`Filename: ${name}`,
-		],
+		preview: "",
+		promptText: "",
+		localSummary: summary,
+		keyPoints: ["Purpose inferred from filename context"],
 		imageDescription: null,
 		riskFlags: [],
 	};
@@ -836,71 +836,70 @@ function inferDetectedIntent(category, fileCount) {
 	return "file transfer";
 }
 
-function buildFallbackSummary({ fileCount, totalSize, category, keywords, detectedIntent }) {
+function buildFallbackSummary({ fileCount, category, keywords, detectedIntent }) {
 	const keywordText = Array.isArray(keywords) && keywords.length
 		? ` Key topics detected: ${keywords.slice(0, 5).join(", ")}.`
 		: "";
 
 	if (fileCount > 1) {
-		return `${fileCount} related files centered on ${category.toLowerCase()} content, likely shared for ${detectedIntent}.${keywordText}`.trim();
+		return `${fileCount} related files centered on ${category.toLowerCase()} content, shared for ${detectedIntent}.${keywordText}`.trim();
 	}
 
-	return `Single ${category.toLowerCase()} file likely shared for ${detectedIntent}.${keywordText}`.trim();
+	return `Single ${category.toLowerCase()} file shared for ${detectedIntent}.${keywordText}`.trim();
 }
 
-function buildPrompt({ fileCount, totalSize, primaryFilename, primaryMime, manifest, preview, keywords }) {
-	return [
-		"System: You are SwiftShare Intelligence — you analyze file transfers like a senior engineer reviewing real content.",
-		"Your job is to extract MEANING, PURPOSE, and VALUE — not describe file types.",
-		"",
-		"CRITICAL: Output STRICT JSON ONLY. No markdown. No extra text.",
-		"",
-		"{",
-		'  "overall_summary": "2-3 sharp sentences explaining what this bundle is about, what it contains in terms of real content, and why it was shared.",',
-		'  "suggested_filename": "short kebab-case name (max 50 chars)",',
-		'  "category": "ONE of: Codebase, Media, Documents, Mixed, Other",',
-		'  "detected_intent": "max 3 words (e.g. Project share, Personal media, Mod setup)",',
-		'  "risk_flags": ["ONLY real risks if meaningful"],',
-		'  "files": [',
-		"    {",
-		'      "name": "filename",',
-		'      "summary": "ONE meaningful sentence describing WHAT THIS FILE IS USED FOR (not what type it is)",',
-		'      "key_points": ["2 short insights about content or purpose"]',
-		"    }",
-		"  ]",
-		"}",
-		"",
-		"STRICT RULES:",
-		"",
-		"1. DO NOT mention:",
-		"   - file size",
-		"   - file extension",
-		"   - MIME type",
-		"   - 'this file contains'",
-		"",
-		"2. DO NOT repeat obvious metadata",
-		"",
-		"3. ALWAYS explain PURPOSE:",
-		"   - PDF -> what info it contains",
-		"   - Image -> what it shows",
-		"   - Code -> what it does",
-		"   - ZIP -> what kind of bundle it is",
-		"",
-		"4. BE DIRECT AND USEFUL:",
-		"   No filler. No repetition.",
-		"",
-		"5. EVERY FILE MUST HAVE REAL VALUE IN SUMMARY",
-		"",
-		"[TRANSFER DATA]",
-		`Files: ${fileCount}`,
-		`Primary: ${primaryFilename}`,
-		"",
-		"[MANIFEST]",
-		manifest,
-		"",
-		"[CONTENT]",
-		preview,
-	].join("\n");
+function buildPrompt({ manifest, preview }) {
+	return `
+You are a sharp senior engineer analyzing a file transfer.
+
+Return STRICT JSON ONLY.
+
+{
+  "overall_summary": "2 short sentences explaining what this bundle is actually for.",
+  "suggested_filename": "kebab-case name",
+  "category": "Codebase | Media | Documents | Mixed | Other",
+  "detected_intent": "max 3 words",
+  "risk_flags": [],
+  "files": [
+    {
+      "name": "",
+      "summary": "what this file is used for",
+      "key_points": ["insight 1", "insight 2"]
+    }
+  ]
+}
+
+RULES:
+
+- DO NOT describe file types
+- DO NOT mention size, format, MIME
+- DO NOT say "this file contains"
+- DO NOT say "analyzed using"
+- DO NOT say "likely"
+
+- ALWAYS explain PURPOSE
+- KEEP everything short and sharp
+
+- If content is missing:
+  -> infer from filename intelligently
+
+- ZIP:
+  -> describe bundle purpose
+
+- Code:
+  -> explain what it does
+
+- Image:
+  -> describe visible meaning
+
+---
+
+FILES:
+${manifest}
+
+CONTENT:
+${preview}
+`;
 }
 
 async function buildTransferContext(files) {
@@ -947,7 +946,7 @@ async function buildTransferContext(files) {
 	const aggregateText = cleanPreviewText(enrichedFiles.map((file) => file.promptText || file.preview || file.localSummary).join("\n\n"), MAX_PDF_CHARS);
 	const keywords = keywordHintsFromText(aggregateText, 10);
 	const manifest = enrichedFiles
-		.map((file, idx) => `${idx + 1}. ${file.name} | guessed=${file.categoryGuess}`)
+		.map((file, idx) => `${idx + 1}. ${file.name}`)
 		.join("\n");
 
 	const topCategory = normalizeCategoryName(pickDominantCategory(enrichedFiles));
@@ -967,10 +966,7 @@ async function buildTransferContext(files) {
 					const snippet = cleanPreviewText(file.promptText || file.preview || file.localSummary, MAX_PROMPT_CHARS_PER_FILE);
 					return [
 						`--- FILE ${idx + 1}: ${file.name} ---`,
-						`Guessed category: ${file.categoryGuess}`,
-						`Purpose hints: ${file.localSummary}`,
-						"Extracted content snippet:",
-						snippet,
+						snippet || "",
 					].join("\n");
 				})
 				.join("\n\n"),
@@ -995,6 +991,7 @@ function normalizeAiResult(parsed, context) {
 	const fallbackSummary = context.localOverallSummary;
 	const fallbackCategory = context.category;
 	const fallbackName = sanitizeSuggestedName(path.parse(context.primaryFilename || "file").name || "file");
+	const hasValidAiFiles = Array.isArray(parsed?.files) && parsed.files.length > 0;
 
 	const parsedCategory = typeof parsed?.category === "string" ? normalizeCategoryName(parsed.category) : "";
 	const category = ALLOWED_CATEGORIES.has(parsedCategory)
@@ -1002,11 +999,13 @@ function normalizeAiResult(parsed, context) {
 		: normalizeCategoryName(fallbackCategory);
 
 	const rawSummary = parsed?.overall_summary || parsed?.summary;
-	const summary = cleanInsightText(normalizeSummary(rawSummary, fallbackSummary), 1200) || fallbackSummary;
+	const summary = cleanInsightText(normalizeSummary(cleanAiText(rawSummary), fallbackSummary), 1200)
+		|| cleanInsightText(fallbackSummary, 1200)
+		|| fallbackSummary;
 	const rawSuggestedName = parsed?.suggested_filename || parsed?.suggestedName;
 	const suggestedName = sanitizeSuggestedName(rawSuggestedName, fallbackName);
 
-	const aiFiles = Array.isArray(parsed?.files) ? parsed.files : [];
+	const aiFiles = hasValidAiFiles ? parsed.files : [];
 	const findAiFile = (targetName, index) => {
 		const normalizedTarget = String(targetName || "").trim().toLowerCase();
 		const byName = aiFiles.find((item) => String(item?.name || "").trim().toLowerCase() === normalizedTarget);
@@ -1018,18 +1017,31 @@ function normalizeAiResult(parsed, context) {
 
 	const files = context.enrichedFiles.map((file, index) => {
 		const candidate = findAiFile(file.name, index);
-		const cleanFileSummary = cleanInsightText(normalizeSummary(candidate?.summary, file.localSummary), 700)
-			|| cleanInsightText(file.localSummary, 700);
+		const fallbackFileSummary = cleanInsightText(file.localSummary || inferPurposeFromFilename(file.name), 700)
+			|| "Purpose inferred from filename context.";
+		const cleanFileSummary = cleanInsightText(
+			normalizeSummary(cleanAiText(candidate?.summary), fallbackFileSummary),
+			700,
+		) || fallbackFileSummary;
+		const cleanedKeyPoints = cleanInsightPoints(
+			normalizeKeyPoints(candidate?.key_points || candidate?.keyPoints, file.localKeyPoints),
+		);
 		return {
 			name: String(file.name || "").slice(0, 128),
 			type: cleanPreviewText(String(candidate?.type || ""), 64),
 			summary: cleanFileSummary,
-			key_points: cleanInsightPoints(normalizeKeyPoints(candidate?.key_points, [])),
+			key_points: cleanedKeyPoints.length
+				? cleanedKeyPoints
+				: ["Purpose inferred from filename context"],
 		};
 	});
 
+	const normalizedSummary = hasValidAiFiles
+		? summary
+		: (cleanInsightText(fallbackSummary, 1200) || "Mixed files shared together.");
+
 	const detectedIntent = typeof parsed?.detected_intent === "string"
-		? cleanPreviewText(parsed.detected_intent, 120)
+		? cleanPreviewText(cleanAiText(parsed.detected_intent), 120)
 		: context.detectedIntent;
 
 	const aiRiskFlags = Array.isArray(parsed?.risk_flags)
@@ -1046,7 +1058,7 @@ function normalizeAiResult(parsed, context) {
 
 	return {
 		// Backward compat
-		summary,
+		summary: normalizedSummary,
 		suggestedName,
 		category,
 		imageDescription,
@@ -1091,7 +1103,12 @@ async function analyzeTransfer(files) {
 		}
 
 		const parsed = parseAiJson(responseText);
-		return normalizeAiResult(parsed, context);
+		const normalized = normalizeAiResult(parsed, context);
+		if (!Array.isArray(normalized?.files) || normalized.files.length === 0) {
+			return normalizeAiResult(null, context);
+		}
+
+		return normalized;
 	} catch (error) {
 		logError("AI transfer analysis failed", error);
 
