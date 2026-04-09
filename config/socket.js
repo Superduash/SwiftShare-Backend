@@ -162,9 +162,9 @@ function bindSocketToRoom(code, socketId) {
 
 // ── Consolidated countdown timer ──────────────────────────
 // Instead of one setInterval per transfer (which kills 0.1 CPU on Render),
-// we use a single interval that ticks every 2s and processes all active countdowns.
+// we use a single interval that ticks every 1s and processes all active countdowns.
 let consolidatedTimerId = null;
-const TICK_INTERVAL_MS = 2000;
+const TICK_INTERVAL_MS = 1000;
 
 function ensureConsolidatedTimer() {
 	if (consolidatedTimerId) {
@@ -231,7 +231,10 @@ function scheduleTransferCountdown(code, expiresAt) {
 		return;
 	}
 
-	countdownMap.set(normalizedCode, { endsAt: new Date(expiresAt).getTime() });
+	const endsAt = new Date(expiresAt).getTime();
+	countdownMap.set(normalizedCode, { endsAt });
+	const secondsRemaining = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
+	emitToRoom(normalizedCode, "countdown-tick", { secondsRemaining });
 	ensureConsolidatedTimer();
 }
 
