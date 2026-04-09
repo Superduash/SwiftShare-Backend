@@ -28,6 +28,9 @@ const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
 
 const router = express.Router();
 
+// Prevent the same transfer from running AI analysis more than once concurrently.
+const aiInFlight = new Set();
+
 function getMaxFileCount() {
 	const maxCount = Number(process.env.MAX_FILE_COUNT);
 	return Number.isInteger(maxCount) && maxCount > 0 ? maxCount : 5;
@@ -280,6 +283,13 @@ async function processUploadFlow({
 			return;
 		}
 
+		if (aiInFlight.has(code)) {
+			logEvent("AI analysis skipped (already in flight)", `CODE: ${code}`);
+			return;
+		}
+
+		aiInFlight.add(code);
+
 		let emitted = false;
 		const emitUnavailable = (warning) => {
 			if (emitted) {
@@ -326,6 +336,7 @@ async function processUploadFlow({
 			logError("AI analysis failed", aiError, `CODE: ${code}`, "READY: false");
 			emitUnavailable("AI analysis unavailable");
 		} finally {
+			aiInFlight.delete(code);
 			if (!emitted) {
 				emitUnavailable("AI analysis unavailable");
 			}

@@ -171,6 +171,10 @@ function isDocxFile(file) {
 }
 
 const PREVIEW_EXTENSION_MIME_MAP = {
+	pdf: "application/pdf",
+	docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+	ppt: "application/vnd.ms-powerpoint",
+	pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 	mp3: "audio/mpeg",
 	wav: "audio/wav",
 	m4a: "audio/mp4",
@@ -217,6 +221,47 @@ function resolvePreviewContentType(file, r2ContentType) {
 	}
 
 	return "application/octet-stream";
+}
+
+function getPreviewFrameAncestors(req) {
+	if (String(process.env.CORS_ALLOW_ALL_ORIGINS || "").toLowerCase() === "true") {
+		return "*";
+	}
+
+	const configuredRaw = `${String(process.env.FRONTEND_URL || "")},${String(process.env.CORS_EXTRA_ORIGINS || "")}`;
+	const configured = configuredRaw
+		.split(",")
+		.map((origin) => String(origin || "").trim())
+		.filter(Boolean)
+		.map((origin) => (/^[a-z]+:\/\//i.test(origin) ? origin : `https://${origin}`))
+		.map((origin) => origin.replace(/\/+$/, ""));
+
+	const requestOrigin = String(req.get("origin") || "").trim().replace(/\/+$/, "");
+	if (requestOrigin) {
+		configured.push(requestOrigin);
+	}
+
+	configured.push("http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000", "http://127.0.0.1:3000");
+
+	const uniqueAncestors = Array.from(new Set(configured));
+	if (uniqueAncestors.length === 0) {
+		return "'self'";
+	}
+
+	return `"'self' ${uniqueAncestors.join(" ")}"`.replace(/^"|"$/g, "");
+}
+
+function applyPreviewEmbedHeaders(req, res) {
+	res.removeHeader("X-Frame-Options");
+	res.setHeader("X-Frame-Options", "ALLOWALL");
+	res.setHeader("Content-Security-Policy", `frame-ancestors ${getPreviewFrameAncestors(req)};`);
+	res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+}
+
+function isPowerPointFile(file) {
+	const name = String(file?.originalName || "").toLowerCase();
+	const mime = String(file?.mimeType || "").toLowerCase();
+	return name.endsWith(".ppt") || name.endsWith(".pptx") || mime.includes("presentation");
 }
 
 function parseRangeHeader(rangeHeader, totalBytes) {
@@ -699,15 +744,17 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 		const contentType = resolvePreviewContentType(file, objectResponse.ContentType);
 		const normalizedContentType = String(contentType).toLowerCase().split(";")[0].trim();
 		const isMediaContentType = normalizedContentType.startsWith("audio/") || normalizedContentType.startsWith("video/");
+		const isPowerPoint = isPowerPointFile(file);
+		const dispositionType = isPowerPoint ? "attachment" : "inline";
 
+		applyPreviewEmbedHeaders(req, res);
 		res.setHeader("Content-Type", contentType);
-		res.setHeader("Content-Disposition", `inline; filename="${sanitizeFilename(file.originalName || "preview")}"`);
+		res.setHeader("Content-Disposition", `${dispositionType}; filename="${sanitizeFilename(file.originalName || "preview")}"`);
 		res.setHeader("Cache-Control", isMediaContentType ? "private, max-age=300, no-transform" : "private, max-age=300");
 		if (isMediaContentType) {
 			res.removeHeader("X-Content-Type-Options");
 		}
 		res.setHeader("Accept-Ranges", "bytes");
-		res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
 
 		if (parsedRange.value) {
 			res.status(206);
@@ -768,6 +815,7 @@ router.get("/:code/preview/:index/docx-html", validateCode, async (req, res, nex
 		const converted = await mammoth.convertToHtml({ buffer });
 		const sanitizedHtml = sanitizeDocxHtml(converted?.value || "");
 
+		applyPreviewEmbedHeaders(req, res);
 		res.setHeader("Content-Type", "text/html; charset=utf-8");
 		res.setHeader("Content-Disposition", `inline; filename="${sanitizeFilename(file.originalName || "preview")}.html"`);
 		res.setHeader("Cache-Control", "private, max-age=120");
