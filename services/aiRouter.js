@@ -528,6 +528,11 @@ async function analyzeWithFallback(prompt, transferCode, forceFallback = false) 
 			if (!canRetryCurrentProvider || attempt >= MAX_PROVIDER_RETRIES) {
 				break;
 			}
+
+			// Back off before retrying a rate-limited provider to avoid hammering the API.
+			if (reason === "rate_limit") {
+				await new Promise((resolve) => setTimeout(resolve, 1500));
+			}
 		}
 	}
 

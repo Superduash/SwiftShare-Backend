@@ -96,23 +96,22 @@ async function parsePdfBuffer(buffer) {
 	throw new Error("Unsupported pdf-parse API shape");
 }
 
-const HUMAN_REVIEW_PROMPT = `You are a human reviewing actual file contents.
+const HUMAN_REVIEW_PROMPT = `You are reviewing actual file contents to explain what they are.
 
-Explain what each file contains based on its real meaning.
-
-Write naturally like a developer explaining to another person.
+Write like a developer explaining a file to a teammate in plain English.
 
 Rules:
-- 1 sentence per file
-- no file-extension or MIME chatter
-- no file extensions
-- no 'this file contains'
-- no repetition
+- 1 sentence per file, focused on purpose and actual content
+- Never mention file type, format, extension, or MIME type
+- Never start a sentence with "This file", "This is", or "Image"
+- No generic phrases: "file named", "metadata", "analyzed using", "visual context", "bundle of files"
+- No repetition across files
+- Infer meaning intelligently — if content is limited, describe what the file likely represents
 
-If trusted details are available for media files (artist, title, album, release year, genres), include them in key_points.
-Use only high-confidence details; if uncertain, omit.
+For media files, include known details (artist, title, album, release year) in key_points if available.
+Only include high-confidence details; omit if uncertain.
 
-Focus on purpose and meaning.`;
+Focus on what the content actually IS, not what format it uses.`;
 
 const REWRITE_PROMPT = "Rewrite this in a more natural, human way. Remove generic phrases.";
 const OPENROUTER_VISION_MODEL = "openai/gpt-4o-mini";
@@ -983,7 +982,7 @@ function buildAnalysisPrompt(context) {
 		})
 		.join("\n\n");
 
-	return `${HUMAN_REVIEW_PROMPT}\n\n${contextText}\n\nReturn JSON only in this format:\n{\n  "overall_summary": "2 sentences explaining what this bundle actually is",\n  "files": [\n    { "name": "exact filename", "summary": "one sentence", "key_points": ["optional detail"] }\n  ]\n}`;
+	return `${HUMAN_REVIEW_PROMPT}\n\n${contextText}\n\nReturn JSON only in this format:\n{\n  "overall_summary": "1-2 natural sentences describing what was actually shared and why it matters — no generic phrases",\n  "files": [\n    { "name": "exact filename", "summary": "one natural sentence about what it actually contains", "key_points": ["optional specific detail"] }\n  ]\n}`;
 }
 
 function buildRewritePrompt(context, previousOutput) {
