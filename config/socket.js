@@ -136,6 +136,49 @@ function originsMatch(requestOrigin, configuredOrigin) {
 	return isLoopbackHost(reqParsed.hostname) && isLoopbackHost(cfgParsed.hostname);
 }
 
+// Hosting platforms (Vercel, Netlify, Render, Cloudflare Pages) issue per-branch
+// preview URLs that share a public TLD with the configured FRONTEND_URL. CORS
+// blocking those breaks every preview deploy and every custom-domain alias.
+// If the configured frontend lives on one of these platforms, accept any
+// sibling subdomain on the same platform automatically.
+const PREVIEW_PLATFORM_SUFFIXES = [
+	"vercel.app",
+	"netlify.app",
+	"onrender.com",
+	"pages.dev",
+	"web.app",
+	"firebaseapp.com",
+];
+
+function hostnameOf(origin) {
+	const parsed = parseOrigin(origin);
+	return parsed ? String(parsed.hostname || "").toLowerCase() : "";
+}
+
+function isPreviewDeployOrigin(requestOrigin, configuredOrigins) {
+	const reqHost = hostnameOf(requestOrigin);
+	if (!reqHost) {
+		return false;
+	}
+
+	for (const configured of configuredOrigins) {
+		const cfgHost = hostnameOf(configured);
+		if (!cfgHost) {
+			continue;
+		}
+
+		for (const suffix of PREVIEW_PLATFORM_SUFFIXES) {
+			const isCfgOnSuffix = cfgHost === suffix || cfgHost.endsWith(`.${suffix}`);
+			const isReqOnSuffix = reqHost === suffix || reqHost.endsWith(`.${suffix}`);
+			if (isCfgOnSuffix && isReqOnSuffix) {
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
 function emitToRoom(code, event, data = {}) {
 	const room = roomName(code);
 	if (!ioInstance || !room) {
@@ -289,6 +332,13 @@ function initSocket(server) {
 		.filter(Boolean);
 
 	ioInstance = new Server(server, {
+		// Mobile-friendly timeouts: the default 20s pingTimeout drops connections
+		// when a phone screen sleeps or signal briefly flaps. 60s tolerates
+		// background tabs, lock screens, and brief radio handoffs.
+		pingInterval: 25000,
+		pingTimeout: 60000,
+		// Match the express body limit. Sockets carry only small JSON events.
+		maxHttpBufferSize: 1e6,
 		cors: {
 			origin: (origin, callback) => {
 				if (!origin) {
@@ -309,6 +359,7 @@ function initSocket(server) {
 				if (
 					allowedOrigins.length === 0
 					|| allowedOrigins.some((configuredOrigin) => originsMatch(origin, configuredOrigin))
+					|| isPreviewDeployOrigin(origin, allowedOrigins)
 				) {
 					callback(null, true);
 					return;
@@ -318,6 +369,7 @@ function initSocket(server) {
 				callback(new Error("Origin not allowed by Socket.IO CORS"));
 			},
 			methods: ["GET", "POST"],
+			credentials: false,
 		},
 	});
 

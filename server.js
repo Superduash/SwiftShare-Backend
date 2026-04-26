@@ -179,6 +179,48 @@ function originsMatch(requestOrigin, configuredOrigin) {
 
 const allowedFrontendOrigins = getAllowedFrontendOrigins();
 
+// Hosting platforms (Vercel, Netlify, Render, Cloudflare Pages, Firebase
+// Hosting) issue per-branch preview URLs on a shared TLD. If FRONTEND_URL is
+// on one of these platforms, automatically accept any sibling subdomain so
+// preview/staging deploys and custom-domain aliases don't get CORS-blocked.
+const PREVIEW_PLATFORM_SUFFIXES = [
+	"vercel.app",
+	"netlify.app",
+	"onrender.com",
+	"pages.dev",
+	"web.app",
+	"firebaseapp.com",
+];
+
+function hostnameOf(origin) {
+	const parsed = parseOrigin(origin);
+	return parsed ? String(parsed.hostname || "").toLowerCase() : "";
+}
+
+function isPreviewDeployOrigin(requestOrigin) {
+	const reqHost = hostnameOf(requestOrigin);
+	if (!reqHost) {
+		return false;
+	}
+
+	for (const configured of allowedFrontendOrigins) {
+		const cfgHost = hostnameOf(configured);
+		if (!cfgHost) {
+			continue;
+		}
+
+		for (const suffix of PREVIEW_PLATFORM_SUFFIXES) {
+			const isCfgOnSuffix = cfgHost === suffix || cfgHost.endsWith(`.${suffix}`);
+			const isReqOnSuffix = reqHost === suffix || reqHost.endsWith(`.${suffix}`);
+			if (isCfgOnSuffix && isReqOnSuffix) {
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
 function corsOrigin(origin, callback) {
 	if (!origin) {
 		callback(null, true);
@@ -198,6 +240,7 @@ function corsOrigin(origin, callback) {
 	if (
 		allowedFrontendOrigins.length === 0
 		|| allowedFrontendOrigins.some((configuredOrigin) => originsMatch(origin, configuredOrigin))
+		|| isPreviewDeployOrigin(origin)
 	) {
 		callback(null, true);
 		return;
@@ -223,7 +266,11 @@ app.use(morgan((tokens, req, res) => {
 		tokens["response-time"](req, res), "ms",
 	].join(" ");
 }));
-app.use(express.json({ limit: "6mb" }));
+// 12mb covers the worst case for /api/upload/clipboard, which receives a base64
+// data URL of a pasted screenshot. Base64 inflates by ~33%, so a 6mb payload
+// would block ~4.5mb screenshots — common on hi-DPI mobile cameras. Multipart
+// uploads to /api/upload bypass this entirely (handled by the streaming route).
+app.use(express.json({ limit: "12mb" }));
 
 app.use((req, res, next) => {
 	// Upload/download routes need longer timeout on constrained hardware (Render 0.1 CPU)
