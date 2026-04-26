@@ -1,8 +1,11 @@
 const express = require("express");
-const multer = require("multer");
+const Busboy = require("busboy");
 const bcrypt = require("bcryptjs");
+const { PassThrough } = require("stream");
+const { Upload } = require("@aws-sdk/lib-storage");
 
 const Transfer = require("../models/Transfer");
+const { r2Client, r2Bucket, isR2Configured } = require("../config/r2");
 const { uploadBufferToR2 } = require("../services/fileManager");
 const {
 	emitToRoom,
@@ -13,7 +16,6 @@ const { generateUniqueCode } = require("../services/codeGenerator");
 const { generateQR } = require("../services/qrGenerator");
 const { analyzeTransfer } = require("../services/aiAnalyzer");
 const { rateLimitUpload } = require("../middleware/rateLimiter");
-const { validateUpload, validateMimeIntegrity } = require("../middleware/validateUpload");
 const {
 	getClientIp,
 	getDeviceName,
@@ -31,6 +33,7 @@ const router = express.Router();
 // Prevent the same transfer from running AI analysis more than once concurrently.
 const aiInFlight = new Set();
 
+// ── Configuration ─────────────────────────────────────────
 function getMaxFileCount() {
 	const maxCount = Number(process.env.MAX_FILE_COUNT);
 	return Number.isInteger(maxCount) && maxCount > 0 ? maxCount : 5;
@@ -38,49 +41,14 @@ function getMaxFileCount() {
 
 function getMaxFileSizeBytes() {
 	const maxSizeMb = Number(process.env.MAX_FILE_SIZE_MB);
-	const runtimeMemoryMb = Number(
-		process.env.RUNTIME_MEMORY_MB
-			|| process.env.RENDER_MEMORY_MB
-			|| process.env.MEMORY_LIMIT_MB,
-	);
-	const isConstrainedHost = Boolean(process.env.RENDER)
-		|| (Number.isFinite(runtimeMemoryMb) && runtimeMemoryMb > 0 && runtimeMemoryMb <= 768);
-	// multer.memoryStorage() keeps each upload fully in RAM.
-	const defaultMb = isConstrainedHost ? 50 : 100;
-	const safeMb = Number.isFinite(maxSizeMb) && maxSizeMb > 0 ? maxSizeMb : defaultMb;
+	const safeMb = Number.isFinite(maxSizeMb) && maxSizeMb > 0 ? maxSizeMb : 100;
 	const cappedMb = Math.min(safeMb, 100);
 	return cappedMb * 1024 * 1024;
 }
 
 function getSessionExpiryMinutes() {
 	const expiryMinutes = Number(process.env.SESSION_EXPIRY_MINUTES);
-	return Number.isFinite(expiryMinutes) && expiryMinutes > 0
-		? expiryMinutes
-		: 10;
-}
-
-function parseBurnAfterDownload(value) {
-	return parseBooleanFlag(value);
-}
-
-function parseBooleanFlag(value) {
-	if (typeof value === "boolean") {
-		return value;
-	}
-
-	if (typeof value === "string") {
-		return value.toLowerCase() === "true";
-	}
-
-	return false;
-}
-
-function parsePassword(value) {
-	if (typeof value !== "string") {
-		return "";
-	}
-
-	return value.trim();
+	return Number.isFinite(expiryMinutes) && expiryMinutes > 0 ? expiryMinutes : 10;
 }
 
 function getMaxSessionExpiryMinutes() {
@@ -95,8 +63,19 @@ function parseExpiryMinutes(value) {
 	if (!Number.isFinite(parsed) || parsed <= 0) {
 		return null;
 	}
-
 	return Math.min(Math.floor(parsed), getMaxSessionExpiryMinutes());
+}
+
+function parseBooleanFlag(value) {
+	if (typeof value === "boolean") return value;
+	if (typeof value === "string") return value.toLowerCase() === "true";
+	return false;
+}
+
+const parseBurnAfterDownload = parseBooleanFlag;
+
+function parsePassword(value) {
+	return typeof value === "string" ? value.trim() : "";
 }
 
 function createAppError(status, errorCode, message) {
@@ -107,122 +86,296 @@ function createAppError(status, errorCode, message) {
 }
 
 function isUsableAiResult(aiResult) {
-	if (!aiResult || aiResult.success === false) {
-		return false;
-	}
-
+	if (!aiResult || aiResult.success === false) return false;
 	const summary = String(aiResult.overall_summary || aiResult.summary || "").trim();
 	return Boolean(summary && Array.isArray(aiResult.files) && aiResult.files.length > 0);
 }
 
-async function validateIncomingFiles(files) {
-	if (!Array.isArray(files) || files.length === 0) {
-		throw createAppError(400, ERROR_CODES.NO_FILE_UPLOADED, "No file uploaded");
-	}
+// ── MIME / signature checks (sniff-buffer based) ──────────────
+const SNIFF_BYTES = 8192;
+// Up to this size, retain the full file in memory as a side-buffer for AI analysis.
+// Beyond this, AI only sees the sniff buffer (8KB) — sufficient for MIME classification
+// but not for content extraction. Keeps streaming honest for large files.
+const AI_BUFFER_LIMIT = 6 * 1024 * 1024; // 6 MB
+const BLOCKED_DETECTED_EXTENSIONS = new Set([
+	".exe", ".bat", ".sh", ".cmd", ".msi", ".scr", ".com", ".vbs", ".ps1", ".jar",
+]);
 
-	if (files.length > getMaxFileCount()) {
-		throw createAppError(400, ERROR_CODES.TOO_MANY_FILES, "Too many files");
-	}
+let fileTypeModulePromise;
+async function detectFileType(buffer) {
+	if (!Buffer.isBuffer(buffer) || buffer.length === 0) return null;
+	if (!fileTypeModulePromise) fileTypeModulePromise = import("file-type");
+	const mod = await fileTypeModulePromise;
+	return mod.fileTypeFromBuffer(buffer);
+}
 
-	const totalSize = getTotalSize(files);
-	if (totalSize > getMaxFileSizeBytes()) {
-		throw createAppError(400, ERROR_CODES.FILE_TOO_LARGE, "File exceeds size limit");
-	}
+function isMimeCompatible(declared, detected) {
+	const a = String(declared || "").toLowerCase();
+	const b = String(detected || "").toLowerCase();
+	if (!a || !b) return true;
+	if (a === b) return true;
+	if (a === "application/octet-stream") return true;
+	const fa = a.split("/")[0];
+	const fb = b.split("/")[0];
+	if (fa && fa === fb) return true;
+	if (a.includes("xml") && b.includes("xml")) return true;
+	return false;
+}
 
-	const hasBlockedExt = files.some((file) => isBlockedExtension(file.originalname));
-
-	if (hasBlockedExt) {
-		throw createAppError(400, ERROR_CODES.INVALID_FILE_TYPE, "Invalid file type");
-	}
-
-	const hasDangerousFileSignature = files.some((file) => hasDangerousSignature(file.buffer));
-	if (hasDangerousFileSignature) {
+async function validateSniffBuffer(file) {
+	const sniff = file.sniff;
+	if (hasDangerousSignature(sniff)) {
 		throw createAppError(400, ERROR_CODES.INVALID_FILE_TYPE, "Executable file signatures are not allowed");
 	}
 
-	const mimeIntegrity = await validateMimeIntegrity(files);
-	if (!mimeIntegrity.valid) {
-		throw createAppError(400, ERROR_CODES.INVALID_FILE_TYPE, mimeIntegrity.message || "Invalid file type");
+	const detected = await detectFileType(sniff);
+	if (!detected) return;
+
+	const detectedExt = `.${String(detected.ext || "").toLowerCase()}`;
+	if (BLOCKED_DETECTED_EXTENSIONS.has(detectedExt)) {
+		throw createAppError(400, ERROR_CODES.INVALID_FILE_TYPE, "Executable or script payloads are not allowed");
+	}
+
+	if (!isMimeCompatible(file.mimeType, detected.mime)) {
+		throw createAppError(
+			400,
+			ERROR_CODES.INVALID_FILE_TYPE,
+			`MIME mismatch detected (${file.mimeType || "unspecified"} vs ${detected.mime})`,
+		);
 	}
 }
 
-async function processUploadFlow({
+// ── Streaming multipart parser ───────────────────────────────
+// Pipes each multipart file directly to R2 via lib-storage Upload (multipart, parallel).
+// No buffering of full file in RAM. First SNIFF_BYTES of each file are tee'd into a
+// small buffer for MIME / executable signature validation.
+function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
+	return new Promise((resolve, reject) => {
+		let busboy;
+		try {
+			busboy = Busboy({
+				headers: req.headers,
+				limits: {
+					files: maxFileCount,
+					fileSize: maxTotalBytes, // per-file cap; we also enforce total below
+					fields: 50,
+				},
+			});
+		} catch (err) {
+			reject(createAppError(400, ERROR_CODES.INVALID_FILE_TYPE, "Invalid upload payload"));
+			return;
+		}
+
+		const fields = {};
+		const files = [];
+		const uploadPromises = [];
+		let totalBytes = 0;
+		let aborted = false;
+		let settled = false;
+
+		const finish = (fn) => {
+			if (settled) return;
+			settled = true;
+			fn();
+		};
+
+		const abortAll = (err) => {
+			if (aborted) return;
+			aborted = true;
+			for (const f of files) {
+				try { f.passthrough.destroy(err || new Error("upload aborted")); } catch {}
+				try { if (f.uploader && typeof f.uploader.abort === "function") f.uploader.abort(); } catch {}
+			}
+			try { req.unpipe(busboy); } catch {}
+			try { busboy.destroy(); } catch {}
+			finish(() => reject(err));
+		};
+
+		busboy.on("field", (name, value) => {
+			if (aborted) return;
+			if (typeof value === "string" && value.length <= 4096) {
+				fields[name] = value;
+			}
+		});
+
+		busboy.on("file", (fieldname, fileStream, info) => {
+			if (aborted) return;
+
+			if (fieldname !== "files") {
+				// Drain unknown fields without raising errors.
+				fileStream.resume();
+				return;
+			}
+
+			if (files.length >= maxFileCount) {
+				fileStream.resume();
+				abortAll(createAppError(400, ERROR_CODES.TOO_MANY_FILES, "Too many files"));
+				return;
+			}
+
+			const originalName = info?.filename || "file";
+			const declaredMime = info?.mimeType || info?.mimetype || "application/octet-stream";
+
+			if (isBlockedExtension(originalName)) {
+				fileStream.resume();
+				abortAll(createAppError(400, ERROR_CODES.INVALID_FILE_TYPE, "Invalid file type"));
+				return;
+			}
+
+			const safeName = sanitizeFilename(originalName);
+			const storedKey = `transfers/${code}/${safeName}`;
+			const passthrough = new PassThrough({ highWaterMark: 1024 * 1024 });
+			let sniffParts = [];
+			let sniffLen = 0;
+			let bytes = 0;
+			let aiParts = [];
+			let aiLen = 0;
+			let aiBufferDropped = false;
+
+			fileStream.on("data", (chunk) => {
+				if (aborted) return;
+				bytes += chunk.length;
+				totalBytes += chunk.length;
+
+				if (totalBytes > maxTotalBytes) {
+					fileStream.unpipe();
+					abortAll(createAppError(400, ERROR_CODES.FILE_TOO_LARGE, "Upload exceeds total size limit"));
+					return;
+				}
+
+				if (sniffLen < SNIFF_BYTES) {
+					const need = SNIFF_BYTES - sniffLen;
+					const slice = chunk.length <= need ? chunk : chunk.subarray(0, need);
+					sniffParts.push(slice);
+					sniffLen += slice.length;
+				}
+
+				if (!aiBufferDropped) {
+					if (aiLen + chunk.length <= AI_BUFFER_LIMIT) {
+						aiParts.push(chunk);
+						aiLen += chunk.length;
+					} else {
+						// Exceeded threshold: drop the AI buffer and continue streaming.
+						aiBufferDropped = true;
+						aiParts = [];
+						aiLen = 0;
+					}
+				}
+			});
+
+			fileStream.on("limit", () => {
+				abortAll(createAppError(400, ERROR_CODES.FILE_TOO_LARGE, "File exceeds size limit"));
+			});
+			fileStream.on("error", (err) => abortAll(err));
+
+			fileStream.pipe(passthrough);
+
+			// Configure multipart upload to R2:
+			// - 5MB part size (R2 minimum), 4 concurrent parts
+			// - leavePartsOnError:false so aborts clean up server-side parts
+			let uploader;
+			try {
+				uploader = new Upload({
+					client: r2Client,
+					queueSize: 4,
+					partSize: 5 * 1024 * 1024,
+					leavePartsOnError: false,
+					params: {
+						Bucket: r2Bucket,
+						Key: storedKey,
+						Body: passthrough,
+						ContentType: declaredMime,
+					},
+				});
+			} catch (err) {
+				abortAll(err);
+				return;
+			}
+
+			const fileEntry = {
+				originalName,
+				safeName,
+				storedKey,
+				mimeType: declaredMime,
+				passthrough,
+				uploader,
+				get size() { return bytes; },
+				get sniff() { return Buffer.concat(sniffParts, sniffLen); },
+				get aiBuffer() {
+					return aiBufferDropped ? null : Buffer.concat(aiParts, aiLen);
+				},
+			};
+			files.push(fileEntry);
+
+			uploadPromises.push(
+				uploader.done().catch((err) => {
+					if (!aborted) abortAll(err);
+					throw err;
+				}),
+			);
+		});
+
+		busboy.on("filesLimit", () => {
+			abortAll(createAppError(400, ERROR_CODES.TOO_MANY_FILES, "Too many files"));
+		});
+
+		busboy.on("error", (err) => abortAll(err));
+		req.on("aborted", () => abortAll(createAppError(499, ERROR_CODES.SERVER_ERROR, "Client aborted upload")));
+		req.on("error", (err) => abortAll(err));
+
+		busboy.on("close", async () => {
+			if (aborted) return;
+			try {
+				await Promise.all(uploadPromises);
+				if (!files.length) {
+					reject(createAppError(400, ERROR_CODES.NO_FILE_UPLOADED, "No file uploaded"));
+					return;
+				}
+				finish(() => resolve({ fields, files, totalBytes }));
+			} catch (err) {
+				if (!settled) finish(() => reject(err));
+			}
+		});
+
+		req.pipe(busboy);
+	});
+}
+
+// ── Finalization (shared between streaming and clipboard paths) ──
+async function finalizeTransfer({
 	req,
-	incomingFiles,
+	code,
+	files, // [{ originalName, storedKey, mimeType, size }]
+	totalSize,
+	uploadStartedAt,
 	burnAfterDownload,
-	senderSocketId,
 	password,
 	passwordProtected,
 	expiryMinutes,
 }) {
-	const shareBaseUrl = process.env.SHARE_BASE_URL;
-	if (!shareBaseUrl) {
-		throw createAppError(500, ERROR_CODES.SERVER_ERROR, "SHARE_BASE_URL is not set in environment variables");
-	}
-
-	await validateIncomingFiles(incomingFiles);
-
-	const code = await generateUniqueCode();
-	const uploadedFiles = [];
-
-	if (senderSocketId) {
-		bindSocketToRoom(code, senderSocketId);
-	}
-
-	const totalSize = getTotalSize(incomingFiles);
-	let uploadedSize = 0;
-	const uploadStartedAt = Date.now();
-	const senderIp = getClientIp(req);
-	const senderDevice = getDeviceName(req.get("user-agent") || "");
-	logEvent("Upload started", `CODE: ${code}`, `FILES: ${incomingFiles.length}`, formatSizeMB(totalSize));
-
-	for (const file of incomingFiles) {
-		const safeName = sanitizeFilename(file.originalname);
-		const storedKey = `transfers/${code}/${safeName}`;
-		const mimeType = file.mimetype || "application/octet-stream";
-
-		await uploadBufferToR2({
-			key: storedKey,
-			body: file.buffer,
-			contentType: mimeType,
-		});
-
-		uploadedFiles.push({
-			originalName: file.originalname,
-			storedKey,
-			size: file.size,
-			mimeType,
-			icon: mimeToIcon(mimeType),
-		});
-
-		uploadedSize += file.size;
-		const elapsedSeconds = Math.max((Date.now() - uploadStartedAt) / 1000, 0.001);
-		const denominator = Math.max(totalSize, 1);
-		const percent = Math.min(100, Math.round((uploadedSize / denominator) * 100));
-		const speed = Math.round(uploadedSize / elapsedSeconds);
-
-		emitToRoom(code, "upload-progress", {
-			percent,
-			speed,
-			elapsed: Number(elapsedSeconds.toFixed(2)),
-		});
-	}
-
-	const fileCount = incomingFiles.length;
+	const fileCount = files.length;
 	const effectiveExpiryMinutes = Number.isFinite(expiryMinutes) && expiryMinutes > 0
 		? expiryMinutes
 		: getSessionExpiryMinutes();
-	const expiresAt = new Date(
-		Date.now() + effectiveExpiryMinutes * 60 * 1000,
-	);
+	const expiresAt = new Date(Date.now() + effectiveExpiryMinutes * 60 * 1000);
 	const shouldProtectWithPassword = Boolean(passwordProtected && password);
-	const passwordHash = shouldProtectWithPassword
-		? await bcrypt.hash(password, 10)
-		: null;
+	const passwordHash = shouldProtectWithPassword ? await bcrypt.hash(password, 10) : null;
 	const uploadDurationMs = Math.max(Date.now() - uploadStartedAt, 1);
 	const uploadSpeed = Math.round(totalSize / (uploadDurationMs / 1000));
 	const qr = await generateQR(code);
+	const shareBaseUrl = process.env.SHARE_BASE_URL;
 	const shareLink = `${shareBaseUrl}/g/${code}`;
+	const senderIp = getClientIp(req);
+	const senderDevice = getDeviceName(req.get("user-agent") || "");
+
+	const uploadedFiles = files.map((f) => ({
+		originalName: f.originalName,
+		storedKey: f.storedKey,
+		size: f.size,
+		mimeType: f.mimeType,
+		icon: mimeToIcon(f.mimeType),
+	}));
+
 	const responsePayload = {
 		success: true,
 		code,
@@ -260,16 +413,11 @@ async function processUploadFlow({
 		isDeleted: false,
 		senderIp,
 		senderDeviceName: senderDevice,
-		senderSocketId,
+		senderSocketId: typeof req._senderSocketId === "string" ? req._senderSocketId : "",
 		qrDataUri: qr,
 		ai: null,
 		activity: [
-			{
-				event: "uploaded",
-				device: senderDevice,
-				ip: senderIp,
-				timestamp: new Date(),
-			},
+			{ event: "uploaded", device: senderDevice, ip: senderIp, timestamp: new Date() },
 		],
 	});
 
@@ -277,50 +425,39 @@ async function processUploadFlow({
 	scheduleTransferCountdown(code, expiresAt);
 	logEvent("Upload complete", `CODE: ${code}`, formatSizeMB(totalSize));
 
-	const primaryFile = incomingFiles[0];
-	void (async () => {
-		if (!primaryFile) {
-			return;
-		}
+	// AI analysis still runs from the original incoming buffers/sniffs when supplied.
+	// For streaming uploads we pass nothing here; aiAnalyzer should fetch from R2 if needed.
+	return responsePayload;
+}
 
+function fireAndForgetAi(code, aiInputFiles) {
+	const primaryFile = aiInputFiles && aiInputFiles[0];
+	void (async () => {
+		if (!primaryFile) return;
 		if (aiInFlight.has(code)) {
 			logEvent("AI analysis skipped (already in flight)", `CODE: ${code}`);
 			return;
 		}
-
 		aiInFlight.add(code);
-
 		let emitted = false;
 		const emitUnavailable = (warning) => {
-			if (emitted) {
-				return;
-			}
-
+			if (emitted) return;
 			emitToRoom(code, "ai-ready", {
-				summary: null,
-				category: null,
-				imageDescription: null,
-				files: [],
-				detectedIntent: null,
-				riskFlags: [],
+				summary: null, category: null, imageDescription: null,
+				files: [], detectedIntent: null, riskFlags: [],
 				warning: warning || "AI analysis unavailable",
 			});
 			emitted = true;
 		};
-
 		try {
-			logEvent("AI analysis started", `CODE: ${code}`, `FILES: ${incomingFiles.length}`);
-			const aiResult = await analyzeTransfer(incomingFiles, code);
-
+			logEvent("AI analysis started", `CODE: ${code}`, `FILES: ${aiInputFiles.length}`);
+			const aiResult = await analyzeTransfer(aiInputFiles, code);
 			if (!isUsableAiResult(aiResult)) {
 				emitUnavailable(aiResult?.warning || "AI analysis unavailable");
-
 				logEvent("AI analysis completed", `CODE: ${code}`, "READY: false");
 				return;
 			}
-
 			await Transfer.updateOne({ code }, { $set: { ai: aiResult } });
-
 			emitToRoom(code, "ai-ready", {
 				summary: aiResult.summary || aiResult.overall_summary || null,
 				category: aiResult.category || null,
@@ -330,103 +467,136 @@ async function processUploadFlow({
 				riskFlags: aiResult.riskFlags || aiResult.risk_flags || [],
 			});
 			emitted = true;
-
 			logEvent("AI analysis completed", `CODE: ${code}`, "READY: true");
 		} catch (aiError) {
-			logError("AI analysis failed", aiError, `CODE: ${code}`, "READY: false");
+			logError("AI analysis failed", aiError, `CODE: ${code}`);
 			emitUnavailable("AI analysis unavailable");
 		} finally {
 			aiInFlight.delete(code);
-			if (!emitted) {
-				emitUnavailable("AI analysis unavailable");
-			}
+			if (!emitted) emitUnavailable("AI analysis unavailable");
 		}
 	})();
-
-	return responsePayload;
 }
 
-const upload = multer({
-	storage: multer.memoryStorage(),
-	limits: {
-		files: getMaxFileCount(),
-		fileSize: getMaxFileSizeBytes(),
-	},
-});
+// ── Streaming POST /api/upload ───────────────────────────────
+router.post("/", rateLimitUpload, async (req, res) => {
+	if (!isR2Configured) {
+		return res.status(503).json(buildErrorResponse(ERROR_CODES.SERVER_ERROR, "Storage is not configured"));
+	}
 
-function multerHandler(req, res, next) {
-	upload.array("files")(req, res, (error) => {
-		if (!error) {
-			return next();
-		}
+	const shareBaseUrl = process.env.SHARE_BASE_URL;
+	if (!shareBaseUrl) {
+		return res.status(500).json(buildErrorResponse(ERROR_CODES.SERVER_ERROR, "SHARE_BASE_URL is not set"));
+	}
 
-		const code = error?.code;
-		if (code === "LIMIT_FILE_SIZE") {
-			const maxMb = Math.round(getMaxFileSizeBytes() / (1024 * 1024));
-			return res
-				.status(400)
-				.json(buildErrorResponse(ERROR_CODES.FILE_TOO_LARGE, `This file is too large. Maximum size is ${maxMb}MB.`));
-		}
+	const contentType = String(req.headers["content-type"] || "");
+	if (!/^multipart\/form-data/i.test(contentType)) {
+		return res.status(400).json(buildErrorResponse(ERROR_CODES.INVALID_FILE_TYPE, "Expected multipart/form-data"));
+	}
 
-		if (code === "LIMIT_FILE_COUNT") {
-			const maxCount = getMaxFileCount();
-			return res
-				.status(400)
-				.json(buildErrorResponse(ERROR_CODES.TOO_MANY_FILES, `Too many files. You can upload up to ${maxCount} files at once.`));
-		}
+	const code = await generateUniqueCode();
+	const maxFileCount = getMaxFileCount();
+	const maxTotalBytes = getMaxFileSizeBytes();
+	const uploadStartedAt = Date.now();
+	let parsed;
 
-		if (code === "LIMIT_UNEXPECTED_FILE") {
-			return res
-				.status(400)
-				.json(buildErrorResponse(ERROR_CODES.INVALID_FILE_TYPE, "Please use the 'files' field to upload."));
-		}
-
-		return next(error);
-	});
-}
-
-router.post("/", rateLimitUpload, multerHandler, validateUpload, async (req, res) => {
 	try {
-		const incomingFiles = req.files || [];
-		const senderSocketId = typeof req.body?.senderSocketId === "string"
-			? req.body.senderSocketId
-			: (typeof req.body?.socketId === "string" ? req.body.socketId : "");
-		const burnAfterDownload = parseBurnAfterDownload(req.body?.burnAfterDownload);
-		const passwordProtected = parseBooleanFlag(req.body?.passwordProtected);
-		const password = parsePassword(req.body?.password);
-		const expiryMinutes = parseExpiryMinutes(req.body?.expiryMinutes);
-		const response = await processUploadFlow({
+		parsed = await parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes });
+	} catch (error) {
+		logError("Upload stream failed", error, `CODE: ${code}`);
+		// Cleanup any partially-written R2 objects (Upload.abort already handles in-flight parts;
+		// no completed objects exist if we aborted before busboy.close).
+		const status = error?.status || 500;
+		const errorCode = error?.errorCode || ERROR_CODES.SERVER_ERROR;
+		if (!res.headersSent) {
+			return res.status(status).json(buildErrorResponse(errorCode, error.message));
+		}
+		return;
+	}
+
+	const { fields, files, totalBytes } = parsed;
+
+	// Bind sender socket → room (for upload-complete fan-out) before validation/finalize.
+	const senderSocketId = typeof fields.senderSocketId === "string" && fields.senderSocketId
+		? fields.senderSocketId
+		: (typeof fields.socketId === "string" ? fields.socketId : "");
+	if (senderSocketId) bindSocketToRoom(code, senderSocketId);
+	req._senderSocketId = senderSocketId;
+
+	logEvent("Upload received", `CODE: ${code}`, `FILES: ${files.length}`, formatSizeMB(totalBytes));
+
+	// Post-stream validation against sniff buffers. If any file fails, we have to delete
+	// what was uploaded to R2 (since streams completed successfully).
+	try {
+		for (const f of files) {
+			await validateSniffBuffer(f);
+		}
+	} catch (validationErr) {
+		// Best-effort cleanup of completed objects.
+		try {
+			const { deleteFilesFromR2 } = require("../services/fileManager");
+			await deleteFilesFromR2(files.map((f) => ({ storedKey: f.storedKey })));
+		} catch (cleanupErr) {
+			logError("R2 cleanup after validation failure failed", cleanupErr, `CODE: ${code}`);
+		}
+		const status = validationErr?.status || 400;
+		const errorCode = validationErr?.errorCode || ERROR_CODES.INVALID_FILE_TYPE;
+		return res.status(status).json(buildErrorResponse(errorCode, validationErr.message));
+	}
+
+	try {
+		const burnAfterDownload = parseBurnAfterDownload(fields.burnAfterDownload);
+		const passwordProtected = parseBooleanFlag(fields.passwordProtected);
+		const password = parsePassword(fields.password);
+		const expiryMinutes = parseExpiryMinutes(fields.expiryMinutes);
+
+		const fileEntries = files.map((f) => ({
+			originalName: f.originalName,
+			storedKey: f.storedKey,
+			mimeType: f.mimeType,
+			size: f.size,
+		}));
+
+		const response = await finalizeTransfer({
 			req,
-			incomingFiles,
+			code,
+			files: fileEntries,
+			totalSize: totalBytes,
+			uploadStartedAt,
 			burnAfterDownload,
-			senderSocketId,
 			password,
 			passwordProtected,
 			expiryMinutes,
 		});
 
+		// AI analysis: pass the full buffer if we retained it (file ≤ AI_BUFFER_LIMIT),
+		// otherwise pass the sniff buffer so the analyzer can at least classify the type.
+		fireAndForgetAi(code, files.map((f) => ({
+			originalname: f.originalName,
+			mimetype: f.mimeType,
+			size: f.size,
+			buffer: f.aiBuffer || f.sniff,
+		})));
+
 		return res.status(200).json(response);
 	} catch (error) {
-		logError("Upload failed", error);
+		logError("Upload finalize failed", error, `CODE: ${code}`);
 		const status = error?.status || 500;
 		const errorCode = error?.errorCode || ERROR_CODES.SERVER_ERROR;
 		return res.status(status).json(buildErrorResponse(errorCode, error.message));
 	}
 });
 
+// ── Clipboard upload (small in-memory image) ──────────────────
 router.post("/clipboard", rateLimitUpload, async (req, res) => {
 	try {
 		logEvent("Clipboard upload", "REQUEST_RECEIVED");
 		const {
-			imageBase64,
-			base64,
-			burnAfterDownload,
-			senderSocketId,
-			socketId,
-			passwordProtected,
-			password,
-			expiryMinutes,
+			imageBase64, base64,
+			burnAfterDownload, senderSocketId, socketId,
+			passwordProtected, password, expiryMinutes,
 		} = req.body || {};
+
 		const imagePayload = typeof imageBase64 === "string"
 			? imageBase64
 			: (typeof base64 === "string" ? base64 : "");
@@ -438,42 +608,50 @@ router.post("/clipboard", rateLimitUpload, async (req, res) => {
 		const normalizedImageBase64 = imagePayload.startsWith("data:")
 			? imagePayload
 			: `data:image/png;base64,${imagePayload}`;
-
 		const match = normalizedImageBase64.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
 		if (!match) {
 			return res.status(400).json(buildErrorResponse(ERROR_CODES.INVALID_FILE_TYPE));
 		}
 
 		const mimeType = match[1];
-		const base64Payload = match[2];
-		const buffer = Buffer.from(base64Payload, "base64");
-
+		const buffer = Buffer.from(match[2], "base64");
 		if (!buffer.length) {
 			return res.status(400).json(buildErrorResponse(ERROR_CODES.NO_FILE_UPLOADED));
 		}
 
+		if (buffer.length > getMaxFileSizeBytes()) {
+			return res.status(400).json(buildErrorResponse(ERROR_CODES.FILE_TOO_LARGE));
+		}
+
 		const extension = mimeType.split("/")[1]?.split("+")[0] || "png";
 		const filename = `clipboard-${Date.now()}.${extension}`;
-		const incomingFiles = [
-			{
-				originalname: filename,
-				mimetype: mimeType,
-				size: buffer.length,
-				buffer,
-			},
-		];
+		const code = await generateUniqueCode();
+		const safeName = sanitizeFilename(filename);
+		const storedKey = `transfers/${code}/${safeName}`;
+		const senderId = typeof senderSocketId === "string" && senderSocketId
+			? senderSocketId
+			: (typeof socketId === "string" ? socketId : "");
+		if (senderId) bindSocketToRoom(code, senderId);
+		req._senderSocketId = senderId;
 
-		const response = await processUploadFlow({
+		const sniff = buffer.subarray(0, SNIFF_BYTES);
+		await validateSniffBuffer({ sniff, mimeType });
+
+		await uploadBufferToR2({ key: storedKey, body: buffer, contentType: mimeType });
+
+		const response = await finalizeTransfer({
 			req,
-			incomingFiles,
+			code,
+			files: [{ originalName: filename, storedKey, mimeType, size: buffer.length }],
+			totalSize: buffer.length,
+			uploadStartedAt: Date.now(),
 			burnAfterDownload: parseBurnAfterDownload(burnAfterDownload),
-			senderSocketId: typeof senderSocketId === "string"
-				? senderSocketId
-				: (typeof socketId === "string" ? socketId : ""),
-			passwordProtected: parseBooleanFlag(passwordProtected),
 			password: parsePassword(password),
+			passwordProtected: parseBooleanFlag(passwordProtected),
 			expiryMinutes: parseExpiryMinutes(expiryMinutes),
 		});
+
+		fireAndForgetAi(code, [{ originalname: filename, mimetype: mimeType, size: buffer.length, buffer }]);
 
 		return res.status(200).json(response);
 	} catch (error) {
@@ -485,4 +663,3 @@ router.post("/clipboard", rateLimitUpload, async (req, res) => {
 });
 
 module.exports = router;
-

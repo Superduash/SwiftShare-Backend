@@ -6,7 +6,11 @@ services:
     plan: free
     buildCommand: npm install --production=false
     startCommand: npm start
-    healthCheckPath: /api/health
+    # /api/ping has no DB / Redis / R2 dependency, so it returns instantly even
+    # during cold start. /api/health probes external services and can take
+    # several seconds, which makes Render mark the service unhealthy and stall
+    # the deploy. Use /api/health for human-facing status checks instead.
+    healthCheckPath: /api/ping
     envVars:
       - key: NODE_ENV
         value: production
@@ -70,8 +74,10 @@ services:
         value: "300"
       - key: MAX_FILE_SIZE_MB
         value: "100"
+      # Must match the frontend's MAX_FILES (HomePage.jsx) and .env.example so
+      # the dropzone limit and the server limit don't drift apart.
       - key: MAX_FILE_COUNT
-        value: "10"
+        value: "5"
       - key: CODE_LENGTH
         value: "6"
       - key: QR_BRANDED
