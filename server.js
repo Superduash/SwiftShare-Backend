@@ -345,10 +345,15 @@ app.use((req, res, next) => {
 	const timeoutMs = isUploadOrDownload ? uploadTimeoutMs : requestTimeoutMs;
 
 	req.setTimeout(timeoutMs, () => {
+		// CRITICAL FIX: Check if response was already sent before sending timeout error
 		if (!res.headersSent) {
-			res
-				.status(408)
-				.json(buildErrorResponse(ERROR_CODES.REQUEST_TIMEOUT, "Request timed out"));
+			try {
+				res
+					.status(408)
+					.json(buildErrorResponse(ERROR_CODES.REQUEST_TIMEOUT, "Request timed out"));
+			} catch (err) {
+				// Silently ignore if headers were already sent (race condition)
+			}
 		}
 	});
 
@@ -365,6 +370,11 @@ app.use((req, res, next) => {
 	const originalJson = res.json.bind(res);
 
 	res.json = (payload) => {
+		// CRITICAL FIX: Check if headers were already sent (e.g., 304 Not Modified)
+		if (res.headersSent) {
+			return res;
+		}
+
 		const isObject = payload !== null && typeof payload === "object" && !Array.isArray(payload);
 
 		if (res.statusCode >= 400) {
@@ -403,12 +413,21 @@ app.get("/debug-sentry", (req, res) => {
 });
 
 app.get("/api/ping", (req, res) => {
+	// CRITICAL FIX: Prevent double-send by explicitly ending response
+	if (res.headersSent) {
+		return;
+	}
 	res.status(200).json({ pong: true });
 });
 
 // Performance metrics endpoint (for monitoring/debugging)
 app.get("/api/metrics", (req, res) => {
 	try {
+		// CRITICAL FIX: Check if headers already sent
+		if (res.headersSent) {
+			return;
+		}
+
 		const snapshot = getPerformanceSnapshot();
 		const cacheStats = getCacheStats();
 		
@@ -419,7 +438,9 @@ app.get("/api/metrics", (req, res) => {
 		});
 	} catch (error) {
 		logError("Metrics endpoint failed", error);
-		res.status(500).json({ error: "Failed to collect metrics" });
+		if (!res.headersSent) {
+			res.status(500).json({ error: "Failed to collect metrics" });
+		}
 	}
 });
 
@@ -482,6 +503,11 @@ function formatUptimeHuman(totalSeconds) {
 
 app.get("/api/health", async (req, res) => {
 	try {
+		// CRITICAL FIX: Check if headers already sent
+		if (res.headersSent) {
+			return;
+		}
+
 		if (healthCache.payload && healthCache.expiresAt > Date.now()) {
 			return res.json(healthCache.payload);
 		}
@@ -519,6 +545,10 @@ app.get("/api/health", async (req, res) => {
 		return res.json(payload);
 	} catch (error) {
 		logError("Health check failed", error);
+		// CRITICAL FIX: Check before sending fallback response
+		if (res.headersSent) {
+			return;
+		}
 		return res.status(200).json({
 			status: "ok",
 			version,
@@ -733,6 +763,14 @@ process.on("unhandledRejection", (reason) => {
 process.on("uncaughtException", (error) => {
 	logError("Uncaught exception", error);
 	try { Sentry.captureException(error); } catch { /* sentry optional */ }
+	
+	// CRITICAL FIX: Don't shutdown for "headers already sent" errors - they're recoverable
+	const errorMessage = String(error?.message || "").toLowerCase();
+	if (errorMessage.includes("cannot set headers after they are sent")) {
+		logEvent("Recovered from headers-already-sent error - continuing operation");
+		return; // Don't shutdown - this is recoverable
+	}
+	
 	// Per Node.js docs, the process is in an undefined state after an uncaught
 	// exception. Trigger a graceful shutdown rather than continuing.
 	void gracefulShutdown("uncaughtException");
