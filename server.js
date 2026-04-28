@@ -641,6 +641,23 @@ if (SELF_PING_URL && isProduction) {
 	}, 10 * 60 * 1000);
 }
 
+// Last-resort safety net. Errors should always be caught at the route boundary by
+// the express errorHandler, but a stray async timer or socket event handler could
+// throw unhandled. We log + Sentry-report rather than crashing the dyno — a crash
+// during an active upload would force the client to redo the entire transfer.
+process.on("unhandledRejection", (reason) => {
+	logError("Unhandled promise rejection", reason instanceof Error ? reason : new Error(String(reason)));
+	try { Sentry.captureException(reason); } catch { /* sentry optional */ }
+});
+
+process.on("uncaughtException", (error) => {
+	logError("Uncaught exception", error);
+	try { Sentry.captureException(error); } catch { /* sentry optional */ }
+	// Per Node.js docs, the process is in an undefined state after an uncaught
+	// exception. Trigger a graceful shutdown rather than continuing.
+	void gracefulShutdown("uncaughtException");
+});
+
 process.on("SIGTERM", () => {
 	void gracefulShutdown("SIGTERM");
 });

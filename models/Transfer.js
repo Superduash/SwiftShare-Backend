@@ -205,5 +205,31 @@ transferSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 transferSchema.index({ createdAt: -1 });
 transferSchema.index({ senderIp: 1 });
 
+// Optimizes the nearby-devices query (senderIp prefix + active filter + recency sort).
+// Without this, every nearby ping does a collection scan filtered by regex — fine at
+// 1000 docs, brutal at 100k. Compound order matches the common predicate.
+transferSchema.index(
+	{ isDeleted: 1, expiresAt: 1, senderIp: 1, createdAt: -1 },
+	{ name: "nearby_active_by_subnet" },
+);
+
+// Optimizes the cleanup sweep predicate (expired & not yet deleted).
+transferSchema.index(
+	{ isDeleted: 1, expiresAt: 1 },
+	{ name: "cleanup_active" },
+);
+
+// Optimizes the burn-finalize sweep (claimed but idle).
+transferSchema.index(
+	{ burnAfterDownload: 1, isDeleted: 1, burnLastActiveAt: 1 },
+	{ name: "cleanup_stale_burn", sparse: true },
+);
+
+// Disable Mongoose's autoIndex in production: index builds at app start can stall
+// the dyno on cold-start. Indexes are managed via this file + occasional manual sync.
+if (String(process.env.NODE_ENV || "").toLowerCase() === "production") {
+	transferSchema.set("autoIndex", false);
+}
+
 module.exports = mongoose.model("Transfer", transferSchema);
 

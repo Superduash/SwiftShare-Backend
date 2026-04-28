@@ -145,10 +145,20 @@ async function validateSniffBuffer(file) {
 	}
 }
 
+// Throttle progress emits: at most one per PROGRESS_EMIT_INTERVAL_MS or whenever
+// the percent jumps by ≥1. Without throttling, a fast LAN upload would emit
+// thousands of socket events per second and starve the event loop on Render's 0.1 CPU.
+const PROGRESS_EMIT_INTERVAL_MS = 200;
+
 // ── Streaming multipart parser ───────────────────────────────
 // Pipes each multipart file directly to R2 via lib-storage Upload (multipart, parallel).
 // No buffering of full file in RAM. First SNIFF_BYTES of each file are tee'd into a
 // small buffer for MIME / executable signature validation.
+//
+// Progress: as bytes arrive from the client we emit `upload-progress` to the room
+// with bytes received so far. This is HTTP-receive progress (sender→server), not
+// R2-write progress — important: we do NOT wait for R2 write to confirm progress
+// to the sender, since on slow network the sender wants to see its own throughput.
 function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 	return new Promise((resolve, reject) => {
 		let busboy;
@@ -172,6 +182,26 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 		let totalBytes = 0;
 		let aborted = false;
 		let settled = false;
+		let lastProgressEmitAt = 0;
+		let lastProgressPercent = -1;
+
+		const maybeEmitProgress = (force = false) => {
+			if (aborted) return;
+			const now = Date.now();
+			const sinceLast = now - lastProgressEmitAt;
+			const percent = maxTotalBytes > 0
+				? Math.min(100, Math.round((totalBytes / maxTotalBytes) * 100))
+				: 0;
+			if (!force && sinceLast < PROGRESS_EMIT_INTERVAL_MS && percent === lastProgressPercent) {
+				return;
+			}
+			lastProgressEmitAt = now;
+			lastProgressPercent = percent;
+			emitToRoom(code, "upload-progress", {
+				bytesReceived: totalBytes,
+				percent,
+			});
+		};
 
 		const finish = (fn) => {
 			if (settled) return;
@@ -261,6 +291,8 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 						aiLen = 0;
 					}
 				}
+
+				maybeEmitProgress(false);
 			});
 
 			fileStream.on("limit", () => {
@@ -331,6 +363,7 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 					reject(createAppError(400, ERROR_CODES.NO_FILE_UPLOADED, "No file uploaded"));
 					return;
 				}
+				maybeEmitProgress(true); // Final 100% tick.
 				finish(() => resolve({ fields, files, totalBytes }));
 			} catch (err) {
 				if (!settled) finish(() => reject(err));

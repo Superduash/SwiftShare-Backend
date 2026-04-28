@@ -19,11 +19,24 @@ router.get("/", rateLimitMetadata, async (req, res, next) => {
 		}
 
 		const now = new Date();
-		const candidates = await Transfer.find({
-			isDeleted: false,
-			expiresAt: { $gt: now },
-			senderIp: { $regex: `^${subnet.replace(/\./g, "\\.")}\\.` },
-		})
+		const candidates = await Transfer.find(
+			{
+				isDeleted: false,
+				expiresAt: { $gt: now },
+				senderIp: { $regex: `^${subnet.replace(/\./g, "\\.")}\\.` },
+			},
+			{
+				code: 1,
+				fileCount: 1,
+				files: 1,
+				totalSize: 1,
+				"ai.category": 1,
+				senderDeviceName: 1,
+				expiresAt: 1,
+				senderSocketId: 1,
+				createdAt: 1,
+			},
+		)
 			.sort({ createdAt: -1 })
 			.limit(20)
 			.lean();

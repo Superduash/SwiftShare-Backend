@@ -206,6 +206,10 @@ function bindSocketToRoom(code, socketId) {
 // ── Consolidated countdown timer ──────────────────────────
 // Instead of one setInterval per transfer (which kills 0.1 CPU on Render),
 // we use a single interval that ticks every 1s and processes all active countdowns.
+//
+// Drift correction: each tick recomputes from absolute endsAt rather than decrementing
+// a counter, so even if the event loop stalls (GC pause, slow syscall), the next tick
+// reports the correct remaining seconds — no compounding error over 10+ minute sessions.
 let consolidatedTimerId = null;
 const TICK_INTERVAL_MS = 1000;
 
@@ -226,7 +230,13 @@ function ensureConsolidatedTimer() {
 
 		for (const [normalizedCode, entry] of countdownMap) {
 			const secondsRemaining = Math.max(0, Math.ceil((entry.endsAt - now) / 1000));
-			emitToRoom(normalizedCode, "countdown-tick", { secondsRemaining });
+
+			// Skip emit if value didn't change (only happens under sub-second tick drift),
+			// reducing socket chatter without affecting client UX.
+			if (entry.lastEmittedSeconds !== secondsRemaining) {
+				emitToRoom(normalizedCode, "countdown-tick", { secondsRemaining });
+				entry.lastEmittedSeconds = secondsRemaining;
+			}
 
 			if (secondsRemaining <= 0) {
 				expired.push(normalizedCode);
@@ -241,17 +251,34 @@ function ensureConsolidatedTimer() {
 				{
 					$push: {
 						activity: {
-							event: "expired",
-							device: "System",
-							ip: "",
-							timestamp: new Date(),
+							$each: [{
+								event: "expired",
+								device: "System",
+								ip: "",
+								timestamp: new Date(),
+							}],
+							// Cap activity log at last 200 entries to prevent unbounded doc growth
+							// on chatty transfers (many viewers, many downloads).
+							$slice: -200,
 						},
 					},
 				},
-			);
+			).catch((err) => logError("Failed to record expiry", err, `CODE: ${normalizedCode}`));
 			logEvent("Transfer expired", `CODE: ${normalizedCode}`);
 		}
 	}, TICK_INTERVAL_MS);
+
+	// Don't keep the event loop alive solely for this timer during shutdown.
+	if (typeof consolidatedTimerId.unref === "function") {
+		consolidatedTimerId.unref();
+	}
+}
+
+function getCountdownEndsAt(code) {
+	const normalizedCode = normalizeCode(code);
+	if (!normalizedCode) return null;
+	const entry = countdownMap.get(normalizedCode);
+	return entry ? entry.endsAt : null;
 }
 
 function clearTransferCountdown(code) {
@@ -275,8 +302,11 @@ function scheduleTransferCountdown(code, expiresAt) {
 	}
 
 	const endsAt = new Date(expiresAt).getTime();
-	countdownMap.set(normalizedCode, { endsAt });
+	if (!Number.isFinite(endsAt)) {
+		return;
+	}
 	const secondsRemaining = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
+	countdownMap.set(normalizedCode, { endsAt, lastEmittedSeconds: secondsRemaining });
 	emitToRoom(normalizedCode, "countdown-tick", { secondsRemaining });
 	ensureConsolidatedTimer();
 }
@@ -374,35 +404,69 @@ function initSocket(server) {
 	});
 
 	ioInstance.on("connection", (socket) => {
-		socket.on("join-room", ({ code } = {}) => {
+		// Helper: invoke ack only if it's a valid function. socket.io clients may
+		// or may not pass an ack — we never want to throw because of a missing one.
+		const safeAck = (ack, payload) => {
+			if (typeof ack === "function") {
+				try { ack(payload); } catch { /* client-side ack errors are non-fatal */ }
+			}
+		};
+
+		socket.on("join-room", ({ code } = {}, ack) => {
 			const normalizedCode = normalizeCode(code);
 			if (!normalizedCode) {
+				safeAck(ack, { ok: false, error: "invalid_code" });
 				return;
 			}
 
-			socket.join(roomName(normalizedCode));
+			const room = roomName(normalizedCode);
+			// Idempotent join: socket.io's join() is already idempotent, but we ack
+			// so the client knows the room is bound (helps the React reconnect flow
+			// avoid issuing duplicate joins).
+			socket.join(room);
+			safeAck(ack, { ok: true, code: normalizedCode });
 		});
 
-		socket.on("leave-room", ({ code } = {}) => {
+		socket.on("leave-room", ({ code } = {}, ack) => {
 			const normalizedCode = normalizeCode(code);
 			if (!normalizedCode) {
+				safeAck(ack, { ok: false, error: "invalid_code" });
 				return;
 			}
 
 			socket.leave(roomName(normalizedCode));
+			safeAck(ack, { ok: true, code: normalizedCode });
 		});
 
-		socket.on("rejoin-room", async ({ code } = {}) => {
+		socket.on("rejoin-room", async ({ code } = {}, ack) => {
 			const normalizedCode = normalizeCode(code);
 			if (!normalizedCode) {
+				safeAck(ack, { ok: false, error: "invalid_code" });
 				return;
 			}
 
 			socket.join(roomName(normalizedCode));
 
+			// Fast path: if the countdown is already in memory (typical hot transfer),
+			// skip the Mongo round trip. Saves ~30-100ms on every reconnect across
+			// flaky mobile networks where reconnects are frequent.
+			const cachedEndsAt = getCountdownEndsAt(normalizedCode);
+			if (cachedEndsAt) {
+				const secondsRemaining = Math.max(0, Math.ceil((cachedEndsAt - Date.now()) / 1000));
+				socket.emit("countdown-tick", { secondsRemaining });
+				safeAck(ack, { ok: true, code: normalizedCode, secondsRemaining });
+				return;
+			}
+
+			// Cold path: DB lookup. Only happens on rejoin after server restart or
+			// for transfers whose timer was never scheduled.
 			try {
-				const transfer = await Transfer.findOne({ code: normalizedCode }).lean();
+				const transfer = await Transfer.findOne(
+					{ code: normalizedCode },
+					{ expiresAt: 1, isDeleted: 1 },
+				).lean();
 				if (!transfer || transfer.isDeleted || !transfer.expiresAt) {
+					safeAck(ack, { ok: true, code: normalizedCode, secondsRemaining: 0 });
 					return;
 				}
 
@@ -412,14 +476,17 @@ function initSocket(server) {
 				);
 
 				socket.emit("countdown-tick", { secondsRemaining });
+				safeAck(ack, { ok: true, code: normalizedCode, secondsRemaining });
 			} catch (error) {
 				logError("Failed to rejoin room", error, `CODE: ${normalizedCode}`);
+				safeAck(ack, { ok: false, error: "lookup_failed" });
 			}
 		});
 
-		socket.on("register-sender", async ({ code } = {}) => {
+		socket.on("register-sender", async ({ code } = {}, ack) => {
 			const normalizedCode = normalizeCode(code);
 			if (!normalizedCode) {
+				safeAck(ack, { ok: false, error: "invalid_code" });
 				return;
 			}
 
@@ -430,8 +497,10 @@ function initSocket(server) {
 					{ code: normalizedCode },
 					{ $set: { senderSocketId: socket.id } },
 				);
+				safeAck(ack, { ok: true, code: normalizedCode, socketId: socket.id });
 			} catch (error) {
 				logError("Failed to register sender socket", error, `CODE: ${normalizedCode}`);
+				safeAck(ack, { ok: false, error: "register_failed" });
 			}
 		});
 

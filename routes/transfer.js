@@ -118,14 +118,20 @@ router.post("/:code/verify-password", validateCode, async (req, res, next) => {
 		);
 
 		if (!isValidPassword) {
-			transfer.passwordAttempts = Number(transfer.passwordAttempts || 0) + 1;
-			await transfer.save();
+			// Atomic increment — prevents lost updates if two devices try the same wrong
+			// password concurrently (otherwise both would read N and write N+1, missing one).
+			await Transfer.updateOne(
+				{ _id: transfer._id },
+				{ $inc: { passwordAttempts: 1 } },
+			);
 			return res.status(401).json(buildErrorResponse(ERROR_CODES.INVALID_PASSWORD));
 		}
 
 		if (Number(transfer.passwordAttempts || 0) > 0) {
-			transfer.passwordAttempts = 0;
-			await transfer.save();
+			await Transfer.updateOne(
+				{ _id: transfer._id },
+				{ $set: { passwordAttempts: 0 } },
+			);
 		}
 
 		return res.status(200).json({ success: true, data: { verified: true } });
@@ -224,15 +230,31 @@ router.post("/:code/extend", validateCode, async (req, res, next) => {
 		// Clear old countdown BEFORE saving to prevent race condition
 		clearTransferCountdown(code);
 
-		transfer.expiresAt = expiresAt;
-		transfer.extendedOnce = true;
-		transfer.activity.push({
-			event: "extended",
-			device: getDeviceName(req.get("user-agent") || ""),
-			ip: getClientIp(req),
-			timestamp: new Date(),
-		});
-		await transfer.save();
+		// Atomic extend with extendedOnce guard — two concurrent extend requests cannot
+		// both succeed, even on the same Mongo replica.
+		const extendResult = await Transfer.updateOne(
+			{ _id: transfer._id, extendedOnce: false, isDeleted: false },
+			{
+				$set: { expiresAt, extendedOnce: true },
+				$push: {
+					activity: {
+						$each: [{
+							event: "extended",
+							device: getDeviceName(req.get("user-agent") || ""),
+							ip: getClientIp(req),
+							timestamp: new Date(),
+						}],
+						$slice: -200,
+					},
+				},
+			},
+		);
+		if (extendResult.modifiedCount === 0) {
+			// Lost the race — restore countdown using prior expiry to avoid leaving the
+			// transfer without a timer.
+			scheduleTransferCountdown(code, transfer.expiresAt);
+			return res.status(409).json(buildErrorResponse(ERROR_CODES.SERVER_ERROR, "Transfer can only be extended once"));
+		}
 		invalidateTransferCache(code);
 
 		// Schedule new countdown AFTER save
@@ -267,20 +289,34 @@ router.delete("/:code", validateCode, async (req, res, next) => {
 		}
 
 		if (!transfer.isDeleted) {
-			await deleteFilesFromR2(transfer.files);
-			transfer.isDeleted = true;
-			transfer.cancelledAt = new Date();
-			transfer.activity.push({
-				event: "cancelled",
-				device: getDeviceName(req.get("user-agent") || ""),
-				ip: getClientIp(req),
-				timestamp: new Date(),
-			});
-			await transfer.save();
-			invalidateTransferCache(code);
-			clearTransferCountdown(code);
-			emitToRoom(code, "transfer-cancelled", { code, status: "CANCELLED" });
-			logEvent("Transfer cancelled", `CODE: ${code}`);
+			// Atomic claim of the cancel: only one request marks the transfer cancelled,
+			// even if the user double-taps the button on a flaky connection.
+			const cancelResult = await Transfer.updateOne(
+				{ _id: transfer._id, isDeleted: false },
+				{
+					$set: { isDeleted: true, cancelledAt: new Date() },
+					$push: {
+						activity: {
+							$each: [{
+								event: "cancelled",
+								device: getDeviceName(req.get("user-agent") || ""),
+								ip: getClientIp(req),
+								timestamp: new Date(),
+							}],
+							$slice: -200,
+						},
+					},
+				},
+			);
+			if (cancelResult.modifiedCount > 0) {
+				// Delete from R2 only after we've successfully claimed the cancel — otherwise
+				// a duplicate request could double-delete (no-op but wasteful).
+				await deleteFilesFromR2(transfer.files);
+				invalidateTransferCache(code);
+				clearTransferCountdown(code);
+				emitToRoom(code, "transfer-cancelled", { code, status: "CANCELLED" });
+				logEvent("Transfer cancelled", `CODE: ${code}`);
+			}
 		}
 
 		return res.status(200).json({

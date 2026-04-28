@@ -325,6 +325,9 @@ function parseRangeHeader(rangeHeader, totalBytes) {
 	};
 }
 
+// Throttle download-progress emits identically to upload — see upload.js rationale.
+const DOWNLOAD_PROGRESS_EMIT_INTERVAL_MS = 200;
+
 async function streamSingleFile(res, file, code) {
 	const objectResponse = await getObjectFromR2(file.storedKey);
 
@@ -332,6 +335,8 @@ async function streamSingleFile(res, file, code) {
 	const downloadName = sanitizeFilename(file.originalName || "download");
 	const totalBytes = Number(objectResponse.ContentLength || file.size || 0);
 	let processedBytes = 0;
+	let lastEmitAt = 0;
+	let lastEmittedPercent = -1;
 
 	res.setHeader("Content-Type", file.mimeType || "application/octet-stream");
 	res.setHeader("Content-Disposition", `attachment; filename="${downloadName}"`);
@@ -347,15 +352,36 @@ async function streamSingleFile(res, file, code) {
 
 		processedBytes += chunk.length;
 		const percent = Math.min(100, Math.round((processedBytes / totalBytes) * 100));
-		emitToRoom(code, "download-progress", { percent });
+		const now = Date.now();
+		if (
+			percent !== lastEmittedPercent
+			&& (now - lastEmitAt >= DOWNLOAD_PROGRESS_EMIT_INTERVAL_MS || percent === 100)
+		) {
+			lastEmitAt = now;
+			lastEmittedPercent = percent;
+			emitToRoom(code, "download-progress", { percent });
+		}
 	});
 
-	await new Promise((resolve, reject) => {
-		stream.on("error", reject);
-		res.on("finish", resolve);
-		res.on("error", reject);
-		stream.pipe(res);
-	});
+	// If the client disconnects mid-download, destroy the upstream R2 stream so we
+	// don't leak the TCP connection to Cloudflare. Without this the socket would
+	// stay open until the OS-level idle timeout — minutes of wasted resources per
+	// abandoned download on Render's tight pool.
+	const onClientClose = () => {
+		try { stream.destroy(); } catch { /* already destroyed */ }
+	};
+	res.on("close", onClientClose);
+
+	try {
+		await new Promise((resolve, reject) => {
+			stream.on("error", reject);
+			res.on("finish", resolve);
+			res.on("error", reject);
+			stream.pipe(res);
+		});
+	} finally {
+		res.removeListener("close", onClientClose);
+	}
 
 	return processedBytes || totalBytes;
 }
@@ -363,6 +389,8 @@ async function streamSingleFile(res, file, code) {
 async function streamZip(res, code, files) {
 	const totalBytes = files.reduce((sum, file) => sum + Number(file.size || 0), 0);
 	let processedBytes = 0;
+	let lastEmitAt = 0;
+	let lastEmittedPercent = -1;
 
 	await streamZipFromR2({
 		code,
@@ -375,7 +403,15 @@ async function streamZip(res, code, files) {
 
 			processedBytes += chunkLength;
 			const percent = Math.min(100, Math.round((processedBytes / totalBytes) * 100));
-			emitToRoom(code, "download-progress", { percent });
+			const now = Date.now();
+			if (
+				percent !== lastEmittedPercent
+				&& (now - lastEmitAt >= DOWNLOAD_PROGRESS_EMIT_INTERVAL_MS || percent === 100)
+			) {
+				lastEmitAt = now;
+				lastEmittedPercent = percent;
+				emitToRoom(code, "download-progress", { percent });
+			}
 		},
 	});
 
@@ -767,12 +803,21 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 			}
 		}
 
-		await new Promise((resolve, reject) => {
-			stream.on("error", reject);
-			res.on("finish", resolve);
-			res.on("error", reject);
-			stream.pipe(res);
-		});
+		const onPreviewClose = () => {
+			try { stream.destroy(); } catch { /* already destroyed */ }
+		};
+		res.on("close", onPreviewClose);
+
+		try {
+			await new Promise((resolve, reject) => {
+				stream.on("error", reject);
+				res.on("finish", resolve);
+				res.on("error", reject);
+				stream.pipe(res);
+			});
+		} finally {
+			res.removeListener("close", onPreviewClose);
+		}
 
 		logEvent("Preview served", `CODE: ${code}`, `FILE: ${fileIndex}`);
 		return null;
