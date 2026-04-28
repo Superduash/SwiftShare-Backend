@@ -65,15 +65,12 @@ function createTimingMiddleware() {
 			const end = process.hrtime.bigint();
 			const durationMs = Number(end - start) / 1000000; // Convert to ms
 			
-			// Add timing header
-			res.setHeader('X-Response-Time', `${durationMs.toFixed(2)}ms`);
-			
-			// Log slow requests (> 1000ms)
+			// Log slow requests (> 1000ms) — don't try to set headers here, response is done
 			if (durationMs > 1000) {
 				logEvent(
 					'Slow request detected',
-					`PATH: ${req.method} ${req.originalUrl}`,
-					`DURATION: ${durationMs.toFixed(2)}ms`,
+					`PATH: ${req.method} ${(req.originalUrl || '').split('?')[0]}`,
+					`DURATION: ${durationMs.toFixed(0)}ms`,
 					`STATUS: ${res.statusCode}`
 				);
 			}
@@ -181,10 +178,18 @@ function resetMetrics() {
 }
 
 // Memory pressure detection
-const MEMORY_PRESSURE_THRESHOLD = 0.85; // 85% heap usage
+// Render free tier has ~512MB RAM but Node heap is capped at 384MB via --max-old-space-size.
+// We only log when truly critical (>92%) and debounce to avoid log spam.
+// Note: heapUsed/heapTotal ratio can be high on startup when heapTotal is small —
+// this is normal and resolves as the heap grows. We also check absolute usage.
+const MEMORY_PRESSURE_THRESHOLD = 0.92; // 92% heap usage
+const MEMORY_PRESSURE_MIN_HEAP_MB = 100; // Only warn if heap is at least 100MB total
 
 function isMemoryPressure() {
 	const usage = process.memoryUsage();
+	const heapTotalMb = usage.heapTotal / 1024 / 1024;
+	// Skip warning if heap hasn't grown yet (startup phase)
+	if (heapTotalMb < MEMORY_PRESSURE_MIN_HEAP_MB) return false;
 	const heapUsedPercent = usage.heapUsed / usage.heapTotal;
 	return heapUsedPercent > MEMORY_PRESSURE_THRESHOLD;
 }
@@ -192,16 +197,19 @@ function isMemoryPressure() {
 function checkMemoryPressure() {
 	if (isMemoryPressure()) {
 		const usage = getMemoryUsage();
-		logEvent(
-			'Memory pressure detected',
-			`HEAP_USED: ${usage.heapUsed}MB / ${usage.heapTotal}MB (${usage.heapUsedPercent})`,
-			'Consider triggering GC or reducing cache size'
-		);
+		// Only log if we haven't logged in the last 5 minutes to avoid log spam
+		const now = Date.now();
+		if (!checkMemoryPressure._lastLogAt || now - checkMemoryPressure._lastLogAt > 5 * 60 * 1000) {
+			checkMemoryPressure._lastLogAt = now;
+			logEvent(
+				'Memory pressure detected',
+				`HEAP_USED: ${usage.heapUsed}MB / ${usage.heapTotal}MB (${usage.heapUsedPercent})`,
+			);
+		}
 		
 		// Trigger garbage collection if available
 		if (global.gc) {
 			global.gc();
-			logEvent('Manual GC triggered');
 		}
 	}
 }

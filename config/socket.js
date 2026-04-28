@@ -558,6 +558,14 @@ function initSocket(server) {
 	}, 5 * 60 * 1000).unref(); // unref to not block process exit
 
 	ioInstance.on("connection", (socket) => {
+		// Suppress ECONNRESET/EPIPE errors from abrupt client disconnects —
+		// these are normal on mobile networks and don't indicate a bug.
+		socket.on("error", (err) => {
+			if (err?.code !== "ECONNRESET" && err?.code !== "EPIPE" && err?.code !== "ERR_STREAM_DESTROYED") {
+				logError("Socket error", err, `SOCKET: ${socket.id}`);
+			}
+		});
+
 		// Helper: invoke ack only if it's a valid function. socket.io clients may
 		// or may not pass an ack — we never want to throw because of a missing one.
 		const safeAck = (ack, payload) => {
@@ -694,7 +702,7 @@ function initSocket(server) {
 			});
 		});
 
-		socket.on("disconnect", async () => {
+		socket.on("disconnect", async (reason) => {
 			try {
 				// Clear sender socket ID for all transfers owned by this socket
 				await Transfer.updateMany(
@@ -702,9 +710,12 @@ function initSocket(server) {
 					{ $set: { senderSocketId: "" } },
 				);
 				
-				logEvent("Socket disconnected", `SOCKET: ${socket.id}`, "Cleared sender socket IDs");
+				logEvent("Socket disconnected", `SOCKET: ${socket.id}`, `REASON: ${reason}`);
 			} catch (error) {
-				logError("Failed to clean up sender socket on disconnect", error);
+				// Only log non-operational errors (ECONNRESET is expected on mobile)
+				if (error?.code !== 'ECONNRESET' && error?.code !== 'EPIPE') {
+					logError("Failed to clean up sender socket on disconnect", error);
+				}
 			}
 		});
 	});

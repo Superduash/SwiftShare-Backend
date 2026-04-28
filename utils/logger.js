@@ -70,17 +70,32 @@ function logEvent(event, ...parts) {
 	logInfo(`${event}${buildSuffix(parts)}`, true);
 }
 
+function logWarn(event, ...parts) {
+	if (!shouldLog("warn")) {
+		return;
+	}
+
+	const line = `[!] ${event}${buildSuffix(parts)}`;
+	writeStdout(withTimestamp(line));
+}
+
 function logError(event, error, ...parts) {
 	if (!shouldLog("error")) {
 		return;
 	}
 
 	const hasError = error !== undefined && error !== null;
+	// Avoid logging stack traces for expected operational errors (e.g. client disconnects)
+	const isOperational = hasError && (error.code === 'ECONNRESET' || error.code === 'EPIPE' || error.code === 'ERR_STREAM_DESTROYED');
 	const message = hasError
 		? (error.message ? error.message : String(error))
 		: "";
 	const suffixParts = hasError ? [...parts, `ERROR: ${message}`] : parts;
 	writeStderr(withTimestamp(`[✗] ${event}${buildSuffix(suffixParts)}`));
+	// Only log stack traces for non-operational errors in development
+	if (hasError && !isOperational && error.stack && String(process.env.NODE_ENV || '').toLowerCase() !== 'production') {
+		writeStderr(error.stack);
+	}
 }
 
 function formatSizeMB(bytes) {
@@ -96,6 +111,7 @@ function formatSizeMB(bytes) {
 module.exports = {
 	logSuccess,
 	logInfo,
+	logWarn,
 	logEvent,
 	logError,
 	formatSizeMB,

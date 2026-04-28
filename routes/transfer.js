@@ -120,11 +120,11 @@ router.post("/:code/verify-password", rateLimitPassword, validateCode, sanitizeR
 			return res.status(400).json(buildErrorResponse(ERROR_CODES.INVALID_REQUEST, "Invalid password format"));
 		}
 
-		const isValidPassword = Boolean(
+		const passwordMatches = Boolean(
 			transfer.passwordHash && await bcrypt.compare(password, transfer.passwordHash),
 		);
 
-		if (!isValidPassword) {
+		if (!passwordMatches) {
 			// Atomic increment — prevents lost updates if two devices try the same wrong
 			// password concurrently (otherwise both would read N and write N+1, missing one).
 			await Transfer.updateOne(

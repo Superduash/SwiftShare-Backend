@@ -368,13 +368,37 @@ app.use(createTimingMiddleware());
 
 app.use((req, res, next) => {
 	const originalJson = res.json.bind(res);
+	const originalStatus = res.status.bind(res);
+	const originalSend = res.send.bind(res);
 
+	// Track if we've already sent a response
+	let responseSent = false;
+
+	// Override status to track response state
+	res.status = function(code) {
+		if (responseSent || res.headersSent) {
+			return res;
+		}
+		return originalStatus(code);
+	};
+
+	// Override send to track response state
+	res.send = function(body) {
+		if (responseSent || res.headersSent) {
+			return res;
+		}
+		responseSent = true;
+		return originalSend(body);
+	};
+
+	// Override json with header check and response tracking
 	res.json = (payload) => {
-		// CRITICAL FIX: Check if headers were already sent (e.g., 304 Not Modified)
-		if (res.headersSent) {
+		// CRITICAL FIX: Check if headers were already sent or response already processed
+		if (responseSent || res.headersSent) {
 			return res;
 		}
 
+		responseSent = true;
 		const isObject = payload !== null && typeof payload === "object" && !Array.isArray(payload);
 
 		if (res.statusCode >= 400) {
@@ -763,13 +787,6 @@ process.on("unhandledRejection", (reason) => {
 process.on("uncaughtException", (error) => {
 	logError("Uncaught exception", error);
 	try { Sentry.captureException(error); } catch { /* sentry optional */ }
-	
-	// CRITICAL FIX: Don't shutdown for "headers already sent" errors - they're recoverable
-	const errorMessage = String(error?.message || "").toLowerCase();
-	if (errorMessage.includes("cannot set headers after they are sent")) {
-		logEvent("Recovered from headers-already-sent error - continuing operation");
-		return; // Don't shutdown - this is recoverable
-	}
 	
 	// Per Node.js docs, the process is in an undefined state after an uncaught
 	// exception. Trigger a graceful shutdown rather than continuing.
