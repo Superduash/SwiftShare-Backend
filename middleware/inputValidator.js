@@ -29,9 +29,6 @@ function sanitizeString(input, maxLength = 1000) {
 	return sanitized.length > maxLength ? sanitized.substring(0, maxLength) : sanitized;
 }
 
-// Pre-compiled regex for performance
-const TRANSFER_CODE_REGEX = /^[A-Z0-9]{6}$/;
-
 /**
  * Validate transfer code format (optimized)
  * @param {string} code - Transfer code
