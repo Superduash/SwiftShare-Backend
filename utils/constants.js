@@ -6,7 +6,7 @@ const MAX_FILE_SIZE_MB = Number.isFinite(rawMaxFileSizeMb) && rawMaxFileSizeMb >
 	: 100;
 const MAX_FILE_COUNT = Number.isInteger(rawMaxFileCount) && rawMaxFileCount > 0
 	? rawMaxFileCount
-	: 5;
+	: 10;
 const SESSION_EXPIRY_MINUTES = Number(process.env.SESSION_EXPIRY_MINUTES) || 10;
 const CODE_LENGTH = Number(process.env.CODE_LENGTH) || 6;
 

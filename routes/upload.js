@@ -43,12 +43,13 @@ const aiInFlight = new Set();
 // ── Configuration ─────────────────────────────────────────
 function getMaxFileCount() {
 	const maxCount = Number(process.env.MAX_FILE_COUNT);
-	return Number.isInteger(maxCount) && maxCount > 0 ? maxCount : 5;
+	return Number.isInteger(maxCount) && maxCount > 0 ? maxCount : 10;
 }
 
 function getMaxFileSizeBytes() {
 	const maxSizeMb = Number(process.env.MAX_FILE_SIZE_MB);
 	const safeMb = Number.isFinite(maxSizeMb) && maxSizeMb > 0 ? maxSizeMb : 100;
+	// Cap at 100MB total — all files combined must not exceed this
 	const cappedMb = Math.min(safeMb, 100);
 	return cappedMb * 1024 * 1024;
 }
