@@ -366,71 +366,10 @@ app.use(sentryRequestHandler || ((req, res, next) => next()));
 // Performance timing middleware - adds X-Response-Time header
 app.use(createTimingMiddleware());
 
-app.use((req, res, next) => {
-	const originalJson = res.json.bind(res);
-	const originalStatus = res.status.bind(res);
-	const originalSend = res.send.bind(res);
-
-	// Track if we've already sent a response
-	let responseSent = false;
-
-	// Override status to track response state
-	res.status = function(code) {
-		if (responseSent || res.headersSent) {
-			return res;
-		}
-		return originalStatus(code);
-	};
-
-	// Override send to track response state
-	res.send = function(body) {
-		if (responseSent || res.headersSent) {
-			return res;
-		}
-		responseSent = true;
-		return originalSend(body);
-	};
-
-	// Override json with header check and response tracking
-	res.json = (payload) => {
-		// CRITICAL FIX: Check if headers were already sent or response already processed
-		if (responseSent || res.headersSent) {
-			return res;
-		}
-
-		responseSent = true;
-		const isObject = payload !== null && typeof payload === "object" && !Array.isArray(payload);
-
-		if (res.statusCode >= 400) {
-			if (isObject && payload.success === false) {
-				return originalJson(payload);
-			}
-
-			if (isObject && payload.error) {
-				return originalJson({ success: false, error: payload.error });
-			}
-
-			return originalJson(buildErrorResponse(ERROR_CODES.SERVER_ERROR, "Something went wrong"));
-		}
-
-		if (isObject && payload.success === true) {
-			if (Object.prototype.hasOwnProperty.call(payload, "data")) {
-				return originalJson(payload);
-			}
-
-			const { success, ...rest } = payload;
-			return originalJson({ success: true, data: rest });
-		}
-
-		if (isObject && payload.success === false) {
-			return originalJson(payload);
-		}
-
-		return originalJson({ success: true, data: payload });
-	};
+// NOTE: Response normalization is handled per-route. No global res.json override
+// to avoid interfering with streaming routes (download/preview use stream.pipe(res)).
 
 	next();
-});
 
 app.get("/debug-sentry", (req, res) => {
 	throw new Error("Sentry test error");
