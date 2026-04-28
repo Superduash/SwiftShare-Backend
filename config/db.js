@@ -48,9 +48,6 @@ async function connectDB() {
 		heartbeatFrequencyMS: 10000, // Check connection health every 10s
 		// Retry writes on network errors
 		retryWrites: true,
-		// Use new connection management
-		useNewUrlParser: true,
-		useUnifiedTopology: true,
 	});
 	
 	// Connection event handlers for monitoring
