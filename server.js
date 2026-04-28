@@ -369,8 +369,6 @@ app.use(createTimingMiddleware());
 // NOTE: Response normalization is handled per-route. No global res.json override
 // to avoid interfering with streaming routes (download/preview use stream.pipe(res)).
 
-	next();
-
 app.get("/debug-sentry", (req, res) => {
 	throw new Error("Sentry test error");
 });
