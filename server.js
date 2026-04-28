@@ -788,9 +788,17 @@ process.on("uncaughtException", (error) => {
 	logError("Uncaught exception", error);
 	try { Sentry.captureException(error); } catch { /* sentry optional */ }
 	
-	// Per Node.js docs, the process is in an undefined state after an uncaught
-	// exception. Trigger a graceful shutdown rather than continuing.
-	void gracefulShutdown("uncaughtException");
+	// Only shut down for truly fatal errors, not stream/busboy errors.
+	// Busboy can throw null-reference errors on large file limits that are
+	// non-fatal and should not kill the server process.
+	const isStreamError = error?.code === 'ERR_STREAM_DESTROYED'
+		|| error?.code === 'ECONNRESET'
+		|| error?.code === 'EPIPE'
+		|| /truncated|busboy|stream/i.test(error?.message || '');
+	
+	if (!isStreamError) {
+		void gracefulShutdown("uncaughtException");
+	}
 });
 
 process.on("SIGTERM", () => {

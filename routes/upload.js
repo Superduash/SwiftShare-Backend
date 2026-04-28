@@ -174,7 +174,9 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 				headers: req.headers,
 				limits: {
 					files: maxFileCount,
-					fileSize: maxTotalBytes, // per-file cap; we also enforce total below
+					// No fileSize limit here — our data handler enforces maxTotalBytes correctly.
+					// Busboy's fileSize limit causes an internal null reference crash on large files
+					// (sets .truncated on a null stream reference), crashing the process.
 					fields: 50,
 				},
 			});
@@ -302,9 +304,6 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 				maybeEmitProgress(false);
 			});
 
-			fileStream.on("limit", () => {
-				abortAll(createAppError(400, ERROR_CODES.FILE_TOO_LARGE, "File exceeds size limit"));
-			});
 			fileStream.on("error", (err) => abortAll(err));
 
 			fileStream.pipe(passthrough);
