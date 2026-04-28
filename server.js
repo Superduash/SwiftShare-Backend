@@ -8,7 +8,10 @@ const mongoose = require("mongoose");
 const cors = require("cors");
 const helmet = require("helmet");
 const morgan = require("morgan");
+const compression = require("compression");
 const { validateEnvOrExit } = require("./utils/validateEnv");
+const { createTimingMiddleware, getPerformanceSnapshot } = require("./utils/performance");
+const { getCacheStats } = require("./utils/cache");
 
 validateEnvOrExit();
 
@@ -253,6 +256,25 @@ function corsOrigin(origin, callback) {
 
 app.set("trust proxy", 1);
 
+// Response compression - reduces bandwidth by 60-80% for JSON/text responses
+// Only compress responses > 1KB to avoid overhead on small payloads
+app.use(compression({
+	threshold: 1024, // Only compress responses > 1KB
+	level: 6, // Balance between speed and compression ratio (1-9, 6 is optimal)
+	filter: (req, res) => {
+		// Don't compress if client doesn't support it
+		if (req.headers['x-no-compression']) {
+			return false;
+		}
+		// Don't compress streaming responses (uploads/downloads handle their own compression)
+		if (res.getHeader('Content-Type')?.includes('application/octet-stream')) {
+			return false;
+		}
+		// Use compression's default filter for everything else
+		return compression.filter(req, res);
+	},
+}));
+
 app.use(cors({ origin: corsOrigin, maxAge: 86400 }));
 app.use(helmet({
 	crossOriginResourcePolicy: { policy: "cross-origin" },
@@ -269,6 +291,30 @@ app.use(helmet({
 	// can still be embedded in the SPA.
 	frameguard: { action: "deny" },
 	referrerPolicy: { policy: "no-referrer" },
+	// Content Security Policy - prevents XSS attacks
+	contentSecurityPolicy: isProduction ? {
+		directives: {
+			defaultSrc: ["'self'"],
+			scriptSrc: ["'self'"],
+			styleSrc: ["'self'", "'unsafe-inline'"], // Allow inline styles for dynamic UI
+			imgSrc: ["'self'", "data:", "https:"],
+			connectSrc: ["'self'"],
+			fontSrc: ["'self'"],
+			objectSrc: ["'none'"],
+			mediaSrc: ["'self'"],
+			frameSrc: ["'none'"],
+		},
+	} : false,
+	// Prevent MIME type sniffing
+	noSniff: true,
+	// Prevent DNS prefetching
+	dnsPrefetchControl: { allow: false },
+	// Hide X-Powered-By header
+	hidePoweredBy: true,
+	// Prevent IE from executing downloads in site's context
+	ieNoOpen: true,
+	// Prevent clickjacking
+	xssFilter: true,
 }));
 app.use(morgan((tokens, req, res) => {
 	const url = (req.originalUrl || "").split("?")[0]; // strip query params to prevent passwords leaking into logs
@@ -311,6 +357,9 @@ app.use((req, res, next) => {
 
 const sentryRequestHandler = Sentry.Handlers?.requestHandler?.();
 app.use(sentryRequestHandler || ((req, res, next) => next()));
+
+// Performance timing middleware - adds X-Response-Time header
+app.use(createTimingMiddleware());
 
 app.use((req, res, next) => {
 	const originalJson = res.json.bind(res);
@@ -355,6 +404,23 @@ app.get("/debug-sentry", (req, res) => {
 
 app.get("/api/ping", (req, res) => {
 	res.status(200).json({ pong: true });
+});
+
+// Performance metrics endpoint (for monitoring/debugging)
+app.get("/api/metrics", (req, res) => {
+	try {
+		const snapshot = getPerformanceSnapshot();
+		const cacheStats = getCacheStats();
+		
+		res.status(200).json({
+			performance: snapshot,
+			cache: cacheStats,
+			timestamp: Date.now(),
+		});
+	} catch (error) {
+		logError("Metrics endpoint failed", error);
+		res.status(500).json({ error: "Failed to collect metrics" });
+	}
 });
 
 app.use("/api/upload", uploadRoutes);

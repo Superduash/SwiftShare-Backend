@@ -312,47 +312,107 @@ function scheduleTransferCountdown(code, expiresAt) {
 }
 
 function getSocketIp(socket) {
+	// Priority 1: x-forwarded-for (most reliable for proxied connections)
 	const forwardedFor = socket?.handshake?.headers?.["x-forwarded-for"];
 	if (typeof forwardedFor === "string" && forwardedFor.trim()) {
-		return forwardedFor.split(",")[0].trim();
+		const ip = forwardedFor.split(",")[0].trim();
+		logEvent("Socket IP from x-forwarded-for", `SOCKET: ${socket.id}`, `IP: ${ip}`);
+		return ip;
 	}
 
-	return String(socket?.handshake?.address || "").trim();
+	// Priority 2: x-real-ip
+	const realIp = socket?.handshake?.headers?.["x-real-ip"];
+	if (typeof realIp === "string" && realIp.trim()) {
+		logEvent("Socket IP from x-real-ip", `SOCKET: ${socket.id}`, `IP: ${realIp}`);
+		return realIp.trim();
+	}
+
+	// Priority 3: socket address
+	const address = String(socket?.handshake?.address || "").trim();
+	logEvent("Socket IP from address", `SOCKET: ${socket.id}`, `IP: ${address}`);
+	return address;
 }
 
 async function emitNearbyDevices(socket) {
-	const clientIp = getSocketIp(socket);
-	const subnet = getSubnet(clientIp);
+	try {
+		const clientIp = getSocketIp(socket);
+		const subnet = getSubnet(clientIp);
 
-	if (!subnet) {
+		logEvent("Nearby devices request", `SOCKET: ${socket.id}`, `IP: ${clientIp}`, `SUBNET: ${subnet || "INVALID"}`);
+
+		// If no valid subnet, return empty list
+		if (!subnet) {
+			socket.emit("nearby-devices", { devices: [] });
+			logEvent("Nearby devices - no valid subnet", `SOCKET: ${socket.id}`, `IP: ${clientIp}`);
+			return;
+		}
+
+		const now = new Date();
+		
+		// Find active transfers on same subnet
+		const candidates = await Transfer.find({
+			isDeleted: false,
+			expiresAt: { $gt: now },
+			senderSocketId: { $exists: true, $ne: "" },
+			senderIp: { $regex: `^${subnet.replace(/\./g, "\\.")}\\.` },
+		})
+			.select('code fileCount files totalSize ai.category senderDeviceName expiresAt senderSocketId senderIp')
+			.sort({ createdAt: -1 })
+			.limit(20)
+			.lean();
+
+		logEvent("Nearby devices - DB query", `SOCKET: ${socket.id}`, `SUBNET: ${subnet}`, `FOUND: ${candidates.length}`);
+
+		// Get all connected socket IDs for validation
+		const connectedSockets = ioInstance ? new Set(Array.from(ioInstance.sockets.sockets.keys())) : new Set();
+
+		// Filter and format devices
+		const devices = candidates
+			.map((transfer) => ({
+				code: transfer.code,
+				fileCount: Number(transfer.fileCount || transfer.files?.length || 0),
+				totalSize: Number(transfer.totalSize || 0),
+				category: transfer.ai?.category || "Other",
+				deviceName: transfer.senderDeviceName || "Unknown Device",
+				expiresAt: transfer.expiresAt,
+				socketId: String(transfer.senderSocketId || ""),
+				senderIp: transfer.senderIp,
+			}))
+			.filter((device) => {
+				// Exclude self
+				if (device.socketId === socket.id) {
+					logEvent("Nearby devices - filtered self", `CODE: ${device.code}`, `SOCKET: ${device.socketId}`);
+					return false;
+				}
+				
+				// Only include devices with valid socket IDs
+				if (!device.socketId) {
+					logEvent("Nearby devices - filtered no socket", `CODE: ${device.code}`);
+					return false;
+				}
+				
+				// Verify socket is still connected (stale device cleanup)
+				if (!connectedSockets.has(device.socketId)) {
+					logEvent("Nearby devices - filtered stale socket", `CODE: ${device.code}`, `SOCKET: ${device.socketId}`);
+					// Async cleanup: clear stale socket ID from database
+					Transfer.updateOne(
+						{ code: device.code },
+						{ $set: { senderSocketId: "" } }
+					).catch((err) => logError("Failed to clear stale socket", err, `CODE: ${device.code}`));
+					return false;
+				}
+				
+				return true;
+			});
+
+		socket.emit("nearby-devices", { devices });
+		
+		logEvent("Nearby devices emitted", `SOCKET: ${socket.id}`, `SUBNET: ${subnet}`, `COUNT: ${devices.length}`);
+	} catch (error) {
+		logError("Failed to emit nearby devices", error, `SOCKET: ${socket.id}`);
+		// Always emit response even on error to prevent client hanging
 		socket.emit("nearby-devices", { devices: [] });
-		return;
 	}
-
-	const now = new Date();
-	const candidates = await Transfer.find({
-		isDeleted: false,
-		expiresAt: { $gt: now },
-		senderSocketId: { $exists: true, $ne: "" },
-		senderIp: { $regex: `^${subnet.replace(/\./g, "\\.")}\\.` },
-	})
-		.sort({ createdAt: -1 })
-		.limit(20)
-		.lean();
-
-	const devices = candidates
-		.map((transfer) => ({
-			code: transfer.code,
-			fileCount: Number(transfer.fileCount || transfer.files?.length || 0),
-			totalSize: Number(transfer.totalSize || 0),
-			category: transfer.ai?.category || "Other",
-			deviceName: transfer.senderDeviceName || "Unknown Device",
-			expiresAt: transfer.expiresAt,
-			socketId: String(transfer.senderSocketId || ""),
-		}))
-		.filter((device) => device.socketId && device.socketId !== socket.id);
-
-	socket.emit("nearby-devices", { devices });
 }
 
 function initSocket(server) {
@@ -369,6 +429,12 @@ function initSocket(server) {
 		pingTimeout: 60000,
 		// Match the express body limit. Sockets carry only small JSON events.
 		maxHttpBufferSize: 1e6,
+		// Security: Prevent WebSocket transport downgrade attacks
+		transports: ["websocket", "polling"],
+		allowUpgrades: true,
+		// Security: Limit connection attempts
+		perMessageDeflate: false,
+		httpCompression: false,
 		cors: {
 			origin: (origin, callback) => {
 				if (!origin) {
@@ -402,6 +468,94 @@ function initSocket(server) {
 			credentials: false,
 		},
 	});
+
+	// Security: Track connection attempts per IP (optimized)
+	const connectionAttempts = new Map();
+	const MAX_CONNECTIONS_PER_IP = 10;
+	const CONNECTION_WINDOW_MS = 60 * 1000; // 1 minute
+	const MAX_CONNECTION_ENTRIES = 5000; // Prevent memory bloat
+
+	ioInstance.use((socket, next) => {
+		const ip = getSocketIp(socket);
+		const now = Date.now();
+		const attempts = connectionAttempts.get(ip);
+
+		if (!attempts) {
+			// Prevent memory bloat
+			if (connectionAttempts.size > MAX_CONNECTION_ENTRIES) {
+				// Quick cleanup: remove first 1000 expired entries
+				let cleaned = 0;
+				for (const [key, val] of connectionAttempts) {
+					if (now > val.resetAt) {
+						connectionAttempts.delete(key);
+						if (++cleaned >= 1000) break;
+					}
+				}
+			}
+			connectionAttempts.set(ip, { count: 1, resetAt: now + CONNECTION_WINDOW_MS });
+			return next();
+		}
+
+		if (now > attempts.resetAt) {
+			attempts.count = 1;
+			attempts.resetAt = now + CONNECTION_WINDOW_MS;
+			return next();
+		}
+
+		if (attempts.count >= MAX_CONNECTIONS_PER_IP) {
+			logEvent("Socket connection rate limit", `IP: ${ip}`);
+			return next(new Error("Too many connection attempts"));
+		}
+
+		attempts.count++;
+		next();
+	});
+
+	// Cleanup old connection attempts every 10 minutes (less frequent)
+	setInterval(() => {
+		const now = Date.now();
+		const toDelete = [];
+		for (const [ip, attempts] of connectionAttempts) {
+			if (now > attempts.resetAt) {
+				toDelete.push(ip);
+			}
+		}
+		for (const ip of toDelete) {
+			connectionAttempts.delete(ip);
+		}
+	}, 10 * 60 * 1000).unref(); // unref to not block process exit
+
+	// Periodic cleanup of stale socket IDs from database (every 5 minutes)
+	// This catches any socket IDs that weren't cleaned up during disconnect
+	setInterval(async () => {
+		if (!ioInstance) return;
+		
+		try {
+			const connectedSockets = new Set(Array.from(ioInstance.sockets.sockets.keys()));
+			
+			// Find all transfers with socket IDs
+			const transfers = await Transfer.find(
+				{ senderSocketId: { $exists: true, $ne: "" } },
+				{ code: 1, senderSocketId: 1 }
+			).lean();
+			
+			// Identify stale socket IDs
+			const staleTransfers = transfers.filter(t => !connectedSockets.has(t.senderSocketId));
+			
+			if (staleTransfers.length > 0) {
+				// Bulk update to clear stale socket IDs
+				const staleCodes = staleTransfers.map(t => t.code);
+				await Transfer.updateMany(
+					{ code: { $in: staleCodes } },
+					{ $set: { senderSocketId: "" } }
+				);
+				
+				logEvent("Stale socket cleanup", `CLEARED: ${staleTransfers.length} stale socket IDs`);
+			}
+		} catch (error) {
+			logError("Failed to clean up stale sockets", error);
+		}
+	}, 5 * 60 * 1000).unref(); // unref to not block process exit
 
 	ioInstance.on("connection", (socket) => {
 		// Helper: invoke ack only if it's a valid function. socket.io clients may
@@ -504,21 +658,26 @@ function initSocket(server) {
 			}
 		});
 
-		socket.on("nearby-ping", ({ code } = {}) => {
+		socket.on("nearby-ping", async ({ code } = {}) => {
 			const normalizedCode = normalizeCode(code);
 			if (normalizedCode) {
 				socket.join(roomName(normalizedCode));
 			}
 
+			// Always respond with pong first
 			socket.emit("nearby-pong", {
 				timestamp: Date.now(),
 				socketId: socket.id,
 				code: normalizedCode || null,
 			});
 
-			void emitNearbyDevices(socket).catch((error) => {
+			// Then emit nearby devices
+			try {
+				await emitNearbyDevices(socket);
+			} catch (error) {
 				logError("Failed to emit nearby devices", error, `SOCKET: ${socket.id}`);
-			});
+				socket.emit("nearby-devices", { devices: [] });
+			}
 		});
 
 		socket.on("push-transfer-offer", ({ targetSocketId, code, filename } = {}) => {
@@ -537,10 +696,13 @@ function initSocket(server) {
 
 		socket.on("disconnect", async () => {
 			try {
+				// Clear sender socket ID for all transfers owned by this socket
 				await Transfer.updateMany(
 					{ senderSocketId: socket.id },
 					{ $set: { senderSocketId: "" } },
 				);
+				
+				logEvent("Socket disconnected", `SOCKET: ${socket.id}`, "Cleared sender socket IDs");
 			} catch (error) {
 				logError("Failed to clean up sender socket on disconnect", error);
 			}
@@ -554,6 +716,41 @@ function getIo() {
 	return ioInstance;
 }
 
+// Broadcast to all sockets on same subnet that a new transfer is available
+async function broadcastNewTransferToSubnet(transferCode, senderIp) {
+	if (!ioInstance) return;
+	
+	const subnet = getSubnet(senderIp);
+	if (!subnet) return;
+	
+	try {
+		// Get the transfer details
+		const transfer = await Transfer.findOne({ code: transferCode })
+			.select('code fileCount files totalSize ai.category senderDeviceName expiresAt senderSocketId senderIp')
+			.lean();
+			
+		if (!transfer) return;
+		
+		const deviceInfo = {
+			code: transfer.code,
+			fileCount: Number(transfer.fileCount || transfer.files?.length || 0),
+			totalSize: Number(transfer.totalSize || 0),
+			category: transfer.ai?.category || "Other",
+			deviceName: transfer.senderDeviceName || "Unknown Device",
+			expiresAt: transfer.expiresAt,
+			socketId: String(transfer.senderSocketId || ""),
+		};
+		
+		// Broadcast to all connected sockets
+		// Each client will filter based on their own subnet
+		ioInstance.emit("nearby-device-added", { device: deviceInfo, subnet });
+		
+		logEvent("Broadcast new transfer", `CODE: ${transferCode}`, `SUBNET: ${subnet}`);
+	} catch (error) {
+		logError("Failed to broadcast new transfer", error, `CODE: ${transferCode}`);
+	}
+}
+
 module.exports = {
 	initSocket,
 	emitToRoom,
@@ -561,5 +758,6 @@ module.exports = {
 	clearTransferCountdown,
 	bindSocketToRoom,
 	getIo,
+	broadcastNewTransferToSubnet,
 };
 

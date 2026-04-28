@@ -4,16 +4,31 @@ const Transfer = require("../models/Transfer");
 const { deleteFilesFromR2 } = require("./fileManager");
 const { clearTransferCountdown, emitToRoom } = require("../config/socket");
 const { logEvent, logError } = require("../utils/logger");
+const { isMemoryPressure } = require("../utils/performance");
 
 let cleanupTask;
 let isCleanupRunning = false;
 const BURN_IDLE_FINALIZE_MS = Number(process.env.BURN_IDLE_FINALIZE_MS || (2 * 60 * 1000));
-const CLEANUP_BATCH_SIZE = Number(process.env.CLEANUP_BATCH_SIZE) > 0
-	? Number(process.env.CLEANUP_BATCH_SIZE)
-	: 50;
-const CLEANUP_PARALLELISM = Number(process.env.CLEANUP_PARALLELISM) > 0
-	? Number(process.env.CLEANUP_PARALLELISM)
-	: 4;
+
+// Dynamic batch sizing based on memory pressure
+function getCleanupBatchSize() {
+	if (isMemoryPressure()) {
+		return 25; // Reduce batch size under memory pressure
+	}
+	return Number(process.env.CLEANUP_BATCH_SIZE) > 0
+		? Number(process.env.CLEANUP_BATCH_SIZE)
+		: 50;
+}
+
+// Dynamic parallelism based on memory pressure
+function getCleanupParallelism() {
+	if (isMemoryPressure()) {
+		return 2; // Reduce parallelism under memory pressure
+	}
+	return Number(process.env.CLEANUP_PARALLELISM) > 0
+		? Number(process.env.CLEANUP_PARALLELISM)
+		: 4;
+}
 
 // Run a list of async tasks with bounded concurrency. Prevents the cleanup job
 // from spawning unbounded promises if hundreds of transfers expire at once
@@ -101,20 +116,23 @@ async function runCleanup() {
 
 	try {
 		const now = new Date();
+		const batchSize = getCleanupBatchSize();
+		const parallelism = getCleanupParallelism();
 
 		// Use lean() — we only need _id, code, and files.storedKey for cleanup.
 		// Full Mongoose hydration on hundreds of expired docs is wasteful.
+		// Use projection to only select needed fields for better performance
 		const expiredTransfers = await Transfer.find(
 			{
 				expiresAt: { $lt: now },
 				isDeleted: false,
 			},
-			{ code: 1, files: 1 },
+			{ code: 1, files: 1 }, // Projection: only select needed fields
 		)
-			.limit(CLEANUP_BATCH_SIZE)
+			.limit(batchSize)
 			.lean();
 
-		await runWithConcurrency(expiredTransfers, expireOne, CLEANUP_PARALLELISM);
+		await runWithConcurrency(expiredTransfers, expireOne, parallelism);
 
 		const burnFinalizeCutoff = new Date(Date.now() - BURN_IDLE_FINALIZE_MS);
 		const staleClaimedTransfers = await Transfer.find(
@@ -125,15 +143,17 @@ async function runCleanup() {
 				burnLastActiveAt: { $lt: burnFinalizeCutoff },
 				expiresAt: { $gt: now },
 			},
-			{ code: 1, files: 1 },
+			{ code: 1, files: 1 }, // Projection: only select needed fields
 		)
-			.limit(CLEANUP_BATCH_SIZE)
+			.limit(batchSize)
 			.lean();
 
-		await runWithConcurrency(staleClaimedTransfers, finalizeStaleBurn, CLEANUP_PARALLELISM);
+		await runWithConcurrency(staleClaimedTransfers, finalizeStaleBurn, parallelism);
 
 		logEvent(
 			`Cleanup job removed ${expiredTransfers.length} expired transfers and finalized ${staleClaimedTransfers.length} stale burn sessions`,
+			`BATCH_SIZE: ${batchSize}`,
+			`PARALLELISM: ${parallelism}`,
 		);
 	} catch (error) {
 		logError("Cleanup job failed", error);

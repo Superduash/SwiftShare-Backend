@@ -50,6 +50,58 @@ const textShareLimiter = createLimiter(60, "1 h", "swiftshare:rl:text");
 const passwordLimiter = createLimiter(30, "10 m", "swiftshare:rl:password");
 const RATE_LIMIT_MESSAGE = "Rate limit active: You are sending files too quickly. Please wait a moment.";
 
+// IP-based rate limiting fallback (optimized with LRU-style cleanup)
+const ipRateLimitMap = new Map();
+const IP_RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+const IP_RATE_LIMIT_MAX_REQUESTS = 100; // Generous fallback limit
+const MAX_IP_ENTRIES = 10000; // Prevent memory bloat
+
+function ipBasedRateLimit(ip, maxRequests = IP_RATE_LIMIT_MAX_REQUESTS) {
+	const now = Date.now();
+	const entry = ipRateLimitMap.get(ip);
+
+	if (!entry) {
+		// Prevent memory bloat: if map is too large, clear expired entries
+		if (ipRateLimitMap.size > MAX_IP_ENTRIES) {
+			for (const [key, val] of ipRateLimitMap) {
+				if (now > val.resetAt) {
+					ipRateLimitMap.delete(key);
+				}
+			}
+		}
+		ipRateLimitMap.set(ip, { count: 1, resetAt: now + IP_RATE_LIMIT_WINDOW_MS });
+		return { success: true };
+	}
+
+	if (now > entry.resetAt) {
+		entry.count = 1;
+		entry.resetAt = now + IP_RATE_LIMIT_WINDOW_MS;
+		return { success: true };
+	}
+
+	if (entry.count >= maxRequests) {
+		return { success: false };
+	}
+
+	entry.count++;
+	return { success: true };
+}
+
+// Cleanup old IP rate limit entries every 15 minutes (less frequent = better performance)
+setInterval(() => {
+	const now = Date.now();
+	// Batch delete for better performance
+	const toDelete = [];
+	for (const [ip, entry] of ipRateLimitMap) {
+		if (now > entry.resetAt) {
+			toDelete.push(ip);
+		}
+	}
+	for (const ip of toDelete) {
+		ipRateLimitMap.delete(ip);
+	}
+}, 15 * 60 * 1000).unref(); // unref to not block process exit
+
 function createRateLimitMiddleware(limiter) {
 	return async (req, res, next) => {
 		try {
@@ -61,16 +113,40 @@ function createRateLimitMiddleware(limiter) {
 				return next();
 			}
 
-			if (!limiter) {
-				return next();
+			const ip = getClientIp(req) || "unknown";
+
+			// Try Redis-based rate limiting first
+			if (limiter) {
+				try {
+					const result = await limiter.limit(ip);
+
+					if (!result.success) {
+						logEvent(
+							"Rate limit triggered (Redis)",
+							`IP: ${ip}`,
+							`PATH: ${req.method} ${req.originalUrl}`,
+						);
+						const payload = buildErrorResponse(
+							ERROR_CODES.RATE_LIMIT_EXCEEDED,
+							RATE_LIMIT_MESSAGE,
+						);
+						return res
+							.status(429)
+							.json({ ...payload, message: RATE_LIMIT_MESSAGE });
+					}
+
+					return next();
+				} catch (redisError) {
+					logError("Redis rate limiter failed, falling back to IP-based", redisError);
+					// Fall through to IP-based rate limiting
+				}
 			}
 
-			const ip = getClientIp(req) || "unknown";
-			const result = await limiter.limit(ip);
-
-			if (!result.success) {
+			// Fallback to IP-based rate limiting
+			const ipResult = ipBasedRateLimit(ip);
+			if (!ipResult.success) {
 				logEvent(
-					"Rate limit triggered",
+					"Rate limit triggered (IP-based fallback)",
 					`IP: ${ip}`,
 					`PATH: ${req.method} ${req.originalUrl}`,
 				);

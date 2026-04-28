@@ -11,11 +11,18 @@ const {
 	emitToRoom,
 	scheduleTransferCountdown,
 	bindSocketToRoom,
+	broadcastNewTransferToSubnet,
 } = require("../config/socket");
 const { generateUniqueCode } = require("../services/codeGenerator");
 const { generateQR } = require("../services/qrGenerator");
 const { analyzeTransfer } = require("../services/aiAnalyzer");
 const { rateLimitUpload } = require("../middleware/rateLimiter");
+const {
+	sanitizeRequestBody,
+	isValidPassword,
+	isValidExpiryMinutes,
+	sanitizeFilename: sanitizeFilenameValidator,
+} = require("../middleware/inputValidator");
 const {
 	getClientIp,
 	getDeviceName,
@@ -456,6 +463,7 @@ async function finalizeTransfer({
 
 	emitToRoom(code, "upload-complete", responsePayload);
 	scheduleTransferCountdown(code, expiresAt);
+	broadcastNewTransferToSubnet(code, senderIp);
 	logEvent("Upload complete", `CODE: ${code}`, formatSizeMB(totalSize));
 
 	// AI analysis still runs from the original incoming buffers/sniffs when supplied.
@@ -512,7 +520,7 @@ function fireAndForgetAi(code, aiInputFiles) {
 }
 
 // ── Streaming POST /api/upload ───────────────────────────────
-router.post("/", rateLimitUpload, async (req, res) => {
+router.post("/", rateLimitUpload, sanitizeRequestBody, async (req, res) => {
 	if (!isR2Configured) {
 		return res.status(503).json(buildErrorResponse(ERROR_CODES.SERVER_ERROR, "Storage is not configured"));
 	}
@@ -582,6 +590,16 @@ router.post("/", rateLimitUpload, async (req, res) => {
 		const passwordProtected = parseBooleanFlag(fields.passwordProtected);
 		const password = parsePassword(fields.password);
 		const expiryMinutes = parseExpiryMinutes(fields.expiryMinutes);
+		
+		// Validate only if password protection is enabled (skip unnecessary validation)
+		if (passwordProtected && password && !isValidPassword(password)) {
+			return res.status(400).json(buildErrorResponse(ERROR_CODES.INVALID_REQUEST, "Invalid password format"));
+		}
+		
+		// Validate only if expiry is provided (skip unnecessary validation)
+		if (expiryMinutes !== null && !isValidExpiryMinutes(expiryMinutes)) {
+			return res.status(400).json(buildErrorResponse(ERROR_CODES.INVALID_REQUEST, "Invalid expiry time"));
+		}
 
 		const fileEntries = files.map((f) => ({
 			originalName: f.originalName,
@@ -621,7 +639,7 @@ router.post("/", rateLimitUpload, async (req, res) => {
 });
 
 // ── Clipboard upload (small in-memory image) ──────────────────
-router.post("/clipboard", rateLimitUpload, async (req, res) => {
+router.post("/clipboard", rateLimitUpload, sanitizeRequestBody, async (req, res) => {
 	try {
 		logEvent("Clipboard upload", "REQUEST_RECEIVED");
 		const {

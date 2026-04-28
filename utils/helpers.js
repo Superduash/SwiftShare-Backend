@@ -35,23 +35,47 @@ function getClientIp(req) {
 
 function normalizeIp(ip) {
 	const raw = String(ip || "").trim();
+	
+	// Handle IPv6-mapped IPv4 addresses (::ffff:192.168.1.1 -> 192.168.1.1)
 	if (raw.startsWith("::ffff:")) {
 		return raw.replace("::ffff:", "");
 	}
+	
+	// Handle IPv6 localhost (::1 -> 127.0.0.1 for consistency)
+	if (raw === "::1") {
+		return "127.0.0.1";
+	}
+	
 	return raw;
 }
 
 function getSubnet(ip) {
 	const normalized = normalizeIp(ip);
+	
+	// Handle IPv6 addresses - return empty (not supported for nearby devices)
+	if (normalized.includes(":")) {
+		return "";
+	}
+	
+	// Handle IPv4
 	if (!normalized.includes(".")) {
 		return "";
 	}
 
 	const octets = normalized.split(".");
-	if (octets.length < 3) {
+	if (octets.length !== 4) {
 		return "";
 	}
+	
+	// Validate each octet is a number 0-255
+	for (const octet of octets) {
+		const num = Number(octet);
+		if (!Number.isFinite(num) || num < 0 || num > 255) {
+			return "";
+		}
+	}
 
+	// Return first 3 octets for /24 subnet
 	return `${octets[0]}.${octets[1]}.${octets[2]}`;
 }
 

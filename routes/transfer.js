@@ -10,6 +10,7 @@ const {
 } = require("../config/socket");
 const { validateCode } = require("../middleware/validateCode");
 const { rateLimitPassword } = require("../middleware/rateLimiter");
+const { sanitizeRequestBody, isValidPassword } = require("../middleware/inputValidator");
 const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
 const { logEvent } = require("../utils/logger");
 const {
@@ -82,7 +83,7 @@ function inferOriginalSessionMinutes(transfer) {
 	return Math.max(1, Math.round((expiresAtMs - createdAtMs) / MINUTE_MS));
 }
 
-router.post("/:code/verify-password", rateLimitPassword, validateCode, async (req, res, next) => {
+router.post("/:code/verify-password", rateLimitPassword, validateCode, sanitizeRequestBody, async (req, res, next) => {
 	try {
 		const { code } = req.params;
 		const transfer = await Transfer.findOne({ code });
@@ -112,6 +113,11 @@ router.post("/:code/verify-password", rateLimitPassword, validateCode, async (re
 		const password = extractPasswordFromRequest(req);
 		if (!password) {
 			return res.status(400).json(buildErrorResponse(ERROR_CODES.PASSWORD_REQUIRED));
+		}
+		
+		// Validate password format
+		if (!isValidPassword(password)) {
+			return res.status(400).json(buildErrorResponse(ERROR_CODES.INVALID_REQUEST, "Invalid password format"));
 		}
 
 		const isValidPassword = Boolean(
