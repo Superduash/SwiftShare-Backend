@@ -42,6 +42,12 @@ const uploadLimiter = createLimiter(30, "1 h", "swiftshare:rl:upload");
 const downloadLimiter = createLimiter(60, "1 h", "swiftshare:rl:download");
 const metadataLimiter = createLimiter(120, "1 h", "swiftshare:rl:metadata");
 const statsLimiter = createLimiter(30, "1 h", "swiftshare:rl:stats");
+// Text snippets: cheaper than file uploads, but still abuse-worthy. 60/h is
+// generous for legit users (paste a snippet every minute) while choking spam.
+const textShareLimiter = createLimiter(60, "1 h", "swiftshare:rl:text");
+// Password verification: separate per-IP cap stops credential stuffing across
+// many transfers in a short window. Per-transfer attempts are tracked elsewhere.
+const passwordLimiter = createLimiter(30, "10 m", "swiftshare:rl:password");
 const RATE_LIMIT_MESSAGE = "Rate limit active: You are sending files too quickly. Please wait a moment.";
 
 function createRateLimitMiddleware(limiter) {
@@ -90,5 +96,7 @@ module.exports = {
 	rateLimitDownload: createRateLimitMiddleware(downloadLimiter),
 	rateLimitMetadata: createRateLimitMiddleware(metadataLimiter),
 	rateLimitStats: createRateLimitMiddleware(statsLimiter),
+	rateLimitText: createRateLimitMiddleware(textShareLimiter),
+	rateLimitPassword: createRateLimitMiddleware(passwordLimiter),
 };
 

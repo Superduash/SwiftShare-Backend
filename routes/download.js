@@ -337,6 +337,9 @@ async function streamSingleFile(res, file, code) {
 	let processedBytes = 0;
 	let lastEmitAt = 0;
 	let lastEmittedPercent = -1;
+	let streamStartTime = Date.now();
+	let lastSpeedCalcAt = streamStartTime;
+	let lastSpeedCalcBytes = 0;
 
 	res.setHeader("Content-Type", file.mimeType || "application/octet-stream");
 	res.setHeader("Content-Disposition", `attachment; filename="${downloadName}"`);
@@ -353,13 +356,29 @@ async function streamSingleFile(res, file, code) {
 		processedBytes += chunk.length;
 		const percent = Math.min(100, Math.round((processedBytes / totalBytes) * 100));
 		const now = Date.now();
+		
+		// Calculate real-time speed (bytes per second)
+		let speed = 0;
+		const speedDt = (now - lastSpeedCalcAt) / 1000;
+		if (speedDt >= 0.5) { // Calculate speed every 500ms
+			const bytesDiff = processedBytes - lastSpeedCalcBytes;
+			speed = Math.round(bytesDiff / speedDt);
+			lastSpeedCalcAt = now;
+			lastSpeedCalcBytes = processedBytes;
+		}
+		
 		if (
 			percent !== lastEmittedPercent
 			&& (now - lastEmitAt >= DOWNLOAD_PROGRESS_EMIT_INTERVAL_MS || percent === 100)
 		) {
 			lastEmitAt = now;
 			lastEmittedPercent = percent;
-			emitToRoom(code, "download-progress", { percent });
+			emitToRoom(code, "download-progress", { 
+				percent,
+				speed,
+				loaded: processedBytes,
+				total: totalBytes
+			});
 		}
 	});
 
@@ -391,6 +410,9 @@ async function streamZip(res, code, files) {
 	let processedBytes = 0;
 	let lastEmitAt = 0;
 	let lastEmittedPercent = -1;
+	let streamStartTime = Date.now();
+	let lastSpeedCalcAt = streamStartTime;
+	let lastSpeedCalcBytes = 0;
 
 	await streamZipFromR2({
 		code,
@@ -404,13 +426,29 @@ async function streamZip(res, code, files) {
 			processedBytes += chunkLength;
 			const percent = Math.min(100, Math.round((processedBytes / totalBytes) * 100));
 			const now = Date.now();
+			
+			// Calculate real-time speed (bytes per second)
+			let speed = 0;
+			const speedDt = (now - lastSpeedCalcAt) / 1000;
+			if (speedDt >= 0.5) { // Calculate speed every 500ms
+				const bytesDiff = processedBytes - lastSpeedCalcBytes;
+				speed = Math.round(bytesDiff / speedDt);
+				lastSpeedCalcAt = now;
+				lastSpeedCalcBytes = processedBytes;
+			}
+			
 			if (
 				percent !== lastEmittedPercent
 				&& (now - lastEmitAt >= DOWNLOAD_PROGRESS_EMIT_INTERVAL_MS || percent === 100)
 			) {
 				lastEmitAt = now;
 				lastEmittedPercent = percent;
-				emitToRoom(code, "download-progress", { percent });
+				emitToRoom(code, "download-progress", { 
+					percent,
+					speed,
+					loaded: processedBytes,
+					total: totalBytes
+				});
 			}
 		},
 	});

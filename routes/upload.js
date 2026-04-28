@@ -696,3 +696,12 @@ router.post("/clipboard", rateLimitUpload, async (req, res) => {
 });
 
 module.exports = router;
+// Internal helpers exposed for sibling routes (e.g. /api/text/share) so we don't
+// duplicate ~80 lines of finalize + AI dispatch logic. Hung off the router function
+// because Express routers are JS functions and accept extra properties.
+module.exports.finalizeTransfer = finalizeTransfer;
+module.exports.fireAndForgetAi = fireAndForgetAi;
+module.exports.getMaxFileSizeBytes = getMaxFileSizeBytes;
+module.exports.parseExpiryMinutes = parseExpiryMinutes;
+module.exports.parseBooleanFlag = parseBooleanFlag;
+module.exports.parsePassword = parsePassword;

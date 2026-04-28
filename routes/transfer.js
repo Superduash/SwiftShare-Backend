@@ -9,6 +9,7 @@ const {
 	scheduleTransferCountdown,
 } = require("../config/socket");
 const { validateCode } = require("../middleware/validateCode");
+const { rateLimitPassword } = require("../middleware/rateLimiter");
 const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
 const { logEvent } = require("../utils/logger");
 const {
@@ -81,7 +82,7 @@ function inferOriginalSessionMinutes(transfer) {
 	return Math.max(1, Math.round((expiresAtMs - createdAtMs) / MINUTE_MS));
 }
 
-router.post("/:code/verify-password", validateCode, async (req, res, next) => {
+router.post("/:code/verify-password", rateLimitPassword, validateCode, async (req, res, next) => {
 	try {
 		const { code } = req.params;
 		const transfer = await Transfer.findOne({ code });

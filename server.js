@@ -27,6 +27,7 @@ const downloadRoutes = require("./routes/download");
 const transferRoutes = require("./routes/transfer");
 const nearbyRoutes = require("./routes/nearby");
 const statsRoutes = require("./routes/stats");
+const textRoutes = require("./routes/text");
 const { startCleanupJob } = require("./services/cleanupService");
 const { errorHandler } = require("./middleware/errorHandler");
 const { ERROR_CODES, buildErrorResponse } = require("./utils/constants");
@@ -256,6 +257,18 @@ app.use(cors({ origin: corsOrigin, maxAge: 86400 }));
 app.use(helmet({
 	crossOriginResourcePolicy: { policy: "cross-origin" },
 	crossOriginEmbedderPolicy: false,
+	// HSTS: tell browsers to refuse HTTP for one year, even if the user
+	// types http://. Only sent in production — local dev runs on plain http.
+	hsts: isProduction ? {
+		maxAge: 31536000,
+		includeSubDomains: true,
+		preload: false,
+	} : false,
+	// Frameguard at deny prevents the API host from being framed entirely.
+	// Preview routes opt out via `applyPreviewEmbedHeaders` so file previews
+	// can still be embedded in the SPA.
+	frameguard: { action: "deny" },
+	referrerPolicy: { policy: "no-referrer" },
 }));
 app.use(morgan((tokens, req, res) => {
 	const url = (req.originalUrl || "").split("?")[0]; // strip query params to prevent passwords leaking into logs
@@ -350,6 +363,7 @@ app.use("/api/download", downloadRoutes);
 app.use("/api/transfer", transferRoutes);
 app.use("/api/nearby", nearbyRoutes);
 app.use("/api/stats", statsRoutes);
+app.use("/api/text", textRoutes);
 
 function getMongoStatus() {
 	return mongoose.connection.readyState === 1 ? "connected" : "disconnected";
