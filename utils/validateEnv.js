@@ -31,10 +31,7 @@ function validateEnvOrExit() {
 
 	const missingOptional = OPTIONAL_ENV_VARS.filter((key) => !process.env[key]);
 	if (missingOptional.length > 0) {
-		logEvent("Optional environment variables not set (graceful mode)");
-		for (const key of missingOptional) {
-			logEvent("Missing optional env var", key);
-		}
+		logEvent("Optional env vars missing (graceful mode)", missingOptional.join(", "));
 	}
 }
 

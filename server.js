@@ -34,7 +34,7 @@ const textRoutes = require("./routes/text");
 const { startCleanupJob } = require("./services/cleanupService");
 const { errorHandler } = require("./middleware/errorHandler");
 const { ERROR_CODES, buildErrorResponse } = require("./utils/constants");
-const { logSuccess, logEvent, logError } = require("./utils/logger");
+const { logSuccess, logEvent, logWarn, logError } = require("./utils/logger");
 const { version } = require("./package.json");
 
 const app = express();
@@ -580,6 +580,10 @@ function printStartupStatus(port, host) {
 	logSuccess("Cleanup Job Running");
 	logSuccess(`Server Running on ${host}:${port}`);
 
+	const hasRedisConfig = Boolean(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN);
+	const hasGeminiConfig = Boolean(process.env.GEMINI_API_KEY);
+	const sentryEnabled = Boolean(process.env.SENTRY_DSN);
+
 	void connectMongoWithRetry().then((mongoConnected) => {
 		if (!mongoConnected) {
 			logError("MongoDB Failed", null);
@@ -592,10 +596,12 @@ function printStartupStatus(port, host) {
 		getRedisStatus(),
 		getR2Status(),
 	]).then(([redisStatus, r2Status]) => {
-		if (redisStatus === "connected") {
+		if (!hasRedisConfig) {
+			logEvent("Redis Optional Cache Disabled");
+		} else if (redisStatus === "connected") {
 			logSuccess("Redis Connected");
 		} else {
-			logError("Redis Failed", null);
+			logWarn("Redis Unavailable (optional)");
 		}
 
 		if (r2Status === "connected") {
@@ -608,15 +614,20 @@ function printStartupStatus(port, host) {
 	});
 
 	const geminiStatus = checkGeminiConnection() ? "connected" : "disconnected";
-	const sentryEnabled = Boolean(process.env.SENTRY_DSN);
 
-	if (geminiStatus === "connected") {
+	if (!hasGeminiConfig) {
+		logEvent("Gemini Optional AI Disabled");
+	} else if (geminiStatus === "connected") {
 		logSuccess("Gemini Connected");
 	} else {
-		logError("Gemini Failed", null);
+		logWarn("Gemini Unavailable (optional)");
 	}
 
-	logSuccess(`Sentry ${sentryEnabled ? "Enabled" : "Disabled"}`);
+	if (sentryEnabled) {
+		logSuccess("Sentry Enabled");
+	} else {
+		logEvent("Sentry Disabled");
+	}
 }
 
 function startServer() {
