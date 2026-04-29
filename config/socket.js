@@ -456,13 +456,7 @@ function initSocket(server) {
 
 	// Security: Track connection attempts per IP (optimized)
 	const connectionAttempts = new Map();
-	// Many home/mobile networks NAT multiple devices behind a single egress IP
-	// (phone + laptop + tablet share an IP, plus Socket.IO reconnects on transport
-	// hiccups). A 10/min ceiling produced false positives on phones where a parent
-	// device on the same NAT had already burned the budget — the phone got stuck
-	// on the "Waking up server" banner forever. 60/min still walls off abuse but
-	// tolerates real shared-network usage.
-	const MAX_CONNECTIONS_PER_IP = 60;
+	const MAX_CONNECTIONS_PER_IP = 10;
 	const CONNECTION_WINDOW_MS = 60 * 1000; // 1 minute
 	const MAX_CONNECTION_ENTRIES = 5000; // Prevent memory bloat
 
