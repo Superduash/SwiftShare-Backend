@@ -9,6 +9,7 @@ const cors = require("cors");
 const helmet = require("helmet");
 const morgan = require("morgan");
 const compression = require("compression");
+const crypto = require("crypto");
 const { validateEnvOrExit } = require("./utils/validateEnv");
 const { createTimingMiddleware, getPerformanceSnapshot } = require("./utils/performance");
 const { getCacheStats } = require("./utils/cache");
@@ -262,18 +263,25 @@ app.use(compression({
 	threshold: 1024, // Only compress responses > 1KB
 	level: 6, // Balance between speed and compression ratio (1-9, 6 is optimal)
 	filter: (req, res) => {
-		// Don't compress if client doesn't support it
 		if (req.headers['x-no-compression']) {
 			return false;
 		}
-		// Don't compress streaming responses (uploads/downloads handle their own compression)
-		if (res.getHeader('Content-Type')?.includes('application/octet-stream')) {
+		const ct = String(res.getHeader('Content-Type') || '');
+		// Skip already-compressed binary streams: gzipping a JPEG or MP4 burns CPU
+		// and often inflates the payload by a percent or two.
+		if (/^(application\/octet-stream|audio\/|video\/|image\/|application\/zip|application\/x-7z-compressed|application\/x-rar)/i.test(ct)) {
 			return false;
 		}
-		// Use compression's default filter for everything else
 		return compression.filter(req, res);
 	},
 }));
+
+app.use((req, res, next) => {
+	const requestId = crypto.randomUUID();
+	req.requestId = requestId;
+	res.setHeader("X-Request-ID", requestId);
+	next();
+});
 
 app.use(cors({ origin: corsOrigin, maxAge: 86400 }));
 app.use(helmet({
@@ -369,9 +377,11 @@ app.use(createTimingMiddleware());
 // NOTE: Response normalization is handled per-route. No global res.json override
 // to avoid interfering with streaming routes (download/preview use stream.pipe(res)).
 
-app.get("/debug-sentry", (req, res) => {
-	throw new Error("Sentry test error");
-});
+if (!isProduction) {
+	app.get("/debug-sentry", (req, res) => {
+		throw new Error("Sentry test error");
+	});
+}
 
 app.get("/api/ping", (req, res) => {
 	// CRITICAL FIX: Prevent double-send by explicitly ending response
@@ -538,7 +548,9 @@ async function restoreActiveCountdowns() {
 		const active = await Transfer.find({
 			isDeleted: false,
 			expiresAt: { $gt: new Date() },
-		}).lean();
+		}, { code: 1, expiresAt: 1 })
+			.limit(2000)
+			.lean();
 		for (const t of active) {
 			scheduleTransferCountdown(t.code, t.expiresAt);
 		}
@@ -719,7 +731,11 @@ startServer();
 const SELF_PING_URL = (process.env.RENDER_EXTERNAL_URL || process.env.BACKEND_URL || "").replace(/\/+$/, "");
 if (SELF_PING_URL && isProduction) {
 	setInterval(() => {
-		fetch(`${SELF_PING_URL}/api/ping`).catch(() => {});
+		const controller = new AbortController();
+		const timer = setTimeout(() => controller.abort(), 8000);
+		fetch(`${SELF_PING_URL}/api/ping`, { signal: controller.signal })
+			.catch(() => {})
+			.finally(() => clearTimeout(timer));
 	}, 10 * 60 * 1000);
 }
 

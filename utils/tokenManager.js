@@ -1,7 +1,10 @@
 const crypto = require("crypto");
 
-// Generate a secure secret key for token signing (use env var in production)
-const TOKEN_SECRET = process.env.TOKEN_SECRET || crypto.randomBytes(32).toString("hex");
+// Token signing secret must be set via TOKEN_SECRET env var
+const TOKEN_SECRET = process.env.TOKEN_SECRET;
+if (!TOKEN_SECRET) {
+	throw new Error("TOKEN_SECRET environment variable is required. Generate with: node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\"");
+}
 const TOKEN_EXPIRY_MS = 5 * 60 * 1000; // 5 minutes
 
 // Pre-create Buffer for performance (reuse instead of creating each time)

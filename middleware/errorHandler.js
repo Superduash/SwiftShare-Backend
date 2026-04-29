@@ -14,7 +14,11 @@ function errorHandler(err, req, res, next) {
 		logError("Unhandled request error", err, `${req.method} ${req.originalUrl}`);
 	}
 
-	res.status(status).json(buildErrorResponse(errorCode, message));
+	const response = buildErrorResponse(errorCode, message);
+	if (req.requestId) {
+		response.requestId = req.requestId;
+	}
+	res.status(status).json(response);
 }
 
 module.exports = {

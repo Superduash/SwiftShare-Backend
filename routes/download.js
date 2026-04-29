@@ -133,13 +133,23 @@ async function toBuffer(body) {
 
 function sanitizeDocxHtml(htmlValue) {
 	return String(htmlValue || "")
-		.replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, "")
-		.replace(/<style[\s\S]*?>[\s\S]*?<\/style>/gi, "")
-		.replace(/<iframe[\s\S]*?>[\s\S]*?<\/iframe>/gi, "")
-		.replace(/ on[a-z]+\s*=\s*"[^"]*"/gi, "")
-		.replace(/ on[a-z]+\s*=\s*'[^']*'/gi, "")
-		.replace(/\s(href|src)\s*=\s*"javascript:[^"]*"/gi, " $1=\"#\"")
-		.replace(/\s(href|src)\s*=\s*'javascript:[^']*'/gi, " $1='#'");
+		// Strip dangerous element blocks (open + content + close, and self-closing)
+		.replace(/<script\b[\s\S]*?<\/script>/gi, "")
+		.replace(/<style\b[\s\S]*?<\/style>/gi, "")
+		.replace(/<iframe\b[\s\S]*?<\/iframe>/gi, "")
+		.replace(/<object\b[\s\S]*?<\/object>/gi, "")
+		.replace(/<embed\b[^>]*\/?>/gi, "")
+		.replace(/<form\b[\s\S]*?<\/form>/gi, "")
+		.replace(/<svg\b[\s\S]*?<\/svg>/gi, "")
+		.replace(/<link\b[^>]*>/gi, "")
+		.replace(/<meta\b[^>]*>/gi, "")
+		// Strip event handlers (unquoted, single, double quoted)
+		.replace(/\s+on[a-z]+\s*=\s*"[^"]*"/gi, "")
+		.replace(/\s+on[a-z]+\s*=\s*'[^']*'/gi, "")
+		.replace(/\s+on[a-z]+\s*=\s*[^\s>]+/gi, "")
+		// Neutralize javascript:, data:, vbscript: URIs in href/src
+		.replace(/\s(href|src)\s*=\s*"\s*(?:javascript|data|vbscript):[^"]*"/gi, ' $1="#"')
+		.replace(/\s(href|src)\s*=\s*'\s*(?:javascript|data|vbscript):[^']*'/gi, " $1='#'");
 }
 
 function renderDocxPreviewDocument(fileName, bodyHtml) {

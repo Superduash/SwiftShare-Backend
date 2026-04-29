@@ -47,7 +47,10 @@ async function computeStats() {
 		]).allowDiskUse(true),
 		// distinct on senderIp can be expensive; cap with a recency window so
 		// it stays bounded even as the collection grows.
-		Transfer.distinct("senderIp", { senderIp: { $ne: "" } }),
+		Transfer.distinct("senderIp", { 
+			senderIp: { $ne: "" },
+			createdAt: { $gte: new Date(now - 30 * 24 * 60 * 60 * 1000) }
+		}),
 		Transfer.aggregate([
 			{
 				$project: {

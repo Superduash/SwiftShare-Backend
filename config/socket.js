@@ -335,8 +335,8 @@ function getSocketIp(socket) {
 
 async function emitNearbyDevices(socket) {
 	try {
-		const clientIp = getSocketIp(socket);
-		const subnet = getSubnet(clientIp);
+		const subnet = socket.data.subnet;
+		const clientIp = socket.data.clientIp;
 
 		logEvent("Nearby devices request", `SOCKET: ${socket.id}`, `IP: ${clientIp}`, `SUBNET: ${subnet || "INVALID"}`);
 
@@ -349,25 +349,29 @@ async function emitNearbyDevices(socket) {
 
 		const now = new Date();
 		
-		// Find active transfers on same subnet
+		// NEW approach: Get all active transfers
+		// Filter by those whose senderSocketId is in the connected subnet room
 		const candidates = await Transfer.find({
 			isDeleted: false,
 			expiresAt: { $gt: now },
 			senderSocketId: { $exists: true, $ne: "" },
-			senderIp: { $regex: `^${subnet.replace(/\./g, "\\.")}\\.` },
 		})
-			.select('code fileCount files totalSize ai.category senderDeviceName expiresAt senderSocketId senderIp')
+			.select('code fileCount files totalSize ai.category senderDeviceName expiresAt senderSocketId')
 			.sort({ createdAt: -1 })
-			.limit(20)
+			.limit(50)
 			.lean();
 
-		logEvent("Nearby devices - DB query", `SOCKET: ${socket.id}`, `SUBNET: ${subnet}`, `FOUND: ${candidates.length}`);
+		// Get all connected socket IDs in the subnet room
+		const subnetRoom = `subnet:${subnet}`;
+		const socketsInSubnet = ioInstance
+			? new Set((await ioInstance.in(subnetRoom).fetchSockets()).map(s => s.id))
+			: new Set();
 
-		// Get all connected socket IDs for validation
-		const connectedSockets = ioInstance ? new Set(Array.from(ioInstance.sockets.sockets.keys())) : new Set();
+		logEvent("Nearby devices - subnet room query", `SOCKET: ${socket.id}`, `SUBNET: ${subnet}`, `SOCKETS_IN_ROOM: ${socketsInSubnet.size}`);
 
-		// Filter and format devices
+		// Filter candidates whose senderSocketId is in the subnet room
 		const devices = candidates
+			.filter(transfer => socketsInSubnet.has(transfer.senderSocketId))
 			.map((transfer) => ({
 				code: transfer.code,
 				fileCount: Number(transfer.fileCount || transfer.files?.length || 0),
@@ -376,7 +380,6 @@ async function emitNearbyDevices(socket) {
 				deviceName: transfer.senderDeviceName || "Unknown Device",
 				expiresAt: transfer.expiresAt,
 				socketId: String(transfer.senderSocketId || ""),
-				senderIp: transfer.senderIp,
 			}))
 			.filter((device) => {
 				// Exclude self
@@ -384,24 +387,6 @@ async function emitNearbyDevices(socket) {
 					logEvent("Nearby devices - filtered self", `CODE: ${device.code}`, `SOCKET: ${device.socketId}`);
 					return false;
 				}
-				
-				// Only include devices with valid socket IDs
-				if (!device.socketId) {
-					logEvent("Nearby devices - filtered no socket", `CODE: ${device.code}`);
-					return false;
-				}
-				
-				// Verify socket is still connected (stale device cleanup)
-				if (!connectedSockets.has(device.socketId)) {
-					logEvent("Nearby devices - filtered stale socket", `CODE: ${device.code}`, `SOCKET: ${device.socketId}`);
-					// Async cleanup: clear stale socket ID from database
-					Transfer.updateOne(
-						{ code: device.code },
-						{ $set: { senderSocketId: "" } }
-					).catch((err) => logError("Failed to clear stale socket", err, `CODE: ${device.code}`));
-					return false;
-				}
-				
 				return true;
 			});
 
@@ -558,6 +543,18 @@ function initSocket(server) {
 	}, 5 * 60 * 1000).unref(); // unref to not block process exit
 
 	ioInstance.on("connection", (socket) => {
+		// Store client IP and subnet for this connection
+		const clientIp = getSocketIp(socket);
+		const subnet = getSubnet(clientIp);
+		socket.data.clientIp = clientIp;
+		socket.data.subnet = subnet || null;
+		
+		// Auto-join subnet room if valid subnet exists
+		if (subnet) {
+			socket.join(`subnet:${subnet}`);
+			logEvent("Socket subnet room joined", `SOCKET: ${socket.id}`, `IP: ${clientIp}`, `SUBNET: ${subnet}`);
+		}
+		
 		// Suppress ECONNRESET/EPIPE errors from abrupt client disconnects —
 		// these are normal on mobile networks and don't indicate a bug.
 		socket.on("error", (err) => {
@@ -679,6 +676,14 @@ function initSocket(server) {
 				code: normalizedCode || null,
 			});
 
+			// Throttle nearby-device re-queries so socket pings do not spam MongoDB.
+			const now = Date.now();
+			const lastQuery = socket.data.lastNearbyQuery || 0;
+			if (now - lastQuery < 4000) {
+				return;
+			}
+			socket.data.lastNearbyQuery = now;
+
 			// Then emit nearby devices
 			try {
 				await emitNearbyDevices(socket);
@@ -752,11 +757,12 @@ async function broadcastNewTransferToSubnet(transferCode, senderIp) {
 			socketId: String(transfer.senderSocketId || ""),
 		};
 		
-		// Broadcast to all connected sockets
-		// Each client will filter based on their own subnet
-		ioInstance.emit("nearby-device-added", { device: deviceInfo, subnet });
+		// FIXED: Emit ONLY to sockets in the same subnet room
+		// No client-side filtering needed anymore
+		const subnetRoom = `subnet:${subnet}`;
+		ioInstance.to(subnetRoom).emit("nearby-device-added", { device: deviceInfo });
 		
-		logEvent("Broadcast new transfer", `CODE: ${transferCode}`, `SUBNET: ${subnet}`);
+		logEvent("Broadcast new transfer", `CODE: ${transferCode}`, `SUBNET: ${subnet}`, `ROOM: ${subnetRoom}`);
 	} catch (error) {
 		logError("Failed to broadcast new transfer", error, `CODE: ${transferCode}`);
 	}

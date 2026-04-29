@@ -1,4 +1,5 @@
 ﻿const mongoose = require("mongoose");
+const { logEvent, logError } = require("../utils/logger");
 
 // Dynamic pool sizing based on environment
 function getPoolConfig() {
@@ -42,7 +43,7 @@ async function connectDB() {
 		serverSelectionTimeoutMS: 15000,
 		socketTimeoutMS: 45000,
 		// Prevent buffering queries when disconnected (fail fast instead of OOM)
-		bufferCommands: true,
+		bufferCommands: false,
 		maxIdleTimeMS: 30000,
 		// Connection monitoring
 		heartbeatFrequencyMS: 10000, // Check connection health every 10s
@@ -52,15 +53,15 @@ async function connectDB() {
 	
 	// Connection event handlers for monitoring
 	mongoose.connection.on('connected', () => {
-		console.log('MongoDB connected successfully');
+		logEvent('MongoDB connected successfully');
 	});
 	
 	mongoose.connection.on('error', (err) => {
-		console.error('MongoDB connection error:', err);
+		logError('MongoDB connection error', err);
 	});
 	
 	mongoose.connection.on('disconnected', () => {
-		console.log('MongoDB disconnected');
+		logEvent('MongoDB disconnected');
 	});
 	
 	return mongoose.connection;

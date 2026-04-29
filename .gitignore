@@ -1,5 +1,6 @@
 ﻿# Dependencies
 node_modules/
+jspm_packages/
 
 # Secrets / local env
 .env
@@ -16,6 +17,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+lerna-debug.log*
 
 # Build / coverage / runtime artifacts
 coverage/
@@ -23,6 +25,7 @@ coverage/
 dist/
 build/
 .cache/
+.parcel-cache/
 .tmp*/
 tmp/
 temp/
@@ -30,13 +33,31 @@ temp/
 # Local deploy/tooling state
 .render/
 .vercel/
+.serverless/
 
-# OS/editor junk
+# OS / editor junk
 .DS_Store
 Thumbs.db
+ehthumbs.db
+Desktop.ini
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
 
 # Project-local generated files
 backendcode.txt
 swiftshare-fix-prompt.md
+exportback.py
+*.local
+
+# Sentry / instrumentation locals
+.sentryclirc
+
+# Node version manager helper (.nvmrc is committed; .nvm runtime cache is not)
+.nvm/
+
+# Lockfile backups
+package-lock.json.bak
+yarn.lock.bak

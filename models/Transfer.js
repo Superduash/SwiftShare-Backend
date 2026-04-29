@@ -201,13 +201,11 @@ transferSchema.virtual("status").get(function () {
 	return "ACTIVE";
 });
 
-transferSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+// Recency sort for stats / sender-page recents.
 transferSchema.index({ createdAt: -1 });
-transferSchema.index({ senderIp: 1 });
 
 // Optimizes the nearby-devices query (senderIp prefix + active filter + recency sort).
-// Without this, every nearby ping does a collection scan filtered by regex — fine at
-// 1000 docs, brutal at 100k. Compound order matches the common predicate.
+// Compound order matches the common predicate.
 transferSchema.index(
 	{ isDeleted: 1, expiresAt: 1, senderIp: 1, createdAt: -1 },
 	{ name: "nearby_active_by_subnet" },
@@ -223,6 +221,21 @@ transferSchema.index(
 transferSchema.index(
 	{ burnAfterDownload: 1, isDeleted: 1, burnLastActiveAt: 1 },
 	{ name: "cleanup_stale_burn", sparse: true },
+);
+
+// Optimizes stale socket cleanup (finds transfers with specific senderSocketId)
+transferSchema.index({ senderSocketId: 1 }, { sparse: true });
+
+// Optimizes stats distinct query with recency window. Also serves bare-senderIp lookups,
+// so no separate { senderIp: 1 } index is needed.
+transferSchema.index({ senderIp: 1, createdAt: 1 });
+
+// TTL safety net: MongoDB auto-deletes documents 24 hours after expiresAt.
+// Gives the cleanup job time to delete R2 files first; do NOT use expireAfterSeconds: 0
+// (which would delete immediately on expiry and orphan R2 objects).
+transferSchema.index(
+	{ expiresAt: 1 },
+	{ expireAfterSeconds: 86400, name: "ttl_post_expiry_safety_net" },
 );
 
 // Disable Mongoose's autoIndex in production: index builds at app start can stall
