@@ -2,6 +2,7 @@
 require("dotenv").config({ quiet: true });
 
 const http = require("http");
+const crypto = require("crypto");
 const Sentry = require("@sentry/node");
 const express = require("express");
 const mongoose = require("mongoose");
@@ -9,7 +10,6 @@ const cors = require("cors");
 const helmet = require("helmet");
 const morgan = require("morgan");
 const compression = require("compression");
-const crypto = require("crypto");
 const { validateEnvOrExit } = require("./utils/validateEnv");
 const { createTimingMiddleware, getPerformanceSnapshot } = require("./utils/performance");
 const { getCacheStats } = require("./utils/cache");
@@ -19,10 +19,7 @@ validateEnvOrExit();
 const { connectDB } = require("./config/db");
 const { checkRedisConnection } = require("./config/redis");
 const { checkR2Connection } = require("./config/r2");
-const {
-	checkGeminiConnection,
-	checkGeminiConnectionLive,
-} = require("./config/gemini");
+const { checkGeminiConnection, checkGeminiConnectionLive } = require("./config/gemini");
 const { initSocket, scheduleTransferCountdown } = require("./config/socket");
 const Transfer = require("./models/Transfer");
 const uploadRoutes = require("./routes/upload");
@@ -42,65 +39,29 @@ const app = express();
 const server = http.createServer(app);
 const isProduction = String(process.env.NODE_ENV || "").toLowerCase() === "production";
 const allowAllOrigins = String(process.env.CORS_ALLOW_ALL_ORIGINS || "").toLowerCase() === "true";
-const HEALTH_CACHE_TTL_MS = Number(process.env.HEALTH_CACHE_TTL_MS) > 0
-	? Number(process.env.HEALTH_CACHE_TTL_MS)
-	: 15_000;
-const HEALTH_CHECK_TIMEOUT_MS = Number(process.env.HEALTH_CHECK_TIMEOUT_MS) > 0
-	? Number(process.env.HEALTH_CHECK_TIMEOUT_MS)
-	: 4_000;
+const HEALTH_CACHE_TTL_MS = Number(process.env.HEALTH_CACHE_TTL_MS) > 0 ? Number(process.env.HEALTH_CACHE_TTL_MS) : 15_000;
+const HEALTH_CHECK_TIMEOUT_MS = Number(process.env.HEALTH_CHECK_TIMEOUT_MS) > 0 ? Number(process.env.HEALTH_CHECK_TIMEOUT_MS) : 4_000;
 
-let healthCache = {
-	expiresAt: 0,
-	payload: null,
-};
+let healthCache = { expiresAt: 0, payload: null };
 
-function getAllowedFrontendOrigins() {
-	const configured = `${String(process.env.FRONTEND_URL || "")},${String(process.env.CORS_EXTRA_ORIGINS || "")}`;
-
-	return configured
-		.split(",")
-		.map((origin) => normalizeConfiguredOrigin(origin))
-		.filter(Boolean);
-}
+// ── CORS helpers ──────────────────────────────────────────────────────────────
 
 function normalizeConfiguredOrigin(origin) {
 	const trimmed = String(origin || "").trim();
-	if (!trimmed) {
-		return "";
-	}
-
-	if (trimmed === "*") {
-		return "*";
-	}
-
-	if (/^(https?:\/\/)?\*\./i.test(trimmed)) {
-		return trimmed.replace(/\/+$/, "").toLowerCase();
-	}
-
-	const withProtocol = /^[a-z]+:\/\//i.test(trimmed)
-		? trimmed
-		: `https://${trimmed}`;
-
+	if (!trimmed) return "";
+	if (trimmed === "*") return "*";
+	if (/^(https?:\/\/)?\*\./i.test(trimmed)) return trimmed.replace(/\/+$/, "").toLowerCase();
+	const withProtocol = /^[a-z]+:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
 	return withProtocol.replace(/\/+$/, "").toLowerCase();
 }
 
 function parseOrigin(origin) {
-	try {
-		return new URL(origin);
-	} catch {
-		return null;
-	}
+	try { return new URL(origin); } catch { return null; }
 }
 
 function getOriginPort(parsed) {
-	if (!parsed) {
-		return "";
-	}
-
-	if (parsed.port) {
-		return parsed.port;
-	}
-
+	if (!parsed) return "";
+	if (parsed.port) return parsed.port;
 	return parsed.protocol === "https:" ? "443" : "80";
 }
 
@@ -109,93 +70,52 @@ function isLoopbackHost(hostname) {
 }
 
 function isPrivateNetworkHost(hostname) {
-	if (!hostname) {
-		return false;
-	}
-
-	if (/^10\./.test(hostname)) {
-		return true;
-	}
-
-	if (/^192\.168\./.test(hostname)) {
-		return true;
-	}
-
+	if (!hostname) return false;
+	if (/^10\./.test(hostname)) return true;
+	if (/^192\.168\./.test(hostname)) return true;
 	const match172 = /^172\.(\d{1,3})\./.exec(hostname);
 	if (match172) {
 		const second = Number(match172[1]);
 		return Number.isFinite(second) && second >= 16 && second <= 31;
 	}
-
 	return false;
 }
 
 function isDevOriginAllowed(origin) {
 	const parsed = parseOrigin(origin);
-	if (!parsed) {
-		return false;
-	}
-
+	if (!parsed) return false;
 	return isLoopbackHost(parsed.hostname) || isPrivateNetworkHost(parsed.hostname);
 }
 
 function originsMatch(requestOrigin, configuredOrigin) {
-	if (configuredOrigin === "*") {
-		return true;
-	}
-
+	if (configuredOrigin === "*") return true;
 	const wildcardMatch = String(configuredOrigin || "").match(/^(https?:\/\/)?\*\.([^/:]+)$/i);
 	if (wildcardMatch) {
 		const reqParsed = parseOrigin(requestOrigin);
-		if (!reqParsed) {
-			return false;
-		}
-
+		if (!reqParsed) return false;
 		const requiredProtocol = wildcardMatch[1] ? wildcardMatch[1].toLowerCase() : "";
-		if (requiredProtocol && reqParsed.protocol !== requiredProtocol) {
-			return false;
-		}
-
+		if (requiredProtocol && reqParsed.protocol !== requiredProtocol) return false;
 		const suffix = String(wildcardMatch[2] || "").toLowerCase();
 		const hostname = String(reqParsed.hostname || "").toLowerCase();
 		return hostname === suffix || hostname.endsWith(`.${suffix}`);
 	}
-
 	const reqParsed = parseOrigin(requestOrigin);
 	const cfgParsed = parseOrigin(configuredOrigin);
-	if (!reqParsed || !cfgParsed) {
-		return normalizeConfiguredOrigin(requestOrigin) === normalizeConfiguredOrigin(configuredOrigin);
-	}
-
-	if (reqParsed.protocol !== cfgParsed.protocol) {
-		return false;
-	}
-
-	if (getOriginPort(reqParsed) !== getOriginPort(cfgParsed)) {
-		return false;
-	}
-
-	if (reqParsed.hostname === cfgParsed.hostname) {
-		return true;
-	}
-
+	if (!reqParsed || !cfgParsed) return normalizeConfiguredOrigin(requestOrigin) === normalizeConfiguredOrigin(configuredOrigin);
+	if (reqParsed.protocol !== cfgParsed.protocol) return false;
+	if (getOriginPort(reqParsed) !== getOriginPort(cfgParsed)) return false;
+	if (reqParsed.hostname === cfgParsed.hostname) return true;
 	return isLoopbackHost(reqParsed.hostname) && isLoopbackHost(cfgParsed.hostname);
+}
+
+function getAllowedFrontendOrigins() {
+	const configured = `${String(process.env.FRONTEND_URL || "")},${String(process.env.CORS_EXTRA_ORIGINS || "")}`;
+	return configured.split(",").map((o) => normalizeConfiguredOrigin(o)).filter(Boolean);
 }
 
 const allowedFrontendOrigins = getAllowedFrontendOrigins();
 
-// Hosting platforms (Vercel, Netlify, Render, Cloudflare Pages, Firebase
-// Hosting) issue per-branch preview URLs on a shared TLD. If FRONTEND_URL is
-// on one of these platforms, automatically accept any sibling subdomain so
-// preview/staging deploys and custom-domain aliases don't get CORS-blocked.
-const PREVIEW_PLATFORM_SUFFIXES = [
-	"vercel.app",
-	"netlify.app",
-	"onrender.com",
-	"pages.dev",
-	"web.app",
-	"firebaseapp.com",
-];
+const PREVIEW_PLATFORM_SUFFIXES = ["vercel.app", "netlify.app", "onrender.com", "pages.dev", "web.app", "firebaseapp.com"];
 
 function hostnameOf(origin) {
 	const parsed = parseOrigin(origin);
@@ -204,107 +124,67 @@ function hostnameOf(origin) {
 
 function isPreviewDeployOrigin(requestOrigin) {
 	const reqHost = hostnameOf(requestOrigin);
-	if (!reqHost) {
-		return false;
-	}
-
+	if (!reqHost) return false;
 	for (const configured of allowedFrontendOrigins) {
 		const cfgHost = hostnameOf(configured);
-		if (!cfgHost) {
-			continue;
-		}
-
+		if (!cfgHost) continue;
 		for (const suffix of PREVIEW_PLATFORM_SUFFIXES) {
 			const isCfgOnSuffix = cfgHost === suffix || cfgHost.endsWith(`.${suffix}`);
 			const isReqOnSuffix = reqHost === suffix || reqHost.endsWith(`.${suffix}`);
-			if (isCfgOnSuffix && isReqOnSuffix) {
-				return true;
-			}
+			if (isCfgOnSuffix && isReqOnSuffix) return true;
 		}
 	}
-
 	return false;
 }
 
 function corsOrigin(origin, callback) {
-	if (!origin) {
-		callback(null, true);
-		return;
-	}
-
-	if (allowAllOrigins) {
-		callback(null, true);
-		return;
-	}
-
-	if (!isProduction && isDevOriginAllowed(origin)) {
-		callback(null, true);
-		return;
-	}
-
+	if (!origin) { callback(null, true); return; }
+	if (allowAllOrigins) { callback(null, true); return; }
+	if (!isProduction && isDevOriginAllowed(origin)) { callback(null, true); return; }
 	if (
 		allowedFrontendOrigins.length === 0
-		|| allowedFrontendOrigins.some((configuredOrigin) => originsMatch(origin, configuredOrigin))
+		|| allowedFrontendOrigins.some((o) => originsMatch(origin, o))
 		|| isPreviewDeployOrigin(origin)
-	) {
-		callback(null, true);
-		return;
-	}
-
+	) { callback(null, true); return; }
 	logEvent("Blocked HTTP CORS origin", `ORIGIN: ${origin}`);
 	callback(null, false);
 }
 
+// ── Middleware stack ──────────────────────────────────────────────────────────
+
 app.set("trust proxy", 1);
 
-// Response compression - reduces bandwidth by 60-80% for JSON/text responses
-// Only compress responses > 1KB to avoid overhead on small payloads
 app.use(compression({
-	threshold: 1024, // Only compress responses > 1KB
-	level: 6, // Balance between speed and compression ratio (1-9, 6 is optimal)
+	threshold: 1024,
+	level: 6,
 	filter: (req, res) => {
-		if (req.headers['x-no-compression']) {
-			return false;
-		}
-		const ct = String(res.getHeader('Content-Type') || '');
-		// Skip already-compressed binary streams: gzipping a JPEG or MP4 burns CPU
-		// and often inflates the payload by a percent or two.
-		if (/^(application\/octet-stream|audio\/|video\/|image\/|application\/zip|application\/x-7z-compressed|application\/x-rar)/i.test(ct)) {
-			return false;
-		}
+		if (req.headers["x-no-compression"]) return false;
+		const ct = String(res.getHeader("Content-Type") || "");
+		if (/^(application\/octet-stream|audio\/|video\/|image\/|application\/zip)/i.test(ct)) return false;
 		return compression.filter(req, res);
 	},
 }));
 
+// Attach a unique request ID to every request for log correlation
 app.use((req, res, next) => {
-	const requestId = crypto.randomUUID();
-	req.requestId = requestId;
-	res.setHeader("X-Request-ID", requestId);
+	req.requestId = crypto.randomUUID();
+	res.setHeader("X-Request-ID", req.requestId);
 	next();
 });
 
 app.use(cors({ origin: corsOrigin, maxAge: 86400 }));
+
 app.use(helmet({
 	crossOriginResourcePolicy: { policy: "cross-origin" },
 	crossOriginEmbedderPolicy: false,
-	// HSTS: tell browsers to refuse HTTP for one year, even if the user
-	// types http://. Only sent in production — local dev runs on plain http.
-	hsts: isProduction ? {
-		maxAge: 31536000,
-		includeSubDomains: true,
-		preload: false,
-	} : false,
-	// Frameguard at deny prevents the API host from being framed entirely.
-	// Preview routes opt out via `applyPreviewEmbedHeaders` so file previews
-	// can still be embedded in the SPA.
+	hsts: isProduction ? { maxAge: 31536000, includeSubDomains: true, preload: false } : false,
 	frameguard: { action: "deny" },
 	referrerPolicy: { policy: "no-referrer" },
-	// Content Security Policy - prevents XSS attacks
 	contentSecurityPolicy: isProduction ? {
 		directives: {
 			defaultSrc: ["'self'"],
 			scriptSrc: ["'self'"],
-			styleSrc: ["'self'", "'unsafe-inline'"], // Allow inline styles for dynamic UI
+			styleSrc: ["'self'", "'unsafe-inline'"],
 			imgSrc: ["'self'", "data:", "https:"],
 			connectSrc: ["'self'"],
 			fontSrc: ["'self'"],
@@ -313,34 +193,22 @@ app.use(helmet({
 			frameSrc: ["'none'"],
 		},
 	} : false,
-	// Prevent MIME type sniffing
 	noSniff: true,
-	// Prevent DNS prefetching
 	dnsPrefetchControl: { allow: false },
-	// Hide X-Powered-By header
 	hidePoweredBy: true,
-	// Prevent IE from executing downloads in site's context
 	ieNoOpen: true,
-	// Prevent clickjacking
 	xssFilter: true,
 }));
+
 app.use(morgan((tokens, req, res) => {
-	const url = (req.originalUrl || "").split("?")[0]; // strip query params to prevent passwords leaking into logs
-	return [
-		tokens.method(req, res),
-		url,
-		tokens.status(req, res),
-		tokens["response-time"](req, res), "ms",
-	].join(" ");
+	const url = (req.originalUrl || "").split("?")[0];
+	return [tokens.method(req, res), url, tokens.status(req, res), tokens["response-time"](req, res), "ms"].join(" ");
 }));
-// 12mb covers the worst case for /api/upload/clipboard, which receives a base64
-// data URL of a pasted screenshot. Base64 inflates by ~33%, so a 6mb payload
-// would block ~4.5mb screenshots — common on hi-DPI mobile cameras. Multipart
-// uploads to /api/upload bypass this entirely (handled by the streaming route).
+
 app.use(express.json({ limit: "12mb" }));
 
+// Per-request timeout — upload/download routes get a longer window
 app.use((req, res, next) => {
-	// Upload/download routes need longer timeout on constrained hardware (Render 0.1 CPU)
 	const isUploadOrDownload = /^\/(api\/(upload|download))/i.test(req.path);
 	const defaultUploadTimeoutMs = process.env.RENDER ? 180000 : 120000;
 	const defaultRequestTimeoutMs = process.env.RENDER ? 90000 : 60000;
@@ -353,15 +221,10 @@ app.use((req, res, next) => {
 	const timeoutMs = isUploadOrDownload ? uploadTimeoutMs : requestTimeoutMs;
 
 	req.setTimeout(timeoutMs, () => {
-		// CRITICAL FIX: Check if response was already sent before sending timeout error
 		if (!res.headersSent) {
 			try {
-				res
-					.status(408)
-					.json(buildErrorResponse(ERROR_CODES.REQUEST_TIMEOUT, "Request timed out"));
-			} catch (err) {
-				// Silently ignore if headers were already sent (race condition)
-			}
+				res.status(408).json(buildErrorResponse(ERROR_CODES.REQUEST_TIMEOUT, "Request timed out"));
+			} catch (_) { /* race condition — headers already sent */ }
 		}
 	});
 
@@ -371,47 +234,26 @@ app.use((req, res, next) => {
 const sentryRequestHandler = Sentry.Handlers?.requestHandler?.();
 app.use(sentryRequestHandler || ((req, res, next) => next()));
 
-// Performance timing middleware - adds X-Response-Time header
 app.use(createTimingMiddleware());
 
-// NOTE: Response normalization is handled per-route. No global res.json override
-// to avoid interfering with streaming routes (download/preview use stream.pipe(res)).
-
-if (!isProduction) {
-	app.get("/debug-sentry", (req, res) => {
-		throw new Error("Sentry test error");
-	});
-}
+// ── Routes ────────────────────────────────────────────────────────────────────
 
 app.get("/api/ping", (req, res) => {
-	// CRITICAL FIX: Prevent double-send by explicitly ending response
-	if (res.headersSent) {
-		return;
-	}
+	if (res.headersSent) return;
 	res.status(200).json({ pong: true });
 });
 
-// Performance metrics endpoint (for monitoring/debugging)
 app.get("/api/metrics", (req, res) => {
+	if (res.headersSent) return;
 	try {
-		// CRITICAL FIX: Check if headers already sent
-		if (res.headersSent) {
-			return;
-		}
-
-		const snapshot = getPerformanceSnapshot();
-		const cacheStats = getCacheStats();
-		
 		res.status(200).json({
-			performance: snapshot,
-			cache: cacheStats,
+			performance: getPerformanceSnapshot(),
+			cache: getCacheStats(),
 			timestamp: Date.now(),
 		});
 	} catch (error) {
 		logError("Metrics endpoint failed", error);
-		if (!res.headersSent) {
-			res.status(500).json({ error: "Failed to collect metrics" });
-		}
+		if (!res.headersSent) res.status(500).json({ error: "Failed to collect metrics" });
 	}
 });
 
@@ -422,6 +264,8 @@ app.use("/api/transfer", transferRoutes);
 app.use("/api/nearby", nearbyRoutes);
 app.use("/api/stats", statsRoutes);
 app.use("/api/text", textRoutes);
+
+// ── Health check ──────────────────────────────────────────────────────────────
 
 function getMongoStatus() {
 	return mongoose.connection.readyState === 1 ? "connected" : "disconnected";
@@ -444,93 +288,53 @@ async function withTimeout(promise, timeoutMs, fallbackValue) {
 	try {
 		return await Promise.race([
 			promise,
-			new Promise((resolve) => {
-				timerId = setTimeout(() => resolve(fallbackValue), timeoutMs);
-			}),
+			new Promise((resolve) => { timerId = setTimeout(() => resolve(fallbackValue), timeoutMs); }),
 		]);
 	} finally {
-		if (timerId) {
-			clearTimeout(timerId);
-		}
+		if (timerId) clearTimeout(timerId);
 	}
 }
 
 function formatUptimeHuman(totalSeconds) {
-	const safeSeconds = Math.max(0, Math.floor(totalSeconds));
-	const hours = Math.floor(safeSeconds / 3600);
-	const minutes = Math.floor((safeSeconds % 3600) / 60);
-	const seconds = safeSeconds % 60;
-
-	if (hours > 0) {
-		return `${hours}h ${minutes}m`;
-	}
-
-	if (minutes > 0) {
-		return `${minutes}m ${seconds}s`;
-	}
-
-	return `${seconds}s`;
+	const s = Math.max(0, Math.floor(totalSeconds));
+	const h = Math.floor(s / 3600);
+	const m = Math.floor((s % 3600) / 60);
+	const sec = s % 60;
+	if (h > 0) return `${h}h ${m}m`;
+	if (m > 0) return `${m}m ${sec}s`;
+	return `${sec}s`;
 }
 
 app.get("/api/health", async (req, res) => {
 	try {
-		// CRITICAL FIX: Check if headers already sent
-		if (res.headersSent) {
-			return;
-		}
-
+		if (res.headersSent) return;
 		if (healthCache.payload && healthCache.expiresAt > Date.now()) {
 			return res.json(healthCache.payload);
 		}
-
 		const now = new Date();
 		const [redisStatus, r2Status, geminiStatus, activeTransfers] = await Promise.all([
 			withTimeout(getRedisStatus(), HEALTH_CHECK_TIMEOUT_MS, "disconnected"),
 			withTimeout(getR2Status(), HEALTH_CHECK_TIMEOUT_MS, "disconnected"),
 			withTimeout(getGeminiStatus(), HEALTH_CHECK_TIMEOUT_MS, "disconnected"),
-			withTimeout(
-				Transfer.countDocuments({ isDeleted: false, expiresAt: { $gt: now } }),
-				HEALTH_CHECK_TIMEOUT_MS,
-				0,
-			),
+			withTimeout(Transfer.countDocuments({ isDeleted: false, expiresAt: { $gt: now } }), HEALTH_CHECK_TIMEOUT_MS, 0),
 		]);
 		const uptime = process.uptime();
 		const payload = {
-			status: "ok",
-			version,
-			uptime,
+			status: "ok", version, uptime,
 			uptimeHuman: formatUptimeHuman(uptime),
-			mongodb: getMongoStatus(),
-			redis: redisStatus,
-			r2: r2Status,
-			gemini: geminiStatus,
-			activeTransfers,
-			timestamp: Date.now(),
+			mongodb: getMongoStatus(), redis: redisStatus, r2: r2Status, gemini: geminiStatus,
+			activeTransfers, timestamp: Date.now(),
 		};
-
-		healthCache = {
-			expiresAt: Date.now() + HEALTH_CACHE_TTL_MS,
-			payload,
-		};
-
+		healthCache = { expiresAt: Date.now() + HEALTH_CACHE_TTL_MS, payload };
 		return res.json(payload);
 	} catch (error) {
 		logError("Health check failed", error);
-		// CRITICAL FIX: Check before sending fallback response
-		if (res.headersSent) {
-			return;
-		}
+		if (res.headersSent) return;
 		return res.status(200).json({
-			status: "ok",
-			version,
-			uptime: process.uptime(),
+			status: "ok", version, uptime: process.uptime(),
 			uptimeHuman: formatUptimeHuman(process.uptime()),
-			mongodb: getMongoStatus(),
-			redis: "disconnected",
-			r2: "disconnected",
-			gemini: "disconnected",
-			activeTransfers: 0,
-			timestamp: Date.now(),
+			mongodb: getMongoStatus(), redis: "disconnected", r2: "disconnected",
+			gemini: "disconnected", activeTransfers: 0, timestamp: Date.now(),
 		});
 	}
 });
@@ -540,20 +344,17 @@ app.use((req, res) => {
 });
 
 Sentry.setupExpressErrorHandler(app);
-
 app.use(errorHandler);
+
+// ── Startup ───────────────────────────────────────────────────────────────────
 
 async function restoreActiveCountdowns() {
 	try {
-		const active = await Transfer.find({
-			isDeleted: false,
-			expiresAt: { $gt: new Date() },
-		}, { code: 1, expiresAt: 1 })
-			.limit(2000)
-			.lean();
-		for (const t of active) {
-			scheduleTransferCountdown(t.code, t.expiresAt);
-		}
+		const active = await Transfer.find(
+			{ isDeleted: false, expiresAt: { $gt: new Date() } },
+			{ code: 1, expiresAt: 1 },
+		).limit(2000).lean();
+		for (const t of active) scheduleTransferCountdown(t.code, t.expiresAt);
 		logEvent(`Restored ${active.length} active countdowns`);
 	} catch (err) {
 		logError("Failed to restore countdowns", err);
@@ -564,7 +365,6 @@ function connectMongoWithRetry() {
 	const retryDelayMs = 5000;
 	let hasConnected = false;
 	let hasAttempted = false;
-
 	const tryConnect = async () => {
 		try {
 			await connectDB();
@@ -575,15 +375,12 @@ function connectMongoWithRetry() {
 			}
 			return true;
 		} catch (error) {
-			if (hasAttempted) {
-				logError("MongoDB Failed", error);
-			}
+			if (hasAttempted) logError("MongoDB Failed", error);
 			hasAttempted = true;
 			setTimeout(tryConnect, retryDelayMs);
 			return false;
 		}
 	};
-
 	return tryConnect();
 }
 
@@ -592,87 +389,51 @@ function printStartupStatus(port, host) {
 	logSuccess("Cleanup Job Running");
 	logSuccess(`Server Running on ${host}:${port}`);
 
-	const hasRedisConfig = Boolean(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN);
-	const hasGeminiConfig = Boolean(process.env.GEMINI_API_KEY);
-	const sentryEnabled = Boolean(process.env.SENTRY_DSN);
+	void connectMongoWithRetry().catch((error) => logError("MongoDB startup check failed", error));
 
-	void connectMongoWithRetry().then((mongoConnected) => {
-		if (!mongoConnected) {
-			logError("MongoDB Failed", null);
-		}
-	}).catch((error) => {
-		logError("MongoDB startup check failed", error);
-	});
-
-	void Promise.all([
-		getRedisStatus(),
-		getR2Status(),
-	]).then(([redisStatus, r2Status]) => {
-		if (!hasRedisConfig) {
+	void Promise.all([getRedisStatus(), getR2Status()]).then(([redisStatus, r2Status]) => {
+		if (!process.env.UPSTASH_REDIS_REST_URL) {
 			logEvent("Redis Optional Cache Disabled");
 		} else if (redisStatus === "connected") {
 			logSuccess("Redis Connected");
 		} else {
 			logWarn("Redis Unavailable (optional)");
 		}
+		if (r2Status === "connected") logSuccess("R2 Connected");
+		else logError("R2 Failed", null);
+	}).catch((error) => logError("Service startup checks failed", error));
 
-		if (r2Status === "connected") {
-			logSuccess("R2 Connected");
-		} else {
-			logError("R2 Failed", null);
-		}
-	}).catch((error) => {
-		logError("Service startup checks failed", error);
-	});
-
-	const geminiStatus = checkGeminiConnection() ? "connected" : "disconnected";
-
-	if (!hasGeminiConfig) {
+	if (!process.env.GEMINI_API_KEY) {
 		logEvent("Gemini Optional AI Disabled");
-	} else if (geminiStatus === "connected") {
+	} else if (checkGeminiConnection()) {
 		logSuccess("Gemini Connected");
 	} else {
 		logWarn("Gemini Unavailable (optional)");
 	}
 
-	if (sentryEnabled) {
-		logSuccess("Sentry Enabled");
-	} else {
-		logEvent("Sentry Disabled");
-	}
+	if (process.env.SENTRY_DSN) logSuccess("Sentry Enabled");
+	else logEvent("Sentry Disabled");
 }
 
 function startServer() {
 	initSocket(server);
-
 	const port = Number(process.env.PORT) || 3001;
 	const host = process.env.HOST || "0.0.0.0";
 	let retryTimer = null;
-	const isNodemonRuntime = Boolean(process.env.nodemon)
-		|| /nodemon/i.test(String(process.env.npm_lifecycle_script || ""));
+	const isNodemonRuntime = Boolean(process.env.nodemon) || /nodemon/i.test(String(process.env.npm_lifecycle_script || ""));
 
 	server.on("error", (error) => {
 		if (error?.code === "EADDRINUSE") {
-			if (!isNodemonRuntime) {
-				logError(`Port ${port} already in use`, error);
-				process.exit(1);
-				return;
-			}
-
+			if (!isNodemonRuntime) { logError(`Port ${port} already in use`, error); process.exit(1); return; }
 			logEvent(`Port ${port} in use, retrying in 1200ms`);
-
 			if (!retryTimer) {
 				retryTimer = setTimeout(() => {
 					retryTimer = null;
-					if (!isShuttingDown) {
-						server.listen(port, host);
-					}
+					if (!isShuttingDown) server.listen(port, host);
 				}, 1200);
 			}
-
 			return;
 		}
-
 		logError("Server failed to start", error);
 	});
 
@@ -685,49 +446,30 @@ function startServer() {
 let isShuttingDown = false;
 
 async function gracefulShutdown(signal, onComplete) {
-	if (isShuttingDown) {
-		return;
-	}
-
+	if (isShuttingDown) return;
 	isShuttingDown = true;
 	logEvent(`${signal} received, shutting down gracefully`);
 
-	// Force exit after 8s if graceful shutdown stalls (Render sends SIGKILL at 10s)
-	const forceTimer = setTimeout(() => {
-		logError("Forced exit after shutdown timeout", null);
-		process.exit(1);
-	}, 8000);
+	const forceTimer = setTimeout(() => { logError("Forced exit after shutdown timeout", null); process.exit(1); }, 8000);
 	forceTimer.unref();
 
 	try {
 		const { getIo } = require("./config/socket");
 		const io = typeof getIo === "function" ? getIo() : null;
-		if (io) {
-			await new Promise((resolve) => { io.close(resolve); });
-		}
+		if (io) await new Promise((resolve) => { io.close(resolve); });
 	} catch { /* socket cleanup is best-effort */ }
 
-	await new Promise((resolve) => {
-		server.close(() => resolve());
-	});
+	await new Promise((resolve) => { server.close(() => resolve()); });
 
-	try {
-		await mongoose.connection.close();
-	} catch (error) {
-		logError("MongoDB close during shutdown failed", error);
-	}
+	try { await mongoose.connection.close(); } catch (error) { logError("MongoDB close during shutdown failed", error); }
 
-	if (typeof onComplete === "function") {
-		onComplete();
-		return;
-	}
-
+	if (typeof onComplete === "function") { onComplete(); return; }
 	process.exit(0);
 }
 
 startServer();
 
-// Keep Render free tier awake during active sessions (pings own /api/ping every 10 min)
+// Keep Render free tier awake during active sessions
 const SELF_PING_URL = (process.env.RENDER_EXTERNAL_URL || process.env.BACKEND_URL || "").replace(/\/+$/, "");
 if (SELF_PING_URL && isProduction) {
 	setInterval(() => {
@@ -739,10 +481,6 @@ if (SELF_PING_URL && isProduction) {
 	}, 10 * 60 * 1000);
 }
 
-// Last-resort safety net. Errors should always be caught at the route boundary by
-// the express errorHandler, but a stray async timer or socket event handler could
-// throw unhandled. We log + Sentry-report rather than crashing the dyno — a crash
-// during an active upload would force the client to redo the entire transfer.
 process.on("unhandledRejection", (reason) => {
 	logError("Unhandled promise rejection", reason instanceof Error ? reason : new Error(String(reason)));
 	try { Sentry.captureException(reason); } catch { /* sentry optional */ }
@@ -751,34 +489,19 @@ process.on("unhandledRejection", (reason) => {
 process.on("uncaughtException", (error) => {
 	logError("Uncaught exception", error);
 	try { Sentry.captureException(error); } catch { /* sentry optional */ }
-	
-	// Only shut down for truly fatal errors, not stream/busboy errors.
-	// Busboy can throw null-reference errors on large file limits that are
-	// non-fatal and should not kill the server process.
-	const isStreamError = error?.code === 'ERR_STREAM_DESTROYED'
-		|| error?.code === 'ECONNRESET'
-		|| error?.code === 'EPIPE'
-		|| /truncated|busboy|stream/i.test(error?.message || '');
-	
-	if (!isStreamError) {
-		void gracefulShutdown("uncaughtException");
-	}
+	// Only shut down for truly fatal errors — stream/busboy errors are non-fatal
+	const isStreamError = error?.code === "ERR_STREAM_DESTROYED"
+		|| error?.code === "ECONNRESET"
+		|| error?.code === "EPIPE"
+		|| /truncated|busboy|stream/i.test(error?.message || "");
+	if (!isStreamError) void gracefulShutdown("uncaughtException");
 });
 
-process.on("SIGTERM", () => {
-	void gracefulShutdown("SIGTERM");
-});
+process.on("SIGTERM", () => { void gracefulShutdown("SIGTERM"); });
+process.on("SIGINT", () => { void gracefulShutdown("SIGINT"); });
 
-process.on("SIGINT", () => {
-	void gracefulShutdown("SIGINT");
-});
-
-// Nodemon sends SIGUSR2 on restart; close the server first to avoid port rebinding races.
 if (Boolean(process.env.nodemon) || /nodemon/i.test(String(process.env.npm_lifecycle_script || ""))) {
 	process.once("SIGUSR2", () => {
-		void gracefulShutdown("SIGUSR2", () => {
-			process.kill(process.pid, "SIGUSR2");
-		});
+		void gracefulShutdown("SIGUSR2", () => { process.kill(process.pid, "SIGUSR2"); });
 	});
 }
-
