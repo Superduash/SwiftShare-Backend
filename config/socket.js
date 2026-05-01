@@ -136,18 +136,16 @@ function originsMatch(requestOrigin, configuredOrigin) {
 	return isLoopbackHost(reqParsed.hostname) && isLoopbackHost(cfgParsed.hostname);
 }
 
-// Hosting platforms (Vercel, Netlify, Render, Cloudflare Pages) issue per-branch
-// preview URLs that share a public TLD with the configured FRONTEND_URL. CORS
-// blocking those breaks every preview deploy and every custom-domain alias.
-// If the configured frontend lives on one of these platforms, accept any
-// sibling subdomain on the same platform automatically.
-const PREVIEW_PLATFORM_SUFFIXES = [
-	"vercel.app",
+// Any subdomain on these deployment platforms is always allowed —
+// preview deploys, branch deploys, and custom aliases all share these TLDs.
+const ALWAYS_ALLOWED_PLATFORM_SUFFIXES = [
 	"netlify.app",
 	"onrender.com",
+	"vercel.app",
 	"pages.dev",
 	"web.app",
 	"firebaseapp.com",
+	"railway.app",
 ];
 
 function hostnameOf(origin) {
@@ -155,27 +153,12 @@ function hostnameOf(origin) {
 	return parsed ? String(parsed.hostname || "").toLowerCase() : "";
 }
 
-function isPreviewDeployOrigin(requestOrigin, configuredOrigins) {
+function isPlatformDeployOrigin(requestOrigin) {
 	const reqHost = hostnameOf(requestOrigin);
-	if (!reqHost) {
-		return false;
+	if (!reqHost) return false;
+	for (const suffix of ALWAYS_ALLOWED_PLATFORM_SUFFIXES) {
+		if (reqHost === suffix || reqHost.endsWith(`.${suffix}`)) return true;
 	}
-
-	for (const configured of configuredOrigins) {
-		const cfgHost = hostnameOf(configured);
-		if (!cfgHost) {
-			continue;
-		}
-
-		for (const suffix of PREVIEW_PLATFORM_SUFFIXES) {
-			const isCfgOnSuffix = cfgHost === suffix || cfgHost.endsWith(`.${suffix}`);
-			const isReqOnSuffix = reqHost === suffix || reqHost.endsWith(`.${suffix}`);
-			if (isCfgOnSuffix && isReqOnSuffix) {
-				return true;
-			}
-		}
-	}
-
 	return false;
 }
 
@@ -437,10 +420,15 @@ function initSocket(server) {
 					return;
 				}
 
+				// Always allow known deployment platforms (Netlify, Render, Vercel, etc.)
+				if (isPlatformDeployOrigin(origin)) {
+					callback(null, true);
+					return;
+				}
+
 				if (
 					allowedOrigins.length === 0
 					|| allowedOrigins.some((configuredOrigin) => originsMatch(origin, configuredOrigin))
-					|| isPreviewDeployOrigin(origin, allowedOrigins)
 				) {
 					callback(null, true);
 					return;

@@ -115,24 +115,28 @@ function getAllowedFrontendOrigins() {
 
 const allowedFrontendOrigins = getAllowedFrontendOrigins();
 
-const PREVIEW_PLATFORM_SUFFIXES = ["vercel.app", "netlify.app", "onrender.com", "pages.dev", "web.app", "firebaseapp.com"];
+// Hosting platform suffixes — any subdomain on these is always allowed
+// because preview deploys and branch deploys share these TLDs.
+const ALWAYS_ALLOWED_PLATFORM_SUFFIXES = [
+	"netlify.app",
+	"onrender.com",
+	"vercel.app",
+	"pages.dev",
+	"web.app",
+	"firebaseapp.com",
+	"railway.app",
+];
 
 function hostnameOf(origin) {
 	const parsed = parseOrigin(origin);
 	return parsed ? String(parsed.hostname || "").toLowerCase() : "";
 }
 
-function isPreviewDeployOrigin(requestOrigin) {
+function isPlatformDeployOrigin(requestOrigin) {
 	const reqHost = hostnameOf(requestOrigin);
 	if (!reqHost) return false;
-	for (const configured of allowedFrontendOrigins) {
-		const cfgHost = hostnameOf(configured);
-		if (!cfgHost) continue;
-		for (const suffix of PREVIEW_PLATFORM_SUFFIXES) {
-			const isCfgOnSuffix = cfgHost === suffix || cfgHost.endsWith(`.${suffix}`);
-			const isReqOnSuffix = reqHost === suffix || reqHost.endsWith(`.${suffix}`);
-			if (isCfgOnSuffix && isReqOnSuffix) return true;
-		}
+	for (const suffix of ALWAYS_ALLOWED_PLATFORM_SUFFIXES) {
+		if (reqHost === suffix || reqHost.endsWith(`.${suffix}`)) return true;
 	}
 	return false;
 }
@@ -141,10 +145,11 @@ function corsOrigin(origin, callback) {
 	if (!origin) { callback(null, true); return; }
 	if (allowAllOrigins) { callback(null, true); return; }
 	if (!isProduction && isDevOriginAllowed(origin)) { callback(null, true); return; }
+	// Always allow known deployment platforms (Netlify, Render, Vercel, etc.)
+	if (isPlatformDeployOrigin(origin)) { callback(null, true); return; }
 	if (
 		allowedFrontendOrigins.length === 0
 		|| allowedFrontendOrigins.some((o) => originsMatch(origin, o))
-		|| isPreviewDeployOrigin(origin)
 	) { callback(null, true); return; }
 	logEvent("Blocked HTTP CORS origin", `ORIGIN: ${origin}`);
 	callback(null, false);

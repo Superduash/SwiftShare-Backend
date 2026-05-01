@@ -181,23 +181,75 @@ function isDocxFile(file) {
 }
 
 const PREVIEW_EXTENSION_MIME_MAP = {
+	// Documents
 	pdf: "application/pdf",
 	docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+	doc: "application/msword",
 	ppt: "application/vnd.ms-powerpoint",
 	pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+	// Audio
 	mp3: "audio/mpeg",
 	wav: "audio/wav",
 	m4a: "audio/mp4",
 	aac: "audio/aac",
 	ogg: "audio/ogg",
-	opus: "audio/opus",
+	opus: "audio/ogg",
 	flac: "audio/flac",
+	wma: "audio/x-ms-wma",
+	aiff: "audio/aiff",
+	aif: "audio/aiff",
+	// Video
 	mp4: "video/mp4",
 	webm: "video/webm",
 	mov: "video/quicktime",
-	m4v: "video/x-m4v",
+	m4v: "video/mp4",
 	mkv: "video/x-matroska",
 	avi: "video/x-msvideo",
+	ogv: "video/ogg",
+	"3gp": "video/3gpp",
+	"3g2": "video/3gpp2",
+	mts: "video/mp2t",
+	// Images
+	png: "image/png",
+	jpg: "image/jpeg",
+	jpeg: "image/jpeg",
+	gif: "image/gif",
+	webp: "image/webp",
+	bmp: "image/bmp",
+	svg: "image/svg+xml",
+	avif: "image/avif",
+	heic: "image/heic",
+	heif: "image/heif",
+	ico: "image/x-icon",
+	tiff: "image/tiff",
+	tif: "image/tiff",
+	// Text / Code
+	txt: "text/plain",
+	md: "text/markdown",
+	html: "text/html",
+	htm: "text/html",
+	css: "text/css",
+	csv: "text/csv",
+	js: "text/javascript",
+	jsx: "text/javascript",
+	ts: "text/plain",
+	tsx: "text/plain",
+	json: "application/json",
+	xml: "text/xml",
+	yaml: "text/plain",
+	yml: "text/plain",
+	sh: "text/plain",
+	py: "text/plain",
+	go: "text/plain",
+	rs: "text/plain",
+	java: "text/plain",
+	cpp: "text/plain",
+	c: "text/plain",
+	h: "text/plain",
+	rb: "text/plain",
+	php: "text/plain",
+	sql: "text/plain",
+	log: "text/plain",
 };
 
 function isGenericBinaryMimeType(mimeType) {
@@ -266,6 +318,11 @@ function applyPreviewEmbedHeaders(req, res) {
 	res.setHeader("X-Frame-Options", "ALLOWALL");
 	res.setHeader("Content-Security-Policy", `frame-ancestors ${getPreviewFrameAncestors(req)};`);
 	res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+	// Allow cross-origin requests from any origin (needed for <audio>/<video> crossOrigin="anonymous")
+	res.setHeader("Access-Control-Allow-Origin", "*");
+	res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+	res.setHeader("Access-Control-Allow-Headers", "Range, x-transfer-password");
+	res.setHeader("Access-Control-Expose-Headers", "Content-Range, Content-Length, Accept-Ranges");
 }
 
 function isPowerPointFile(file) {
@@ -834,11 +891,18 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 		applyPreviewEmbedHeaders(req, res);
 		res.setHeader("Content-Type", contentType);
 		res.setHeader("Content-Disposition", `${dispositionType}; filename="${sanitizeFilename(file.originalName || "preview")}"`);
-		res.setHeader("Cache-Control", isMediaContentType ? "private, max-age=300, no-transform" : "private, max-age=300");
-		if (isMediaContentType) {
-			res.removeHeader("X-Content-Type-Options");
-		}
 		res.setHeader("Accept-Ranges", "bytes");
+		if (isMediaContentType) {
+			// Media must NOT have X-Content-Type-Options: nosniff — some browsers
+			// refuse to play audio/video if the MIME is flagged as unsniffable.
+			res.removeHeader("X-Content-Type-Options");
+			// Cache for 5 min; allow range seeks to re-use the cached response.
+			res.setHeader("Cache-Control", "private, max-age=300, no-transform");
+			// Allow timing info for media seeking progress bars.
+			res.setHeader("Timing-Allow-Origin", "*");
+		} else {
+			res.setHeader("Cache-Control", "private, max-age=300");
+		}
 
 		if (parsedRange.value) {
 			res.status(206);
