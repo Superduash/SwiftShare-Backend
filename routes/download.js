@@ -892,6 +892,9 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 		res.setHeader("Content-Type", contentType);
 		res.setHeader("Content-Disposition", `${dispositionType}; filename="${sanitizeFilename(file.originalName || "preview")}"`);
 		res.setHeader("Accept-Ranges", "bytes");
+		// Vary on Origin + Range so caches don't serve a CORS or partial response
+		// to a request that needs a different one — critical for media seeking.
+		res.setHeader("Vary", "Origin, Range");
 		if (isMediaContentType) {
 			// Media must NOT have X-Content-Type-Options: nosniff — some browsers
 			// refuse to play audio/video if the MIME is flagged as unsniffable.
@@ -900,6 +903,10 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 			res.setHeader("Cache-Control", "private, max-age=300, no-transform");
 			// Allow timing info for media seeking progress bars.
 			res.setHeader("Timing-Allow-Origin", "*");
+			// Also disable any compression that may have been negotiated upstream —
+			// chunked-encoded gzipped media confuses some browser decoders when
+			// combined with range requests.
+			res.setHeader("Content-Encoding", "identity");
 		} else {
 			res.setHeader("Cache-Control", "private, max-age=300");
 		}
