@@ -987,12 +987,12 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 		res.setHeader("Content-Type", contentType);
 		res.setHeader("Content-Disposition", `${dispositionType}; filename="${sanitizeFilename(file.originalName || "preview")}"`);
 		res.setHeader("Accept-Ranges", "bytes");
-		res.setHeader("Vary", "Origin, Range");
+		res.setHeader("Vary", "Range");
 
 		if (isMediaContentType) {
 			res.removeHeader("Content-Security-Policy");
 			res.removeHeader("X-Content-Type-Options");
-			res.setHeader("Cache-Control", "private, max-age=300, no-transform");
+			res.setHeader("Cache-Control", "public, max-age=3600, immutable");
 			res.setHeader("Timing-Allow-Origin", "*");
 			res.setHeader("Content-Encoding", "identity");
 		} else {
