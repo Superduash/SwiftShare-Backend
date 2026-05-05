@@ -914,6 +914,19 @@ router.get("/:code/single/:index", rateLimitDownload, validateCode, async (req, 
 	}
 });
 
+// Respond to CORS preflight for the preview/stream endpoint immediately.
+// The global cors() middleware handles the Origin check, but media players need
+// Range in Access-Control-Allow-Headers — this makes it explicit and avoids
+// a DB round-trip on every preflight fired by browsers on cross-origin deployments.
+router.options("/:code/preview/:index", (req, res) => {
+	res.setHeader("Access-Control-Allow-Origin", "*");
+	res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+	res.setHeader("Access-Control-Allow-Headers", "Range, x-transfer-password, Content-Type");
+	res.setHeader("Access-Control-Expose-Headers", "Content-Range, Content-Length, Accept-Ranges");
+	res.setHeader("Access-Control-Max-Age", "86400");
+	res.sendStatus(204);
+});
+
 router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 	try {
 		const { code, index } = req.params;
@@ -936,19 +949,14 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 		}
 
 		const file = transfer.files[fileIndex];
-		logEvent("🎬 Preview request received", `CODE: ${code}`, `FILE: ${fileIndex}`, `NAME: ${file.originalName}`, `MIME: ${file.mimeType || 'unknown'}`);
-		
 		const objectHead = await getObjectHeadFromR2(file.storedKey);
 		const totalBytes = Number(objectHead.ContentLength || file.size || 0);
-		logEvent("📊 R2 file metadata fetched", `SIZE: ${totalBytes} bytes`, `STORED_KEY: ${file.storedKey}`);
-		
 		const parsedRange = parseRangeHeader(req.headers.range, totalBytes);
 
 		if (!parsedRange.ok) {
 			if (totalBytes > 0) {
 				res.setHeader("Content-Range", `bytes */${totalBytes}`);
 			}
-
 			logError("Range parse failed", parsedRange.error, `CODE: ${code}`, `FILE: ${fileIndex}`);
 			return res
 				.status(416)
@@ -967,27 +975,20 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 		const isPowerPoint = isPowerPointFile(file);
 		const dispositionType = isPowerPoint ? "attachment" : "inline";
 
-		logEvent("📋 Content type resolved", `RESOLVED: ${contentType}`, `IS_MEDIA: ${isMediaContentType}`);
-
 		applyPreviewEmbedHeaders(req, res);
 		res.setHeader("Content-Type", contentType);
 		res.setHeader("Content-Disposition", `${dispositionType}; filename="${sanitizeFilename(file.originalName || "preview")}"`);
 		res.setHeader("Accept-Ranges", "bytes");
 		res.setHeader("Vary", "Origin, Range");
-		
+
 		if (isMediaContentType) {
-			// Remove Content-Security-Policy for media files — binary data doesn't need HTML security policies,
-			// and CSP can interfere with cross-origin media loading in modal contexts. The CORS headers below
-			// (Cross-Origin-Resource-Policy, Access-Control-Allow-Origin) are sufficient for media security.
 			res.removeHeader("Content-Security-Policy");
 			res.removeHeader("X-Content-Type-Options");
 			res.setHeader("Cache-Control", "private, max-age=300, no-transform");
 			res.setHeader("Timing-Allow-Origin", "*");
 			res.setHeader("Content-Encoding", "identity");
-			logEvent("🎬 Media preview headers set", `MIME: ${normalizedContentType}`, `SIZE: ${totalBytes} bytes`, `CSP_REMOVED: true`);
 		} else {
 			res.setHeader("Cache-Control", "private, max-age=300");
-			logEvent("📄 Non-media preview headers set", `MIME: ${normalizedContentType}`);
 		}
 
 		if (parsedRange.value) {
@@ -1002,26 +1003,19 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 		}
 
 		const onPreviewClose = () => {
-			try { 
-				stream.destroy();
-				logEvent("📤 Preview stream closed by client", `CODE: ${code}`, `FILE: ${fileIndex}`);
-			} catch { /* already destroyed */ }
+			try { stream.destroy(); } catch { /* already destroyed */ }
 		};
 		res.on("close", onPreviewClose);
 
 		try {
-			logEvent("📡 Starting preview stream transmission", `CODE: ${code}`, `FILE: ${fileIndex}`, `SIZE: ${totalBytes}`);
 			await new Promise((resolve, reject) => {
 				stream.on("error", (err) => {
-					logError("❌ Stream read error", err.message, `CODE: ${code}`, `FILE: ${fileIndex}`);
+					logError("Preview stream read error", err.message, `CODE: ${code}`, `FILE: ${fileIndex}`);
 					reject(err);
 				});
-				res.on("finish", () => {
-					logEvent("✅ Preview stream fully transmitted", `CODE: ${code}`, `FILE: ${fileIndex}`, `BYTES: ${totalBytes}`);
-					resolve();
-				});
+				res.on("finish", resolve);
 				res.on("error", (err) => {
-					logError("❌ Response stream error", err.message, `CODE: ${code}`, `FILE: ${fileIndex}`);
+					logError("Preview response stream error", err.message, `CODE: ${code}`, `FILE: ${fileIndex}`);
 					reject(err);
 				});
 				stream.pipe(res);
@@ -1033,10 +1027,10 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 		return null;
 	} catch (error) {
 		if (res.headersSent) {
-			logError("❌ Preview stream error after headers sent", error.message, `CODE: ${req.params?.code || ""}`, `FILE: ${req.params?.index || ""}`);
+			logError("Preview stream error after headers sent", error.message, `CODE: ${req.params?.code || ""}`, `FILE: ${req.params?.index || ""}`);
 			return null;
 		}
-		logError("❌ Preview stream initialization error", error.message, `CODE: ${req.params?.code || ""}`, `FILE: ${req.params?.index || ""}`);
+		logError("Preview stream initialization error", error.message, `CODE: ${req.params?.code || ""}`, `FILE: ${req.params?.index || ""}`);
 		return next(error);
 	}
 });

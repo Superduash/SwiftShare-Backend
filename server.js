@@ -177,7 +177,14 @@ app.use((req, res, next) => {
 	next();
 });
 
-app.use(cors({ origin: corsOrigin, maxAge: 86400 }));
+app.use(cors({
+	origin: corsOrigin,
+	maxAge: 86400,
+	// Range must be in allowedHeaders so CORS preflight for media streaming succeeds
+	// on cross-origin deployments (e.g. Vercel frontend → Railway backend).
+	allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Range', 'x-transfer-password'],
+	exposedHeaders: ['Content-Range', 'Content-Length', 'Accept-Ranges', 'X-Request-ID'],
+}));
 
 app.use(helmet({
 	crossOriginResourcePolicy: { policy: "cross-origin" },
