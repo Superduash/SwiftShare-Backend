@@ -1,7 +1,12 @@
 const { Server } = require("socket.io");
+const mongoose = require("mongoose");
 const Transfer = require("../models/Transfer");
 const { getSubnet } = require("../utils/helpers");
 const { logEvent, logError } = require("../utils/logger");
+
+function isMongoReady() {
+	return mongoose.connection.readyState === 1;
+}
 
 let ioInstance;
 const countdownMap = new Map();
@@ -229,6 +234,7 @@ function ensureConsolidatedTimer() {
 		for (const normalizedCode of expired) {
 			countdownMap.delete(normalizedCode);
 			emitToRoom(normalizedCode, "transfer-expired", { code: normalizedCode });
+			if (!isMongoReady()) continue;
 			void Transfer.updateOne(
 				{ code: normalizedCode },
 				{
@@ -318,6 +324,11 @@ function getSocketIp(socket) {
 
 async function emitNearbyDevices(socket) {
 	try {
+		if (!isMongoReady()) {
+			socket.emit("nearby-devices", { devices: [] });
+			return;
+		}
+
 		const subnet = socket.data.subnet;
 		const clientIp = socket.data.clientIp;
 
@@ -501,8 +512,8 @@ function initSocket(server) {
 	// Periodic cleanup of stale socket IDs from database (every 5 minutes)
 	// This catches any socket IDs that weren't cleaned up during disconnect
 	setInterval(async () => {
-		if (!ioInstance) return;
-		
+		if (!ioInstance || !isMongoReady()) return;
+
 		try {
 			const connectedSockets = new Set(Array.from(ioInstance.sockets.sockets.keys()));
 			

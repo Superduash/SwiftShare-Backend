@@ -163,13 +163,81 @@ function renderDocxPreviewDocument(fileName, bodyHtml) {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>${title}</title>
   <style>
-    body { margin: 0; padding: 16px; font-family: Arial, sans-serif; color: #111827; background: #ffffff; line-height: 1.5; }
-    img, table { max-width: 100%; }
-    pre { white-space: pre-wrap; word-break: break-word; }
+    *, *::before, *::after { box-sizing: border-box; }
+    html { font-size: 15px; }
+    body {
+      margin: 0;
+      padding: 32px 24px;
+      font-family: 'Segoe UI', Arial, sans-serif;
+      color: #1a1a1a;
+      background: #f5f5f5;
+      line-height: 1.6;
+    }
+    .doc-page {
+      background: #ffffff;
+      max-width: 820px;
+      margin: 0 auto;
+      padding: 56px 72px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.12);
+      border-radius: 2px;
+      min-height: 400px;
+    }
+    h1, h2, h3, h4, h5, h6 {
+      font-weight: 600;
+      line-height: 1.3;
+      margin: 1.2em 0 0.4em;
+      color: #111;
+    }
+    h1 { font-size: 1.8em; }
+    h2 { font-size: 1.4em; }
+    h3 { font-size: 1.15em; }
+    h4, h5, h6 { font-size: 1em; }
+    p { margin: 0 0 0.75em; }
+    p:last-child { margin-bottom: 0; }
+    ul, ol { margin: 0.5em 0 0.75em 1.6em; padding: 0; }
+    li { margin-bottom: 0.25em; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1em 0;
+      font-size: 0.93em;
+    }
+    th, td {
+      border: 1px solid #d1d5db;
+      padding: 6px 10px;
+      vertical-align: top;
+      text-align: left;
+    }
+    th { background: #f3f4f6; font-weight: 600; }
+    tr:nth-child(even) td { background: #fafafa; }
+    img { max-width: 100%; height: auto; display: block; margin: 0.5em auto; }
+    pre, code {
+      font-family: 'Consolas', 'Courier New', monospace;
+      font-size: 0.88em;
+      background: #f3f4f6;
+      border-radius: 3px;
+    }
+    pre { padding: 10px 14px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; margin: 0.75em 0; }
+    code { padding: 1px 4px; }
+    blockquote {
+      border-left: 3px solid #d1d5db;
+      margin: 0.75em 0 0.75em 0;
+      padding: 4px 16px;
+      color: #4b5563;
+    }
+    a { color: #2563eb; text-decoration: underline; }
+    strong, b { font-weight: 600; }
+    hr { border: none; border-top: 1px solid #e5e7eb; margin: 1.25em 0; }
+    @media (max-width: 600px) {
+      .doc-page { padding: 24px 16px; }
+      body { padding: 12px 0; }
+    }
   </style>
 </head>
 <body>
+  <div class="doc-page">
 ${safeBody}
+  </div>
 </body>
 </html>`;
 }
@@ -863,10 +931,12 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 		}
 
 		const file = transfer.files[fileIndex];
-		logEvent("Preview request", `CODE: ${code}`, `FILE: ${fileIndex}`, `NAME: ${file.originalName}`, `MIME: ${file.mimeType}`);
+		logEvent("🎬 Preview request received", `CODE: ${code}`, `FILE: ${fileIndex}`, `NAME: ${file.originalName}`, `MIME: ${file.mimeType || 'unknown'}`);
 		
 		const objectHead = await getObjectHeadFromR2(file.storedKey);
 		const totalBytes = Number(objectHead.ContentLength || file.size || 0);
+		logEvent("📊 R2 file metadata fetched", `SIZE: ${totalBytes} bytes`, `STORED_KEY: ${file.storedKey}`);
+		
 		const parsedRange = parseRangeHeader(req.headers.range, totalBytes);
 
 		if (!parsedRange.ok) {
@@ -892,32 +962,27 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 		const isPowerPoint = isPowerPointFile(file);
 		const dispositionType = isPowerPoint ? "attachment" : "inline";
 
+		logEvent("📋 Content type resolved", `RESOLVED: ${contentType}`, `IS_MEDIA: ${isMediaContentType}`);
+
 		applyPreviewEmbedHeaders(req, res);
 		res.setHeader("Content-Type", contentType);
 		res.setHeader("Content-Disposition", `${dispositionType}; filename="${sanitizeFilename(file.originalName || "preview")}"`);
 		res.setHeader("Accept-Ranges", "bytes");
-		// Vary on Origin + Range so caches don't serve a CORS or partial response
-		// to a request that needs a different one — critical for media seeking.
 		res.setHeader("Vary", "Origin, Range");
+		
 		if (isMediaContentType) {
 			// Remove Content-Security-Policy for media files — binary data doesn't need HTML security policies,
 			// and CSP can interfere with cross-origin media loading in modal contexts. The CORS headers below
 			// (Cross-Origin-Resource-Policy, Access-Control-Allow-Origin) are sufficient for media security.
 			res.removeHeader("Content-Security-Policy");
-			// Media must NOT have X-Content-Type-Options: nosniff — some browsers
-			// refuse to play audio/video if the MIME is flagged as unsniffable.
 			res.removeHeader("X-Content-Type-Options");
-			// Cache for 5 min; allow range seeks to re-use the cached response.
 			res.setHeader("Cache-Control", "private, max-age=300, no-transform");
-			// Allow timing info for media seeking progress bars.
 			res.setHeader("Timing-Allow-Origin", "*");
-			// Also disable any compression that may have been negotiated upstream —
-			// chunked-encoded gzipped media confuses some browser decoders when
-			// combined with range requests.
 			res.setHeader("Content-Encoding", "identity");
-			logEvent("Serving media preview", `MIME: ${normalizedContentType}`, `BYTES: ${totalBytes}`);
+			logEvent("🎬 Media preview headers set", `MIME: ${normalizedContentType}`, `SIZE: ${totalBytes} bytes`, `CSP_REMOVED: true`);
 		} else {
 			res.setHeader("Cache-Control", "private, max-age=300");
+			logEvent("📄 Non-media preview headers set", `MIME: ${normalizedContentType}`);
 		}
 
 		if (parsedRange.value) {
@@ -932,28 +997,41 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 		}
 
 		const onPreviewClose = () => {
-			try { stream.destroy(); } catch { /* already destroyed */ }
+			try { 
+				stream.destroy();
+				logEvent("📤 Preview stream closed by client", `CODE: ${code}`, `FILE: ${fileIndex}`);
+			} catch { /* already destroyed */ }
 		};
 		res.on("close", onPreviewClose);
 
 		try {
+			logEvent("📡 Starting preview stream transmission", `CODE: ${code}`, `FILE: ${fileIndex}`, `SIZE: ${totalBytes}`);
 			await new Promise((resolve, reject) => {
-				stream.on("error", reject);
-				res.on("finish", resolve);
-				res.on("error", reject);
+				stream.on("error", (err) => {
+					logError("❌ Stream read error", err.message, `CODE: ${code}`, `FILE: ${fileIndex}`);
+					reject(err);
+				});
+				res.on("finish", () => {
+					logEvent("✅ Preview stream fully transmitted", `CODE: ${code}`, `FILE: ${fileIndex}`, `BYTES: ${totalBytes}`);
+					resolve();
+				});
+				res.on("error", (err) => {
+					logError("❌ Response stream error", err.message, `CODE: ${code}`, `FILE: ${fileIndex}`);
+					reject(err);
+				});
 				stream.pipe(res);
 			});
 		} finally {
 			res.removeListener("close", onPreviewClose);
 		}
 
-		logEvent("Preview served", `CODE: ${code}`, `FILE: ${fileIndex}`);
 		return null;
 	} catch (error) {
 		if (res.headersSent) {
-			logError("Preview stream error", error, `CODE: ${req.params?.code || ""}`, `FILE: ${req.params?.index || ""}`);
+			logError("❌ Preview stream error after headers sent", error.message, `CODE: ${req.params?.code || ""}`, `FILE: ${req.params?.index || ""}`);
 			return null;
 		}
+		logError("❌ Preview stream initialization error", error.message, `CODE: ${req.params?.code || ""}`, `FILE: ${req.params?.index || ""}`);
 		return next(error);
 	}
 });
