@@ -5,7 +5,7 @@ const mammoth = require("mammoth");
 
 const Transfer = require("../models/Transfer");
 const { getObjectFromR2, getObjectHeadFromR2, deleteFilesFromR2 } = require("../services/fileManager");
-const { emitToRoom, clearTransferCountdown } = require("../config/socket");
+const { emitToRoom } = require("../config/socket");
 const { streamZipFromR2 } = require("../services/zipService");
 const { rateLimitDownload } = require("../middleware/rateLimiter");
 const { validateCode } = require("../middleware/validateCode");
@@ -19,7 +19,7 @@ const {
 	isTransferExpired,
 } = require("../utils/helpers");
 const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
-const { logEvent, logError } = require("../utils/logger");
+const { logEvent, logError, logWarn } = require("../utils/logger");
 
 const router = express.Router();
 
@@ -858,10 +858,13 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 
 		const fileIndex = Number(index);
 		if (!Number.isInteger(fileIndex) || fileIndex < 0 || fileIndex >= transfer.files.length) {
+			logWarn("Invalid file index for preview", `CODE: ${code}`, `INDEX: ${fileIndex}`, `MAX: ${transfer.files?.length || 0}`);
 			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
 		}
 
 		const file = transfer.files[fileIndex];
+		logEvent("Preview request", `CODE: ${code}`, `FILE: ${fileIndex}`, `NAME: ${file.originalName}`, `MIME: ${file.mimeType}`);
+		
 		const objectHead = await getObjectHeadFromR2(file.storedKey);
 		const totalBytes = Number(objectHead.ContentLength || file.size || 0);
 		const parsedRange = parseRangeHeader(req.headers.range, totalBytes);
@@ -871,6 +874,7 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 				res.setHeader("Content-Range", `bytes */${totalBytes}`);
 			}
 
+			logError("Range parse failed", parsedRange.error, `CODE: ${code}`, `FILE: ${fileIndex}`);
 			return res
 				.status(416)
 				.json(buildErrorResponse(ERROR_CODES.SERVER_ERROR, parsedRange.error));
@@ -907,6 +911,7 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 			// chunked-encoded gzipped media confuses some browser decoders when
 			// combined with range requests.
 			res.setHeader("Content-Encoding", "identity");
+			logEvent("Serving media preview", `MIME: ${normalizedContentType}`, `BYTES: ${totalBytes}`);
 		} else {
 			res.setHeader("Cache-Control", "private, max-age=300");
 		}

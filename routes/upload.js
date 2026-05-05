@@ -21,7 +21,6 @@ const {
 	sanitizeRequestBody,
 	isValidPassword,
 	isValidExpiryMinutes,
-	sanitizeFilename: sanitizeFilenameValidator,
 } = require("../middleware/inputValidator");
 const {
 	getClientIp,
