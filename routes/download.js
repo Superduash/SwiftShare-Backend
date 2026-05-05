@@ -147,9 +147,14 @@ function sanitizeDocxHtml(htmlValue) {
 		.replace(/\s+on[a-z]+\s*=\s*"[^"]*"/gi, "")
 		.replace(/\s+on[a-z]+\s*=\s*'[^']*'/gi, "")
 		.replace(/\s+on[a-z]+\s*=\s*[^\s>]+/gi, "")
-		// Neutralize javascript:, data:, vbscript: URIs in href/src
-		.replace(/\s(href|src)\s*=\s*"\s*(?:javascript|data|vbscript):[^"]*"/gi, ' $1="#"')
-		.replace(/\s(href|src)\s*=\s*'\s*(?:javascript|data|vbscript):[^']*'/gi, " $1='#'");
+		// Neutralize dangerous URIs in href (block data:, javascript:, vbscript: entirely)
+		.replace(/\s(href)\s*=\s*"\s*(?:javascript|data|vbscript):[^"]*"/gi, ' $1="#"')
+		.replace(/\s(href)\s*=\s*'\s*(?:javascript|data|vbscript):[^']*'/gi, " $1='#'")
+		// In src: allow data:image/ (mammoth embeds DOCX images as base64), block everything else
+		.replace(/\s(src)\s*=\s*"\s*(?:javascript|vbscript):[^"]*"/gi, ' $1="#"')
+		.replace(/\s(src)\s*=\s*'\s*(?:javascript|vbscript):[^']*'/gi, " $1='#'")
+		.replace(/\s(src)\s*=\s*"\s*data:(?!image\/)[^"]*"/gi, ' $1="#"')
+		.replace(/\s(src)\s*=\s*'\s*data:(?!image\/)[^']*'/gi, " $1='#'");
 }
 
 function renderDocxPreviewDocument(fileName, bodyHtml) {
