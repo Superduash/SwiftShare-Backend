@@ -900,6 +900,10 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 		// to a request that needs a different one — critical for media seeking.
 		res.setHeader("Vary", "Origin, Range");
 		if (isMediaContentType) {
+			// Remove Content-Security-Policy for media files — binary data doesn't need HTML security policies,
+			// and CSP can interfere with cross-origin media loading in modal contexts. The CORS headers below
+			// (Cross-Origin-Resource-Policy, Access-Control-Allow-Origin) are sufficient for media security.
+			res.removeHeader("Content-Security-Policy");
 			// Media must NOT have X-Content-Type-Options: nosniff — some browsers
 			// refuse to play audio/video if the MIME is flagged as unsniffable.
 			res.removeHeader("X-Content-Type-Options");
