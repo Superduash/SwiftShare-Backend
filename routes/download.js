@@ -969,6 +969,7 @@ router.head("/:code/preview/:index", validateCode, async (req, res, next) => {
 		if (isMediaContentType) {
 			res.removeHeader("Content-Security-Policy");
 			res.removeHeader("X-Content-Type-Options");
+			res.removeHeader("Content-Encoding"); // Critical: Remove any encoding
 			res.setHeader("Cache-Control", "public, max-age=3600, immutable");
 			res.setHeader("Timing-Allow-Origin", "*");
 		} else {
@@ -1048,6 +1049,7 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 		if (isMediaContentType) {
 			res.removeHeader("Content-Security-Policy");
 			res.removeHeader("X-Content-Type-Options");
+			res.removeHeader("Content-Encoding"); // Critical: Remove any encoding that might break media
 			res.setHeader("Cache-Control", "public, max-age=3600, immutable");
 			res.setHeader("Timing-Allow-Origin", "*");
 			res.setHeader("Content-Encoding", "identity");
