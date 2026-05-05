@@ -77,7 +77,7 @@ services:
       # Must match the frontend's MAX_FILES (HomePage.jsx) and .env.example so
       # the dropzone limit and the server limit don't drift apart.
       - key: MAX_FILE_COUNT
-        value: "5"
+        value: "10"
       - key: CODE_LENGTH
         value: "6"
       - key: QR_BRANDED
