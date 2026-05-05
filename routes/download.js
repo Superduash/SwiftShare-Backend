@@ -927,6 +927,62 @@ router.options("/:code/preview/:index", (req, res) => {
 	res.sendStatus(204);
 });
 
+// HEAD handler for media preview - browsers send HEAD before GET to verify MIME type
+router.head("/:code/preview/:index", validateCode, async (req, res, next) => {
+	try {
+		const { code, index } = req.params;
+		const transfer = await Transfer.findOne({ code });
+
+		const unavailableResponse = sendUnavailableTransferResponse(req, res, transfer);
+		if (unavailableResponse) {
+			return unavailableResponse;
+		}
+
+		const passwordError = await getPasswordErrorResponse(req, transfer);
+		if (passwordError) {
+			return res.status(passwordError.status).json(passwordError.body);
+		}
+
+		const fileIndex = Number(index);
+		if (!Number.isInteger(fileIndex) || fileIndex < 0 || fileIndex >= transfer.files.length) {
+			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
+		}
+
+		const file = transfer.files[fileIndex];
+		const objectHead = await getObjectHeadFromR2(file.storedKey);
+		const totalBytes = Number(objectHead.ContentLength || file.size || 0);
+		const contentType = resolvePreviewContentType(file, objectHead.ContentType);
+		const normalizedContentType = String(contentType).toLowerCase().split(";")[0].trim();
+		const isMediaContentType = normalizedContentType.startsWith("audio/") || normalizedContentType.startsWith("video/");
+		const isPowerPoint = isPowerPointFile(file);
+		const dispositionType = isPowerPoint ? "attachment" : "inline";
+
+		logEvent("Preview HEAD request", `CODE: ${code}`, `FILE: ${file.originalName}`, `MIME: ${contentType}`, `BYTES: ${totalBytes}`, `IS_MEDIA: ${isMediaContentType}`);
+
+		applyPreviewEmbedHeaders(req, res);
+		res.setHeader("Content-Type", contentType);
+		res.setHeader("Content-Disposition", `${dispositionType}; filename="${sanitizeFilename(file.originalName || "preview")}"`);
+		res.setHeader("Accept-Ranges", "bytes");
+		res.setHeader("Vary", "Range");
+		res.setHeader("Content-Length", String(totalBytes));
+
+		if (isMediaContentType) {
+			res.removeHeader("Content-Security-Policy");
+			res.removeHeader("X-Content-Type-Options");
+			res.setHeader("Cache-Control", "public, max-age=3600, immutable");
+			res.setHeader("Timing-Allow-Origin", "*");
+		} else {
+			res.setHeader("Cache-Control", "private, max-age=300");
+		}
+
+		res.status(200).end();
+		return null;
+	} catch (error) {
+		logError("Preview HEAD error", error.message, `CODE: ${req.params?.code || ""}`, `FILE: ${req.params?.index || ""}`);
+		return next(error);
+	}
+});
+
 router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 	try {
 		const { code, index } = req.params;
