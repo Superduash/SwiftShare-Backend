@@ -1037,7 +1037,7 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 		const isPowerPoint = isPowerPointFile(file);
 		const dispositionType = isPowerPoint ? "attachment" : "inline";
 
-		logEvent("Preview serving", `CODE: ${code}`, `CONTENT_TYPE: ${contentType}`, `IS_MEDIA: ${isMediaContentType}`, `STATUS: ${parsedRange.value ? 206 : 200}`, `RANGE_START: ${parsedRange.value?.start ?? "full"}`);
+		logEvent("Preview serving", `CODE: ${code}`, `CONTENT_TYPE: ${contentType}`, `IS_MEDIA: ${isMediaContentType}`, `STATUS: ${parsedRange.value ? 206 : 200}`, `RANGE_START: ${parsedRange.value?.start ?? "full"}`, `DISPOSITION: ${dispositionType}`);
 
 		applyPreviewEmbedHeaders(req, res);
 		res.setHeader("Content-Type", contentType);
