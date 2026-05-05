@@ -949,8 +949,14 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 		}
 
 		const file = transfer.files[fileIndex];
+		const rangeHeader = req.headers.range || "none";
+		const origin = req.get("origin") || "none";
+		logEvent("Preview request", `CODE: ${code}`, `FILE: ${file.originalName}`, `MIME: ${file.mimeType || "unknown"}`, `RANGE: ${rangeHeader}`, `ORIGIN: ${origin}`);
+
 		const objectHead = await getObjectHeadFromR2(file.storedKey);
 		const totalBytes = Number(objectHead.ContentLength || file.size || 0);
+		logEvent("Preview file size", `CODE: ${code}`, `BYTES: ${totalBytes}`, `R2_MIME: ${objectHead.ContentType || "unknown"}`);
+
 		const parsedRange = parseRangeHeader(req.headers.range, totalBytes);
 
 		if (!parsedRange.ok) {
@@ -974,6 +980,8 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 		const isMediaContentType = normalizedContentType.startsWith("audio/") || normalizedContentType.startsWith("video/");
 		const isPowerPoint = isPowerPointFile(file);
 		const dispositionType = isPowerPoint ? "attachment" : "inline";
+
+		logEvent("Preview serving", `CODE: ${code}`, `CONTENT_TYPE: ${contentType}`, `IS_MEDIA: ${isMediaContentType}`, `STATUS: ${parsedRange.value ? 206 : 200}`, `RANGE_START: ${parsedRange.value?.start ?? "full"}`);
 
 		applyPreviewEmbedHeaders(req, res);
 		res.setHeader("Content-Type", contentType);
@@ -1010,12 +1018,15 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 		try {
 			await new Promise((resolve, reject) => {
 				stream.on("error", (err) => {
-					logError("Preview stream read error", err.message, `CODE: ${code}`, `FILE: ${fileIndex}`);
+					logError("Preview stream read error", err.message, `CODE: ${code}`, `FILE: ${fileIndex}`, `MIME: ${contentType}`);
 					reject(err);
 				});
-				res.on("finish", resolve);
+				res.on("finish", () => {
+					logEvent("Preview stream complete", `CODE: ${code}`, `FILE: ${file.originalName}`, `BYTES: ${parsedRange.value?.length ?? totalBytes}`);
+					resolve();
+				});
 				res.on("error", (err) => {
-					logError("Preview response stream error", err.message, `CODE: ${code}`, `FILE: ${fileIndex}`);
+					logError("Preview response stream error", err.message, `CODE: ${code}`, `FILE: ${fileIndex}`, `MIME: ${contentType}`);
 					reject(err);
 				});
 				stream.pipe(res);
