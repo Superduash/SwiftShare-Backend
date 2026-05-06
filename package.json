@@ -9,7 +9,8 @@
   "scripts": {
     "start": "node --max-old-space-size=384 server.js",
     "predev": "node scripts/ensure-port-free.js 3001",
-    "dev": "nodemon --signal SIGTERM --delay 750ms --exitcrash server.js"
+    "dev": "nodemon server.js",
+    "health-check": "node scripts/health-check.js"
   },
   "description": "SwiftShare backend powers the temporary file transfer system — handling uploads, session codes, QR generation, real-time progress, AI summaries, and automatic file deletion.",
   "repository": {

@@ -9,6 +9,7 @@ jspm_packages/
 
 # Deployment manifests (must stay tracked)
 !render.yaml
+!nodemon.json
 
 # Logs
 logs/

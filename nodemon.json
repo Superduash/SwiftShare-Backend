@@ -1,0 +1,14 @@
+{
+  "watch": ["server.js", "config", "routes", "middleware", "models", "services", "utils"],
+  "ignore": ["*.log", "node_modules", ".git", "uploads", "temp"],
+  "ext": "js,json",
+  "delay": 250,
+  "signal": "SIGTERM",
+  "exitcrash": true,
+  "env": {
+    "NODE_ENV": "development"
+  },
+  "events": {
+    "restart": "node -e \"console.log('\\n[hot-reload] Backend restarted\\n')\""
+  }
+}

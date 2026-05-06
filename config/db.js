@@ -37,17 +37,24 @@ async function connectDB() {
 	}
 
 	const poolConfig = getPoolConfig();
+	const isProduction = String(process.env.NODE_ENV || "").toLowerCase() === "production";
+
+	// Locally a 15s wait on first connect makes startup feel frozen.
+	// Use 2s in dev for ultra-fast feedback; allow override via env.
+	const defaultTimeoutMs = isProduction ? 15000 : 2000;
+	const serverSelectionTimeoutMS =
+		Number(process.env.MONGODB_SERVER_SELECTION_TIMEOUT_MS) > 0
+			? Number(process.env.MONGODB_SERVER_SELECTION_TIMEOUT_MS)
+			: defaultTimeoutMs;
 
 	await mongoose.connect(uri, {
 		...poolConfig,
-		serverSelectionTimeoutMS: 15000,
+		serverSelectionTimeoutMS,
 		socketTimeoutMS: 45000,
 		// Prevent buffering queries when disconnected (fail fast instead of OOM)
 		bufferCommands: false,
 		maxIdleTimeMS: 30000,
-		// Connection monitoring
-		heartbeatFrequencyMS: 10000, // Check connection health every 10s
-		// Retry writes on network errors
+		heartbeatFrequencyMS: 10000,
 		retryWrites: true,
 	});
 	
