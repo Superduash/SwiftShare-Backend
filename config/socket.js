@@ -3,10 +3,7 @@ const mongoose = require("mongoose");
 const Transfer = require("../models/Transfer");
 const { getSubnet } = require("../utils/helpers");
 const { logEvent, logError } = require("../utils/logger");
-
-function isMongoReady() {
-	return mongoose.connection.readyState === 1;
-}
+const { isMongoReady } = require("./db");
 
 let ioInstance;
 const countdownMap = new Map();

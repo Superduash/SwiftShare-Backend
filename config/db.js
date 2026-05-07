@@ -39,9 +39,9 @@ async function connectDB() {
 	const poolConfig = getPoolConfig();
 	const isProduction = String(process.env.NODE_ENV || "").toLowerCase() === "production";
 
-	// Locally a 15s wait on first connect makes startup feel frozen.
-	// Use 2s in dev for ultra-fast feedback; allow override via env.
-	const defaultTimeoutMs = isProduction ? 15000 : 2000;
+	// Ultra-fast local startup: 1s timeout in dev, 15s in production
+	// Allow override via env for custom scenarios
+	const defaultTimeoutMs = isProduction ? 15000 : 1000;
 	const serverSelectionTimeoutMS =
 		Number(process.env.MONGODB_SERVER_SELECTION_TIMEOUT_MS) > 0
 			? Number(process.env.MONGODB_SERVER_SELECTION_TIMEOUT_MS)
@@ -74,7 +74,13 @@ async function connectDB() {
 	return mongoose.connection;
 }
 
+// Check if MongoDB is ready for queries
+function isMongoReady() {
+	return mongoose.connection.readyState === 1;
+}
+
 module.exports = {
 	connectDB,
+	isMongoReady,
 };
 

@@ -65,13 +65,16 @@ async function checkR2Connection() {
 	}
 
 	try {
-		await r2Client.send(
-			new HeadBucketCommand({
-				Bucket: process.env.R2_BUCKET_NAME,
-			}),
-		);
+		await Promise.race([
+			r2Client.send(
+				new HeadBucketCommand({
+					Bucket: process.env.R2_BUCKET_NAME,
+				}),
+			),
+			new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000))
+		]);
 		return true;
-	} catch (error) {
+	} catch {
 		return false;
 	}
 }

@@ -19,18 +19,42 @@ const DANGEROUS_SIGNATURES = [
 	Buffer.from([0x7f, 0x45, 0x4c, 0x46]), // ELF
 ];
 
+/**
+ * Safely parse environment variable as positive integer with fallback
+ * @param {string} value - Environment variable value
+ * @param {number} defaultValue - Fallback value if parsing fails
+ * @param {number} [min] - Optional minimum value
+ * @param {number} [max] - Optional maximum value
+ * @returns {number} Parsed integer or default
+ */
+function parseEnvInt(value, defaultValue, min = 0, max = Infinity) {
+	try {
+		const parsed = Number(value);
+		if (!Number.isFinite(parsed) || parsed < min || parsed > max) {
+			return defaultValue;
+		}
+		return Math.floor(parsed);
+	} catch {
+		return defaultValue;
+	}
+}
+
 function getClientIp(req) {
-	const forwarded = req.headers["x-forwarded-for"];
+	try {
+		const forwarded = req.headers["x-forwarded-for"];
 
-	if (typeof forwarded === "string" && forwarded.length > 0) {
-		return normalizeIp(forwarded.split(",")[0].trim());
+		if (typeof forwarded === "string" && forwarded.length > 0) {
+			return normalizeIp(forwarded.split(",")[0].trim());
+		}
+
+		if (Array.isArray(forwarded) && forwarded.length > 0) {
+			return normalizeIp(String(forwarded[0]).trim());
+		}
+
+		return normalizeIp(req.socket?.remoteAddress || req.ip || "");
+	} catch {
+		return "127.0.0.1"; // Fallback for any parsing errors
 	}
-
-	if (Array.isArray(forwarded) && forwarded.length > 0) {
-		return normalizeIp(String(forwarded[0]).trim());
-	}
-
-	return normalizeIp(req.socket?.remoteAddress || req.ip || "");
 }
 
 function normalizeIp(ip) {
@@ -50,33 +74,37 @@ function normalizeIp(ip) {
 }
 
 function getSubnet(ip) {
-	const normalized = normalizeIp(ip);
-	
-	// Handle IPv6 addresses - return empty (not supported for nearby devices)
-	if (normalized.includes(":")) {
-		return "";
-	}
-	
-	// Handle IPv4
-	if (!normalized.includes(".")) {
-		return "";
-	}
-
-	const octets = normalized.split(".");
-	if (octets.length !== 4) {
-		return "";
-	}
-	
-	// Validate each octet is a number 0-255
-	for (const octet of octets) {
-		const num = Number(octet);
-		if (!Number.isFinite(num) || num < 0 || num > 255) {
+	try {
+		const normalized = normalizeIp(ip);
+		
+		// Handle IPv6 addresses - return empty (not supported for nearby devices)
+		if (normalized.includes(":")) {
 			return "";
 		}
-	}
+		
+		// Handle IPv4
+		if (!normalized.includes(".")) {
+			return "";
+		}
 
-	// Return first 3 octets for /24 subnet
-	return `${octets[0]}.${octets[1]}.${octets[2]}`;
+		const octets = normalized.split(".");
+		if (octets.length !== 4) {
+			return "";
+		}
+		
+		// Validate each octet is a number 0-255
+		for (const octet of octets) {
+			const num = Number(octet);
+			if (!Number.isFinite(num) || num < 0 || num > 255) {
+				return "";
+			}
+		}
+
+		// Return first 3 octets for /24 subnet
+		return `${octets[0]}.${octets[1]}.${octets[2]}`;
+	} catch {
+		return ""; // Fallback for any parsing errors
+	}
 }
 
 function getDeviceName(userAgent = "") {
@@ -197,12 +225,17 @@ function isTransferExpired(transfer) {
 }
 
 function getRequestFingerprint(req) {
-	const ip = getClientIp(req);
-	const userAgent = String(req?.get?.("user-agent") || req?.headers?.["user-agent"] || "");
-	return crypto
-		.createHash("sha256")
-		.update(`${ip}|${userAgent}`)
-		.digest("hex");
+	try {
+		const ip = getClientIp(req);
+		const userAgent = String(req?.get?.("user-agent") || req?.headers?.["user-agent"] || "");
+		return crypto
+			.createHash("sha256")
+			.update(`${ip}|${userAgent}`)
+			.digest("hex");
+	} catch {
+		// Fallback fingerprint if hashing fails
+		return crypto.randomBytes(16).toString("hex");
+	}
 }
 
 function isBurnClaimOwner(transfer, reqOrFingerprint) {
@@ -260,6 +293,7 @@ module.exports = {
 	isBurnClaimOwner,
 	isBurnClaimOpen,
 	getTransferStatus,
+	parseEnvInt,
 	// Backward-compatible aliases used by existing Hour 1-3 code.
 	extractClientIp: getClientIp,
 	parseDeviceName: getDeviceName,

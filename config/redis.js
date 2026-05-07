@@ -16,9 +16,12 @@ async function checkRedisConnection() {
 	}
 
 	try {
-		await redis.ping();
-		return true;
-	} catch (error) {
+		const result = await Promise.race([
+			redis.ping(),
+			new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 3000))
+		]);
+		return result === "PONG";
+	} catch {
 		return false;
 	}
 }

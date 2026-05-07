@@ -16,7 +16,7 @@ const { getCacheStats } = require("./utils/cache");
 
 validateEnvOrExit();
 
-const { connectDB } = require("./config/db");
+const { connectDB, isMongoReady } = require("./config/db");
 const { checkRedisConnection } = require("./config/redis");
 const { checkR2Connection } = require("./config/r2");
 const { checkGeminiConnection, checkGeminiConnectionLive } = require("./config/gemini");
@@ -300,8 +300,13 @@ async function withTimeout(promise, timeoutMs, fallbackValue) {
 	try {
 		return await Promise.race([
 			promise,
-			new Promise((resolve) => { timerId = setTimeout(() => resolve(fallbackValue), timeoutMs); }),
+			new Promise((resolve) => { 
+				timerId = setTimeout(() => resolve(fallbackValue), timeoutMs); 
+			}),
 		]);
+	} catch (error) {
+		// If promise rejects, return fallback instead of throwing
+		return fallbackValue;
 	} finally {
 		if (timerId) clearTimeout(timerId);
 	}
@@ -324,11 +329,17 @@ app.get("/api/health", async (req, res) => {
 			return res.json(healthCache.payload);
 		}
 		const now = new Date();
+		
+		// Only query MongoDB if connected, otherwise return 0
+		const activeTransfersPromise = isMongoReady()
+			? Transfer.countDocuments({ isDeleted: false, expiresAt: { $gt: now } })
+			: Promise.resolve(0);
+		
 		const [redisStatus, r2Status, geminiStatus, activeTransfers] = await Promise.all([
 			withTimeout(getRedisStatus(), HEALTH_CHECK_TIMEOUT_MS, "disconnected"),
 			withTimeout(getR2Status(), HEALTH_CHECK_TIMEOUT_MS, "disconnected"),
 			withTimeout(getGeminiStatus(), HEALTH_CHECK_TIMEOUT_MS, "disconnected"),
-			withTimeout(Transfer.countDocuments({ isDeleted: false, expiresAt: { $gt: now } }), HEALTH_CHECK_TIMEOUT_MS, 0),
+			withTimeout(activeTransfersPromise, HEALTH_CHECK_TIMEOUT_MS, 0),
 		]);
 		const uptime = process.uptime();
 		const payload = {
@@ -361,6 +372,10 @@ app.use(errorHandler);
 // ── Startup ───────────────────────────────────────────────────────────────────
 
 async function restoreActiveCountdowns() {
+	if (!isMongoReady()) {
+		logEvent("Skipping countdown restore - MongoDB not ready");
+		return;
+	}
 	try {
 		const active = await Transfer.find(
 			{ isDeleted: false, expiresAt: { $gt: new Date() } },
@@ -374,7 +389,9 @@ async function restoreActiveCountdowns() {
 }
 
 function connectMongoWithRetry() {
-	const retryDelayMs = 5000;
+	const isProduction = String(process.env.NODE_ENV || "").toLowerCase() === "production";
+	// Fast retries in dev (2s), slower in production (5s)
+	const retryDelayMs = isProduction ? 5000 : 2000;
 	let hasConnected = false;
 	let hasAttempted = false;
 	const tryConnect = async () => {
@@ -462,20 +479,45 @@ async function gracefulShutdown(signal, onComplete) {
 	isShuttingDown = true;
 	logEvent(`${signal} received, shutting down gracefully`);
 
-	const forceTimer = setTimeout(() => { logError("Forced exit after shutdown timeout", null); process.exit(1); }, 8000);
+	const forceTimer = setTimeout(() => { 
+		logError("Forced exit after shutdown timeout", null); 
+		process.exit(1); 
+	}, 8000);
 	forceTimer.unref();
 
 	try {
+		// Close socket.io connections
 		const { getIo } = require("./config/socket");
 		const io = typeof getIo === "function" ? getIo() : null;
-		if (io) await new Promise((resolve) => { io.close(resolve); });
-	} catch { /* socket cleanup is best-effort */ }
+		if (io) {
+			await new Promise((resolve) => { 
+				io.close(() => resolve()); 
+			});
+		}
+	} catch (socketError) { 
+		logError("Socket cleanup failed during shutdown", socketError);
+	}
 
-	await new Promise((resolve) => { server.close(() => resolve()); });
+	// Close HTTP server
+	await new Promise((resolve) => { 
+		server.close(() => resolve()); 
+	});
 
-	try { await mongoose.connection.close(); } catch (error) { logError("MongoDB close during shutdown failed", error); }
+	// Close MongoDB connection
+	try { 
+		if (mongoose.connection.readyState !== 0) {
+			await mongoose.connection.close(); 
+		}
+	} catch (mongoError) { 
+		logError("MongoDB close during shutdown failed", mongoError); 
+	}
 
-	if (typeof onComplete === "function") { onComplete(); return; }
+	clearTimeout(forceTimer);
+
+	if (typeof onComplete === "function") { 
+		onComplete(); 
+		return; 
+	}
 	process.exit(0);
 }
 
