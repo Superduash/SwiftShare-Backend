@@ -247,4 +247,71 @@ router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => 
 	}
 });
 
+// Get text content for text shares
+router.get("/:code/text", validateCode, async (req, res, next) => {
+	try {
+		const { code } = req.params;
+		const transfer = await Transfer.findOne({ code }).lean();
+
+		if (!transfer) {
+			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
+		}
+
+		if (transfer.isDeleted) {
+			return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
+		}
+
+		if (isTransferExpired(transfer)) {
+			return res.status(410).json(buildErrorResponse(ERROR_CODES.TRANSFER_EXPIRED));
+		}
+
+		// Check if it's a text share (single .txt file)
+		if (!transfer.files || transfer.files.length !== 1 || !transfer.files[0].originalName.endsWith('.txt')) {
+			return res.status(400).json(buildErrorResponse(ERROR_CODES.INVALID_REQUEST, "Not a text share"));
+		}
+
+		// Check password if protected
+		if (transfer.passwordProtected) {
+			const providedPassword = req.headers['x-transfer-password'];
+			if (!providedPassword) {
+				return res.status(401).json(buildErrorResponse(ERROR_CODES.PASSWORD_REQUIRED));
+			}
+
+			const bcrypt = require("bcryptjs");
+			const passwordMatches = Boolean(
+				transfer.passwordHash && await bcrypt.compare(providedPassword, transfer.passwordHash)
+			);
+
+			if (!passwordMatches) {
+				return res.status(401).json(buildErrorResponse(ERROR_CODES.INVALID_PASSWORD));
+			}
+		}
+
+		// Fetch text content from R2
+		const file = transfer.files[0];
+		const { body } = await getObjectFromR2(file.storedKey);
+		
+		if (!body) {
+			return res.status(404).json(buildErrorResponse(ERROR_CODES.FILE_NOT_FOUND));
+		}
+
+		// Convert stream to string
+		const chunks = [];
+		for await (const chunk of body) {
+			chunks.push(chunk);
+		}
+		const textContent = Buffer.concat(chunks).toString('utf-8');
+
+		return res.status(200).json({
+			success: true,
+			data: {
+				content: textContent,
+				title: file.originalName.replace(/\.txt$/i, ''),
+			}
+		});
+	} catch (error) {
+		return next(error);
+	}
+});
+
 module.exports = router;
