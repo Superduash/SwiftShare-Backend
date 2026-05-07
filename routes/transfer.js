@@ -72,15 +72,8 @@ function getDefaultSessionExpiryMinutes() {
 }
 
 function inferOriginalSessionMinutes(transfer) {
-	const fallbackMinutes = getDefaultSessionExpiryMinutes();
-	const createdAtMs = transfer?.createdAt ? new Date(transfer.createdAt).getTime() : NaN;
-	const expiresAtMs = transfer?.expiresAt ? new Date(transfer.expiresAt).getTime() : NaN;
-
-	if (!Number.isFinite(createdAtMs) || !Number.isFinite(expiresAtMs) || expiresAtMs <= createdAtMs) {
-		return fallbackMinutes;
-	}
-
-	return Math.max(1, Math.round((expiresAtMs - createdAtMs) / MINUTE_MS));
+	// Always extend by exactly 10 minutes regardless of original expiry time
+	return 10;
 }
 
 router.post("/:code/verify-password", rateLimitPassword, validateCode, sanitizeRequestBody, async (req, res, next) => {
