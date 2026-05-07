@@ -6,6 +6,7 @@ const { generateUniqueCode } = require("../services/codeGenerator");
 const { bindSocketToRoom } = require("../config/socket");
 const { rateLimitText } = require("../middleware/rateLimiter");
 const uploadModule = require("./upload");
+const Transfer = require("../models/Transfer");
 const { sanitizeFilename } = require("../utils/helpers");
 const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
 const { logEvent, logError } = require("../utils/logger");
@@ -104,6 +105,15 @@ router.post("/share", rateLimitText, async (req, res) => {
 			passwordProtected: parseBool(passwordProtected),
 			expiryMinutes: parseExpiry(expiryMinutes),
 		});
+
+		// Persist inline text into the transfer document so metadata can include
+		// the snippet immediately without needing to hit R2. This is safe because
+		// text shares are capped (MAX_TEXT_BYTES) and stored as UTF-8.
+		try {
+			await Transfer.updateOne({ code }, { $set: { 'files.0.inlineContent': text } });
+		} catch (err) {
+			logError('Failed to persist inline text for transfer', err, `CODE: ${code}`);
+		}
 
 		// AI: text content is small enough to pass directly. Marker in the response
 		// so the frontend can render the snippet inline without an extra fetch.

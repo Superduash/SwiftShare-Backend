@@ -23,6 +23,12 @@ const transferFileSchema = new mongoose.Schema(
 			type: String,
 			required: true,
 		},
+		// Optional inline content for small text shares (helps the frontend render
+		// text immediately without an extra backend round-trip to R2).
+		inlineContent: {
+			type: String,
+			default: null,
+		},
 	},
 	{ _id: false },
 );

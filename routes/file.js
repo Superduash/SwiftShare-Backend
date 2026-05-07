@@ -223,6 +223,76 @@ router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => 
 			emitToRoom(code, "activity-updated", { code, event: "viewed" });
 		}
 
+		// If this is a single-file text share, attempt to include the text content
+		// directly in the metadata response to avoid an extra round-trip from the
+		// frontend. Only include when allowed (not deleted/expired) and when the
+		// requester either doesn't need a password or has supplied a valid one.
+		let textPayload = null;
+		try {
+			if (transfer.files && transfer.files.length === 1 && transfer.files[0].originalName.endsWith('.txt')) {
+				const file = transfer.files[0];
+				// Prefer inline content stored in the DB (written at share time), but
+				// respect password protection: only include inline content if the
+				// transfer is not password-protected or the correct password is supplied.
+				if (file.inlineContent) {
+					let allowedInline = true;
+					if (transfer.passwordProtected) {
+						const providedPassword = req.headers['x-transfer-password'];
+						if (!providedPassword) allowedInline = false;
+						else {
+							const bcrypt = require('bcryptjs');
+							allowedInline = Boolean(transfer.passwordHash && await bcrypt.compare(providedPassword, transfer.passwordHash));
+						}
+					}
+					if (allowedInline) {
+						textPayload = {
+							content: String(file.inlineContent || ''),
+							title: file.originalName.replace(/\.txt$/i, ''),
+						};
+					}
+				} else {
+					let allowed = true;
+					if (transfer.passwordProtected) {
+						const providedPassword = req.headers['x-transfer-password'];
+						if (!providedPassword) allowed = false;
+						else {
+							const bcrypt = require('bcryptjs');
+							allowed = Boolean(transfer.passwordHash && await bcrypt.compare(providedPassword, transfer.passwordHash));
+						}
+					}
+					if (allowed) {
+						try {
+							const response = await getObjectFromR2(file.storedKey);
+							const stream = response?.Body || response?.body;
+							if (stream) {
+								const chunks = [];
+								let total = 0;
+								for await (const chunk of stream) {
+									const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+									total += buf.length;
+									chunks.push(buf);
+									// Safety cap: avoid returning huge text blocks in metadata
+									if (total > 256 * 1024) { // 256KB
+										break;
+									}
+								}
+								textPayload = {
+									content: Buffer.concat(chunks).toString('utf-8'),
+									title: file.originalName.replace(/\.txt$/i, ''),
+								};
+							}
+						} catch (err) {
+							// Ignore failures to inline text; frontend can fetch via /text route.
+							logError('Failed to inline text content for metadata', err, `CODE: ${code}`);
+						}
+					}
+				}
+			}
+		} catch (err) {
+			// Non-fatal - continue without textPayload
+			logError('Error while attempting to include text in metadata', err, `CODE: ${code}`);
+		}
+
 		return res.status(200).json({
 			code: transfer.code,
 			status: getTransferStatus(transfer),
@@ -241,6 +311,7 @@ router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => 
 			burnAfterDownload: transfer.burnAfterDownload,
 			senderDeviceName: transfer.senderDeviceName,
 			ai: transfer.ai || null,
+			text: textPayload,
 		});
 	} catch (error) {
 		return next(error);
@@ -287,18 +358,30 @@ router.get("/:code/text", validateCode, async (req, res, next) => {
 			}
 		}
 
-		// Fetch text content from R2
+		// Fetch text content from either inline DB field (preferred) or R2
 		const file = transfer.files[0];
-		const { body } = await getObjectFromR2(file.storedKey);
-		
-		if (!body) {
+		if (file.inlineContent) {
+			return res.status(200).json({
+				success: true,
+				data: {
+					content: String(file.inlineContent || ''),
+					title: file.originalName.replace(/\.txt$/i, ''),
+				},
+			});
+		}
+
+		const response = await getObjectFromR2(file.storedKey);
+		const stream = response?.Body || response?.body;
+
+		if (!stream) {
 			return res.status(404).json(buildErrorResponse(ERROR_CODES.FILE_NOT_FOUND));
 		}
 
 		// Convert stream to string
 		const chunks = [];
-		for await (const chunk of body) {
-			chunks.push(chunk);
+		for await (const chunk of stream) {
+			const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+			chunks.push(buf);
 		}
 		const textContent = Buffer.concat(chunks).toString('utf-8');
 
