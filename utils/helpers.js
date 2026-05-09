@@ -15,8 +15,11 @@ const BLOCKED_EXTENSIONS = new Set([
 ]);
 
 const DANGEROUS_SIGNATURES = [
-	Buffer.from([0x4d, 0x5a]), // MZ
-	Buffer.from([0x7f, 0x45, 0x4c, 0x46]), // ELF
+	Buffer.from([0x4d, 0x5a]), // MZ (Windows PE)
+	Buffer.from([0x7f, 0x45, 0x4c, 0x46]), // ELF (Linux executable)
+	Buffer.from([0xca, 0xfe, 0xba, 0xbe]), // Mach-O universal binary
+	Buffer.from([0xfe, 0xed, 0xfa, 0xce]), // Mach-O 32-bit
+	Buffer.from([0xfe, 0xed, 0xfa, 0xcf]), // Mach-O 64-bit
 ];
 
 /**

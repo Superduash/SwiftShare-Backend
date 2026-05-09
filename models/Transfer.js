@@ -236,6 +236,9 @@ transferSchema.index({ senderSocketId: 1 }, { sparse: true });
 // so no separate { senderIp: 1 } index is needed.
 transferSchema.index({ senderIp: 1, createdAt: 1 });
 
+// Optimizes the nearby-devices socket query
+transferSchema.index({ isDeleted: 1, expiresAt: 1, senderSocketId: 1, createdAt: -1 }, { name: "nearby_sockets" });
+
 // TTL safety net: MongoDB auto-deletes documents 24 hours after expiresAt.
 // Gives the cleanup job time to delete R2 files first; do NOT use expireAfterSeconds: 0
 // (which would delete immediately on expiry and orphan R2 objects).

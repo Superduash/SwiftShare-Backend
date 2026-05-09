@@ -77,7 +77,7 @@ async function validateMimeIntegrity(files) {
 		if (BLOCKED_DETECTED_EXTENSIONS.has(detectedExt)) {
 			return {
 				valid: false,
-				message: "Executable or script payloads are not allowed",
+				message: `Executable signature detected: ${detectedExt} files are not allowed`,
 			};
 		}
 
@@ -87,7 +87,7 @@ async function validateMimeIntegrity(files) {
 		if (!isMimeCompatible(declaredMime, detectedMime)) {
 			return {
 				valid: false,
-				message: `MIME mismatch detected (${declaredMime || "unspecified"} vs ${detectedMime})`,
+				message: `MIME mismatch: declared ${declaredMime || "unspecified"} but detected ${detectedMime}`,
 			};
 		}
 	}
@@ -112,6 +112,8 @@ function sendUploadError(res, code) {
 }
 
 async function validateUpload(req, res, next) {
+	const startTime = performance.now();
+	
 	try {
 		const files = req.files;
 
@@ -131,7 +133,11 @@ async function validateUpload(req, res, next) {
 		const hasBlockedFileType = files.some((file) => isBlockedExtension(file.originalname));
 
 		if (hasBlockedFileType) {
-			return sendUploadError(res, ERROR_CODES.INVALID_FILE_TYPE);
+			const blockedFile = files.find((file) => isBlockedExtension(file.originalname));
+			const ext = require("path").extname(blockedFile?.originalname || "");
+			return res
+				.status(400)
+				.json(buildErrorResponse(ERROR_CODES.INVALID_FILE_TYPE, `Blocked file extension: ${ext} files are not allowed`));
 		}
 
 		const hasDangerousFileSignature = files.some((file) => hasDangerousSignature(file.buffer));
@@ -146,6 +152,14 @@ async function validateUpload(req, res, next) {
 			return res
 				.status(400)
 				.json(buildErrorResponse(ERROR_CODES.INVALID_FILE_TYPE, mimeIntegrity.message));
+		}
+
+		const duration = performance.now() - startTime;
+		
+		// Log warning if validation takes > 50ms for files < 10MB
+		if (duration > 50 && totalSize < 10 * 1024 * 1024) {
+			const { logWarn } = require("../utils/logger");
+			logWarn("Upload validation slow", `DURATION: ${duration.toFixed(2)}ms`, `SIZE: ${(totalSize / 1024 / 1024).toFixed(2)}MB`);
 		}
 
 		return next();

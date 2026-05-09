@@ -28,8 +28,9 @@ SwiftShare Backend features robust real-time updates, integrates flawlessly with
 - ⚡ **Real-Time Sync:** Transfer updates and progress via Socket.IO rooms.
 - 🧹 **Auto-Cleanup:** Scheduled cleanup job for expired/deleted transfers.
 - 🤖 **Generative AI:** Summary support through Google's Gemini Models.
-- 🛡️ **Rate Limiting:** Optional Upstash Redis integrations.
-- 🐛 **Error Tracking:** Production monitoring through Sentry.
+- 🛡️ **Rate Limiting:** IP and Redis-based rate limiting across all critical endpoints.
+- 🔒 **Security Hardened:** Strict CORS policies, comprehensive security headers (Helmet), input sanitization, and signature-based file validation.
+- 🐛 **Error Tracking:** Production monitoring through Sentry with redacted PII logging.
 
 > *"Does a better job than what legacy file share websites officially offer."* — **Tech Enthusiast**
 

@@ -104,6 +104,10 @@ async function toReadable(body) {
 		return body;
 	}
 
+	if (body && typeof body.transformToWebStream === "function") {
+		return Readable.fromWeb(body.transformToWebStream());
+	}
+
 	if (body && typeof body.transformToByteArray === "function") {
 		const bytes = await body.transformToByteArray();
 		return Readable.from(Buffer.from(bytes));
@@ -466,7 +470,8 @@ function parseRangeHeader(rangeHeader, totalBytes) {
 }
 
 // Throttle download-progress emits identically to upload — see upload.js rationale.
-const DOWNLOAD_PROGRESS_EMIT_INTERVAL_MS = 200;
+// Smoothed to 100ms (10fps) for fluid UI updates on fast connections.
+const DOWNLOAD_PROGRESS_EMIT_INTERVAL_MS = 100;
 
 async function streamSingleFile(res, file, code) {
 	const objectResponse = await getObjectFromR2(file.storedKey);
@@ -481,6 +486,7 @@ async function streamSingleFile(res, file, code) {
 	let lastSpeedCalcAt = streamStartTime;
 	let lastSpeedCalcBytes = 0;
 
+	res.setHeader("x-no-compression", "true"); // Prevent CPU overhead on heavy binaries
 	res.setHeader("Content-Type", file.mimeType || "application/octet-stream");
 	res.setHeader("Content-Disposition", `attachment; filename="${downloadName}"`);
 
@@ -553,6 +559,8 @@ async function streamZip(res, code, files) {
 	let streamStartTime = Date.now();
 	let lastSpeedCalcAt = streamStartTime;
 	let lastSpeedCalcBytes = 0;
+
+	res.setHeader("x-no-compression", "true"); // Prevent CPU overhead on heavy zip streams
 
 	await streamZipFromR2({
 		code,

@@ -1,4 +1,4 @@
-﻿require("./instrument");
+require("./instrument");
 require("dotenv").config({ quiet: true });
 
 const http = require("http");
@@ -215,6 +215,8 @@ app.use(helmet({
 app.use(morgan((tokens, req, res) => {
 	const url = (req.originalUrl || "").split("?")[0];
 	return [tokens.method(req, res), url, tokens.status(req, res), tokens["response-time"](req, res), "ms"].join(" ");
+}, {
+	skip: (req, res) => req.path === '/api/health' && res.statusCode === 200
 }));
 
 app.use(express.json({ limit: "12mb" }));
@@ -322,34 +324,52 @@ function formatUptimeHuman(totalSeconds) {
 	return `${sec}s`;
 }
 
+let isHealthCheckRunning = false;
 app.get("/api/health", async (req, res) => {
 	try {
 		if (res.headersSent) return;
-		if (healthCache.payload && healthCache.expiresAt > Date.now()) {
-			return res.json(healthCache.payload);
-		}
-		const now = new Date();
-		
-		// Only query MongoDB if connected, otherwise return 0
-		const activeTransfersPromise = isMongoReady()
-			? Transfer.countDocuments({ isDeleted: false, expiresAt: { $gt: now } })
-			: Promise.resolve(0);
-		
-		const [redisStatus, r2Status, geminiStatus, activeTransfers] = await Promise.all([
-			withTimeout(getRedisStatus(), HEALTH_CHECK_TIMEOUT_MS, "disconnected"),
-			withTimeout(getR2Status(), HEALTH_CHECK_TIMEOUT_MS, "disconnected"),
-			withTimeout(getGeminiStatus(), HEALTH_CHECK_TIMEOUT_MS, "disconnected"),
-			withTimeout(activeTransfersPromise, HEALTH_CHECK_TIMEOUT_MS, 0),
-		]);
-		const uptime = process.uptime();
-		const payload = {
-			status: "ok", version, uptime,
-			uptimeHuman: formatUptimeHuman(uptime),
-			mongodb: getMongoStatus(), redis: redisStatus, r2: r2Status, gemini: geminiStatus,
-			activeTransfers, timestamp: Date.now(),
+
+		const isStale = !healthCache.payload || healthCache.expiresAt <= Date.now();
+
+		const runHealthCheck = async () => {
+			if (isHealthCheckRunning) return healthCache.payload; // Prevent stampede
+			isHealthCheckRunning = true;
+			try {
+				const now = new Date();
+				const activeTransfersPromise = isMongoReady()
+					? Transfer.countDocuments({ isDeleted: false, expiresAt: { $gt: now } })
+					: Promise.resolve(0);
+				
+				const [redisStatus, r2Status, activeTransfers] = await Promise.all([
+					withTimeout(getRedisStatus(), HEALTH_CHECK_TIMEOUT_MS, "disconnected"),
+					withTimeout(getR2Status(), HEALTH_CHECK_TIMEOUT_MS, "disconnected"),
+					withTimeout(activeTransfersPromise, HEALTH_CHECK_TIMEOUT_MS, 0),
+				]);
+				const uptime = process.uptime();
+				const payload = {
+					status: "ok", version, uptime,
+					uptimeHuman: formatUptimeHuman(uptime),
+					mongodb: getMongoStatus(), redis: redisStatus, r2: r2Status,
+					activeTransfers, timestamp: Date.now(),
+				};
+				healthCache = { expiresAt: Date.now() + HEALTH_CACHE_TTL_MS, payload };
+				return payload;
+			} catch (error) {
+				logError("Background health check failed", error);
+				return null;
+			} finally {
+				isHealthCheckRunning = false;
+			}
 		};
-		healthCache = { expiresAt: Date.now() + HEALTH_CACHE_TTL_MS, payload };
-		return res.json(payload);
+
+		if (healthCache.payload) {
+			if (isStale) runHealthCheck(); // Trigger background refresh
+			return res.json(healthCache.payload); // Instantly return stale data
+		}
+
+		// First ever load: must wait
+		const payload = await runHealthCheck();
+		return res.json(payload || { status: "error" });
 	} catch (error) {
 		logError("Health check failed", error);
 		if (res.headersSent) return;
@@ -357,7 +377,7 @@ app.get("/api/health", async (req, res) => {
 			status: "ok", version, uptime: process.uptime(),
 			uptimeHuman: formatUptimeHuman(process.uptime()),
 			mongodb: getMongoStatus(), redis: "disconnected", r2: "disconnected",
-			gemini: "disconnected", activeTransfers: 0, timestamp: Date.now(),
+			activeTransfers: 0, timestamp: Date.now(),
 		});
 	}
 });
@@ -521,7 +541,17 @@ async function gracefulShutdown(signal, onComplete) {
 	process.exit(0);
 }
 
-startServer();
+if (require.main === module) {
+	startServer();
+}
+
+module.exports = { 
+	app, 
+	server, 
+	corsOrigin, 
+	originsMatch, 
+	isPlatformDeployOrigin 
+};
 
 // Keep Render free tier awake during active sessions
 const SELF_PING_URL = (process.env.RENDER_EXTERNAL_URL || process.env.BACKEND_URL || "").replace(/\/+$/, "");

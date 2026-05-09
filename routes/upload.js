@@ -153,9 +153,8 @@ async function validateSniffBuffer(file) {
 }
 
 // Throttle progress emits: at most one per PROGRESS_EMIT_INTERVAL_MS or whenever
-// the percent jumps by ≥1. Without throttling, a fast LAN upload would emit
-// thousands of socket events per second and starve the event loop on Render's 0.1 CPU.
-const PROGRESS_EMIT_INTERVAL_MS = 200;
+// the percent jumps by >=1. Smoothed to 100ms (10fps) for fluid UI updates on fast connections.
+const PROGRESS_EMIT_INTERVAL_MS = 100;
 
 // ── Streaming multipart parser ───────────────────────────────
 // Pipes each multipart file directly to R2 via lib-storage Upload (multipart, parallel).
@@ -309,14 +308,14 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 			fileStream.pipe(passthrough);
 
 			// Configure multipart upload to R2:
-			// - 5MB part size (R2 minimum), 4 concurrent parts
+			// - 8MB part size, 8 concurrent parts (64MB in-flight) for max throughput
 			// - leavePartsOnError:false so aborts clean up server-side parts
 			let uploader;
 			try {
 				uploader = new Upload({
 					client: r2Client,
-					queueSize: 4,
-					partSize: 5 * 1024 * 1024,
+					queueSize: 8,
+					partSize: 8 * 1024 * 1024,
 					leavePartsOnError: false,
 					params: {
 						Bucket: r2Bucket,

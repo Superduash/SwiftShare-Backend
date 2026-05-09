@@ -52,6 +52,41 @@ function buildSuffix(parts) {
 	return ` - ${clean.join(" - ")}`;
 }
 
+/**
+ * Redact sensitive data from objects before logging
+ * @param {any} data - Data to redact
+ * @returns {any} Redacted data
+ */
+function redactSensitiveData(data) {
+	if (!data || typeof data !== "object") {
+		return data;
+	}
+
+	// Handle arrays
+	if (Array.isArray(data)) {
+		return data.map(item => redactSensitiveData(item));
+	}
+
+	const redacted = {};
+	const sensitiveKeys = ["password", "token", "apikey", "secret", "authorization", "api_key", "apiKey"];
+
+	for (const key in data) {
+		const lowerKey = key.toLowerCase();
+		
+		// Check if key is sensitive
+		if (sensitiveKeys.some(sensitive => lowerKey.includes(sensitive))) {
+			redacted[key] = "[REDACTED]";
+		} else if (data[key] && typeof data[key] === "object") {
+			// Recursively redact nested objects
+			redacted[key] = redactSensitiveData(data[key]);
+		} else {
+			redacted[key] = data[key];
+		}
+	}
+
+	return redacted;
+}
+
 function logSuccess(message, useTimestamp = false) {
 	const line = `[✓] ${message}`;
 	writeStdout(useTimestamp ? withTimestamp(line) : line);
@@ -90,7 +125,16 @@ function logError(event, error, ...parts) {
 	const message = hasError
 		? (error.message ? error.message : String(error))
 		: "";
-	const suffixParts = hasError ? [...parts, `ERROR: ${message}`] : parts;
+	
+	// Redact sensitive data from parts
+	const redactedParts = parts.map(part => {
+		if (typeof part === "object") {
+			return JSON.stringify(redactSensitiveData(part));
+		}
+		return part;
+	});
+	
+	const suffixParts = hasError ? [...redactedParts, `ERROR: ${message}`] : redactedParts;
 	writeStderr(withTimestamp(`[✗] ${event}${buildSuffix(suffixParts)}`));
 	// Only log stack traces for non-operational errors in development
 	if (hasError && !isOperational && error.stack && String(process.env.NODE_ENV || '').toLowerCase() !== 'production') {
@@ -115,5 +159,6 @@ module.exports = {
 	logEvent,
 	logError,
 	formatSizeMB,
+	redactSensitiveData,
 };
 
