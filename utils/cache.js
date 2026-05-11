@@ -92,12 +92,16 @@ const statsCache = new LRUCache(50, 60000); // 60s TTL for stats
 
 // Cleanup expired entries every 5 minutes
 setInterval(() => {
-	const cleaned = transferMetadataCache.cleanup() +
-		nearbyDevicesCache.cleanup() +
-		healthCheckCache.cleanup() +
-		statsCache.cleanup();
-	if (cleaned > 0) {
-		logEvent(`Cache cleanup: removed ${cleaned} expired entries`);
+	try {
+		const cleaned = transferMetadataCache.cleanup() +
+			nearbyDevicesCache.cleanup() +
+			healthCheckCache.cleanup() +
+			statsCache.cleanup();
+		if (cleaned > 0) {
+			logEvent(`Cache cleanup: removed ${cleaned} expired entries`);
+		}
+	} catch (err) {
+		logError("Cache cleanup crashed", err);
 	}
 }, 5 * 60 * 1000).unref();
 

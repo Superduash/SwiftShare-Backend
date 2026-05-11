@@ -1,4 +1,4 @@
-﻿const { Ratelimit } = require("@upstash/ratelimit");
+const { Ratelimit } = require("@upstash/ratelimit");
 const { Redis } = require("@upstash/redis");
 
 const { getClientIp } = require("../utils/helpers");
@@ -89,16 +89,20 @@ function ipBasedRateLimit(ip, maxRequests = IP_RATE_LIMIT_MAX_REQUESTS) {
 
 // Cleanup old IP rate limit entries every 15 minutes (less frequent = better performance)
 setInterval(() => {
-	const now = Date.now();
-	// Batch delete for better performance
-	const toDelete = [];
-	for (const [ip, entry] of ipRateLimitMap) {
-		if (now > entry.resetAt) {
-			toDelete.push(ip);
+	try {
+		const now = Date.now();
+		// Batch delete for better performance
+		const toDelete = [];
+		for (const [ip, entry] of ipRateLimitMap) {
+			if (now > entry.resetAt) {
+				toDelete.push(ip);
+			}
 		}
-	}
-	for (const ip of toDelete) {
-		ipRateLimitMap.delete(ip);
+		for (const ip of toDelete) {
+			ipRateLimitMap.delete(ip);
+		}
+	} catch (err) {
+		logError("IP rate limit cleanup crashed", err);
 	}
 }, 15 * 60 * 1000).unref(); // unref to not block process exit
 

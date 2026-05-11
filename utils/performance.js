@@ -14,7 +14,9 @@ function measureEventLoopLag() {
 }
 
 // Start monitoring event loop lag
-setInterval(measureEventLoopLag, 100).unref();
+setInterval(() => {
+	try { measureEventLoopLag(); } catch (err) { logError("measureEventLoopLag crashed", err); }
+}, 100).unref();
 
 function getEventLoopLag() {
 	return eventLoopLag;
@@ -215,7 +217,9 @@ function checkMemoryPressure() {
 }
 
 // Check memory pressure every 30 seconds
-setInterval(checkMemoryPressure, 30000).unref();
+setInterval(() => {
+	try { checkMemoryPressure(); } catch (err) { logError("checkMemoryPressure crashed", err); }
+}, 30000).unref();
 
 // Get comprehensive performance snapshot
 function getPerformanceSnapshot() {

@@ -24,10 +24,10 @@ async function streamZipFromR2({ code, files, res, onChunk }) {
 		`attachment; filename="swiftshare-${code}.zip"`,
 	);
 
-	// zlib level 1 = fastest compression. With Cloudflare R2 already content-disk-bound
-	// and Render's 0.1 CPU, level 6+ would dominate the transfer time without meaningfully
-	// reducing payload (most files are already-compressed media).
-	const archive = archiver("zip", { zlib: { level: 1 } });
+	// Use lightweight/store-only ZIP streaming (disable zlib compression)
+	// to prevent CPU starvation on constrained hosts, as most files are
+	// already-compressed media anyway.
+	const archive = archiver("zip", { store: true });
 
 	// Track every upstream R2 stream so we can destroy them if the client aborts
 	// or the archiver errors. Otherwise an aborted download leaves N R2 sockets

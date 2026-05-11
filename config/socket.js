@@ -202,53 +202,57 @@ function ensureConsolidatedTimer() {
 	}
 
 	consolidatedTimerId = setInterval(() => {
-		if (countdownMap.size === 0) {
-			clearInterval(consolidatedTimerId);
-			consolidatedTimerId = null;
-			return;
-		}
-
-		const now = Date.now();
-		const expired = [];
-
-		for (const [normalizedCode, entry] of countdownMap) {
-			const secondsRemaining = Math.max(0, Math.ceil((entry.endsAt - now) / 1000));
-
-			// Skip emit if value didn't change (only happens under sub-second tick drift),
-			// reducing socket chatter without affecting client UX.
-			if (entry.lastEmittedSeconds !== secondsRemaining) {
-				emitToRoom(normalizedCode, "countdown-tick", { secondsRemaining });
-				entry.lastEmittedSeconds = secondsRemaining;
+		try {
+			if (countdownMap.size === 0) {
+				clearInterval(consolidatedTimerId);
+				consolidatedTimerId = null;
+				return;
 			}
 
-			if (secondsRemaining <= 0) {
-				expired.push(normalizedCode);
-			}
-		}
+			const now = Date.now();
+			const expired = [];
 
-		for (const normalizedCode of expired) {
-			countdownMap.delete(normalizedCode);
-			emitToRoom(normalizedCode, "transfer-expired", { code: normalizedCode });
-			if (!isMongoReady()) continue;
-			void Transfer.updateOne(
-				{ code: normalizedCode },
-				{
-					$push: {
-						activity: {
-							$each: [{
-								event: "expired",
-								device: "System",
-								ip: "",
-								timestamp: new Date(),
-							}],
-							// Cap activity log at last 200 entries to prevent unbounded doc growth
-							// on chatty transfers (many viewers, many downloads).
-							$slice: -200,
+			for (const [normalizedCode, entry] of countdownMap) {
+				const secondsRemaining = Math.max(0, Math.ceil((entry.endsAt - now) / 1000));
+
+				// Skip emit if value didn't change (only happens under sub-second tick drift),
+				// reducing socket chatter without affecting client UX.
+				if (entry.lastEmittedSeconds !== secondsRemaining) {
+					emitToRoom(normalizedCode, "countdown-tick", { secondsRemaining });
+					entry.lastEmittedSeconds = secondsRemaining;
+				}
+
+				if (secondsRemaining <= 0) {
+					expired.push(normalizedCode);
+				}
+			}
+
+			for (const normalizedCode of expired) {
+				countdownMap.delete(normalizedCode);
+				emitToRoom(normalizedCode, "transfer-expired", { code: normalizedCode });
+				if (!isMongoReady()) continue;
+				void Transfer.updateOne(
+					{ code: normalizedCode },
+					{
+						$push: {
+							activity: {
+								$each: [{
+									event: "expired",
+									device: "System",
+									ip: "",
+									timestamp: new Date(),
+								}],
+								// Cap activity log at last 200 entries to prevent unbounded doc growth
+								// on chatty transfers (many viewers, many downloads).
+								$slice: -200,
+							},
 						},
 					},
-				},
-			).catch((err) => logError("Failed to record expiry", err, `CODE: ${normalizedCode}`));
-			logEvent("Transfer expired", `CODE: ${normalizedCode}`);
+				).catch((err) => logError("Failed to record expiry", err, `CODE: ${normalizedCode}`));
+				logEvent("Transfer expired", `CODE: ${normalizedCode}`);
+			}
+		} catch (err) {
+			logError("Consolidated timer crashed", err);
 		}
 	}, TICK_INTERVAL_MS);
 
@@ -493,15 +497,19 @@ function initSocket(server) {
 
 	// Cleanup old connection attempts every 10 minutes (less frequent)
 	setInterval(() => {
-		const now = Date.now();
-		const toDelete = [];
-		for (const [ip, attempts] of connectionAttempts) {
-			if (now > attempts.resetAt) {
-				toDelete.push(ip);
+		try {
+			const now = Date.now();
+			const toDelete = [];
+			for (const [ip, attempts] of connectionAttempts) {
+				if (now > attempts.resetAt) {
+					toDelete.push(ip);
+				}
 			}
-		}
-		for (const ip of toDelete) {
-			connectionAttempts.delete(ip);
+			for (const ip of toDelete) {
+				connectionAttempts.delete(ip);
+			}
+		} catch (err) {
+			logError("Connection attempts cleanup crashed", err);
 		}
 	}, 10 * 60 * 1000).unref(); // unref to not block process exit
 

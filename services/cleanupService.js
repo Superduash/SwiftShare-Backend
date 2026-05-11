@@ -3,8 +3,22 @@ const cron = require("node-cron");
 const Transfer = require("../models/Transfer");
 const { deleteFilesFromR2 } = require("./fileManager");
 const { clearTransferCountdown, emitToRoom } = require("../config/socket");
-const { logEvent, logError } = require("../utils/logger");
+const { logEvent, logError, logWarn } = require("../utils/logger");
 const { isMemoryPressure } = require("../utils/performance");
+
+// ── R2 Lifecycle Rule Requirement ─────────────────────────────────────────────
+// IMPORTANT: This cleanup job only deletes R2 objects it can find in MongoDB.
+// If a user closes their tab mid-upload, the R2 object may be written but the
+// MongoDB record may never be created — leaving an orphaned file that this job
+// will never find or delete.
+//
+// REQUIRED INFRASTRUCTURE STEP (do before launch):
+//   Go to Cloudflare R2 Dashboard → Your Bucket → Settings → Lifecycle Rules
+//   Add rule: Delete objects older than 1 day (prefix: "transfers/")
+//   This acts as an absolute fail-safe for all orphaned uploads.
+//
+// Set R2_LIFECYCLE_CONFIGURED=true in your .env once the rule is applied.
+// ─────────────────────────────────────────────────────────────────────────────
 
 let cleanupTask;
 let isCleanupRunning = false;
@@ -165,6 +179,16 @@ async function runCleanup() {
 function startCleanupJob() {
 	if (cleanupTask) {
 		return cleanupTask;
+	}
+
+	// Warn operators if the R2 lifecycle rule hasn't been confirmed yet.
+	// This is a one-time infrastructure step — see comment at top of file.
+	if (String(process.env.R2_LIFECYCLE_CONFIGURED || "").toLowerCase() !== "true") {
+		logWarn(
+			"R2 bucket lifecycle rule not confirmed",
+			"Set R2_LIFECYCLE_CONFIGURED=true in .env after adding a 1-day auto-delete rule in the Cloudflare R2 dashboard.",
+			"Without this, orphaned uploads from aborted sessions will accumulate and inflate your R2 bill.",
+		);
 	}
 
 	cleanupTask = cron.schedule("*/5 * * * *", () => {

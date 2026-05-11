@@ -494,11 +494,15 @@ function startServer() {
 		if (externalUrl) {
 			const pingIntervalMs = 14 * 60 * 1000; // 14 mins
 			setInterval(() => {
-				fetch(`${externalUrl}/api/ping`)
-					.then((res) => {
-						if (!res.ok) logWarn(`Self-ping failed with status: ${res.status}`);
-					})
-					.catch((err) => logError("Self-ping network error", err));
+				try {
+					fetch(`${externalUrl}/api/ping`)
+						.then((res) => {
+							if (!res.ok) logWarn(`Self-ping failed with status: ${res.status}`);
+						})
+						.catch((err) => logError("Self-ping network error", err));
+				} catch (err) {
+					logError("Self-ping crashed", err);
+				}
 			}, pingIntervalMs);
 			logSuccess(`Keep-alive active pinging ${externalUrl}/api/ping every 14m`);
 		}
