@@ -303,22 +303,17 @@ function getSocketIp(socket) {
 	// Priority 1: x-forwarded-for (most reliable for proxied connections)
 	const forwardedFor = socket?.handshake?.headers?.["x-forwarded-for"];
 	if (typeof forwardedFor === "string" && forwardedFor.trim()) {
-		const ip = forwardedFor.split(",")[0].trim();
-		logEvent("Socket IP from x-forwarded-for", `SOCKET: ${socket.id}`, `IP: ${ip}`);
-		return ip;
+		return forwardedFor.split(",")[0].trim();
 	}
 
 	// Priority 2: x-real-ip
 	const realIp = socket?.handshake?.headers?.["x-real-ip"];
 	if (typeof realIp === "string" && realIp.trim()) {
-		logEvent("Socket IP from x-real-ip", `SOCKET: ${socket.id}`, `IP: ${realIp}`);
 		return realIp.trim();
 	}
 
 	// Priority 3: socket address
-	const address = String(socket?.handshake?.address || "").trim();
-	logEvent("Socket IP from address", `SOCKET: ${socket.id}`, `IP: ${address}`);
-	return address;
+	return String(socket?.handshake?.address || "").trim();
 }
 
 async function emitNearbyDevices(socket) {
@@ -331,34 +326,27 @@ async function emitNearbyDevices(socket) {
 		const subnet = socket.data.subnet;
 		const clientIp = socket.data.clientIp;
 
-		logEvent("Nearby devices request", `SOCKET: ${socket.id}`, `IP: ${clientIp}`, `SUBNET: ${subnet || "INVALID"}`);
-
 		// If no valid subnet, return empty list
 		if (!subnet) {
 			socket.emit("nearby-devices", { devices: [] });
-			logEvent("Nearby devices - no valid subnet", `SOCKET: ${socket.id}`, `IP: ${clientIp}`);
 			return;
 		}
 
 		const now = new Date();
 		
-		// FIXED: Subnet-first query — get connected socket IDs from the subnet room first,
-		// then query only transfers matching those socket IDs. This removes the global
-		// limit dependency entirely and scales correctly regardless of total transfer count.
+		// Subnet-first query — get connected socket IDs from the subnet room first,
+		// then query only transfers matching those socket IDs.
 		const subnetRoom = `subnet:${subnet}`;
 		const socketsInSubnet = ioInstance
 			? new Set((await ioInstance.in(subnetRoom).fetchSockets()).map(s => s.id))
 			: new Set();
 
-		logEvent("Nearby devices - subnet room query", `SOCKET: ${socket.id}`, `SUBNET: ${subnet}`, `SOCKETS_IN_ROOM: ${socketsInSubnet.size}`);
-
 		if (socketsInSubnet.size === 0) {
 			socket.emit("nearby-devices", { devices: [] });
-			logEvent("Nearby devices emitted", `SOCKET: ${socket.id}`, `SUBNET: ${subnet}`, `COUNT: 0`);
 			return;
 		}
 
-		// Query only transfers whose senderSocketId is in the subnet room — no global limit
+		// Query only transfers whose senderSocketId is in the subnet room
 		const socketIdArray = Array.from(socketsInSubnet);
 		const candidates = await Transfer.find({
 			isDeleted: false,
@@ -379,20 +367,11 @@ async function emitNearbyDevices(socket) {
 				expiresAt: transfer.expiresAt,
 				socketId: String(transfer.senderSocketId || ""),
 			}))
-			.filter((device) => {
-				if (device.socketId === socket.id) {
-					logEvent("Nearby devices - filtered self", `CODE: ${device.code}`, `SOCKET: ${device.socketId}`);
-					return false;
-				}
-				return true;
-			});
+			.filter((device) => device.socketId !== socket.id);
 
 		socket.emit("nearby-devices", { devices });
-		
-		logEvent("Nearby devices emitted", `SOCKET: ${socket.id}`, `SUBNET: ${subnet}`, `COUNT: ${devices.length}`);
 	} catch (error) {
 		logError("Failed to emit nearby devices", error, `SOCKET: ${socket.id}`);
-		// Always emit response even on error to prevent client hanging
 		socket.emit("nearby-devices", { devices: [] });
 	}
 }
@@ -555,7 +534,7 @@ function initSocket(server) {
 		// Auto-join subnet room if valid subnet exists
 		if (subnet) {
 			socket.join(`subnet:${subnet}`);
-			logEvent("Socket subnet room joined", `SOCKET: ${socket.id}`, `IP: ${clientIp}`, `SUBNET: ${subnet}`);
+			logEvent("Socket connected", `SOCKET: ${socket.id}`, `IP: ${clientIp}`, `SUBNET: ${subnet}`);
 		}
 		
 		// Suppress ECONNRESET/EPIPE errors from abrupt client disconnects —
