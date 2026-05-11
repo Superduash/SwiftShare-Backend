@@ -189,14 +189,12 @@ function bindSocketToRoom(code, socketId) {
 }
 
 // ── Consolidated countdown timer ──────────────────────────
-// Instead of one setInterval per transfer (which kills 0.1 CPU on Render),
-// we use a single interval that ticks every 1s and processes all active countdowns.
-//
-// Drift correction: each tick recomputes from absolute endsAt rather than decrementing
-// a counter, so even if the event loop stalls (GC pause, slow syscall), the next tick
-// reports the correct remaining seconds — no compounding error over 10+ minute sessions.
+// Frontend handles local countdown display. Backend only needs to:
+// 1. Emit a sync tick every 5s (not every 1s) to correct drift
+// 2. Emit transfer-expired when a transfer expires
+// This reduces socket chatter by 5x at scale.
 let consolidatedTimerId = null;
-const TICK_INTERVAL_MS = 1000;
+const TICK_INTERVAL_MS = 5000; // 5s — frontend interpolates locally between ticks
 
 function ensureConsolidatedTimer() {
 	if (consolidatedTimerId) {
@@ -340,19 +338,9 @@ async function emitNearbyDevices(socket) {
 
 		const now = new Date();
 		
-		// NEW approach: Get all active transfers
-		// Filter by those whose senderSocketId is in the connected subnet room
-		const candidates = await Transfer.find({
-			isDeleted: false,
-			expiresAt: { $gt: now },
-			senderSocketId: { $exists: true, $ne: "" },
-		})
-			.select('code fileCount files totalSize ai.category senderDeviceName expiresAt senderSocketId')
-			.sort({ createdAt: -1 })
-			.limit(50)
-			.lean();
-
-		// Get all connected socket IDs in the subnet room
+		// FIXED: Subnet-first query — get connected socket IDs from the subnet room first,
+		// then query only transfers matching those socket IDs. This removes the global
+		// limit dependency entirely and scales correctly regardless of total transfer count.
 		const subnetRoom = `subnet:${subnet}`;
 		const socketsInSubnet = ioInstance
 			? new Set((await ioInstance.in(subnetRoom).fetchSockets()).map(s => s.id))
@@ -360,9 +348,24 @@ async function emitNearbyDevices(socket) {
 
 		logEvent("Nearby devices - subnet room query", `SOCKET: ${socket.id}`, `SUBNET: ${subnet}`, `SOCKETS_IN_ROOM: ${socketsInSubnet.size}`);
 
-		// Filter candidates whose senderSocketId is in the subnet room
+		if (socketsInSubnet.size === 0) {
+			socket.emit("nearby-devices", { devices: [] });
+			logEvent("Nearby devices emitted", `SOCKET: ${socket.id}`, `SUBNET: ${subnet}`, `COUNT: 0`);
+			return;
+		}
+
+		// Query only transfers whose senderSocketId is in the subnet room — no global limit
+		const socketIdArray = Array.from(socketsInSubnet);
+		const candidates = await Transfer.find({
+			isDeleted: false,
+			expiresAt: { $gt: now },
+			senderSocketId: { $in: socketIdArray },
+		})
+			.select('code fileCount files totalSize ai.category senderDeviceName expiresAt senderSocketId')
+			.lean();
+
+		// Map to device info and filter self
 		const devices = candidates
-			.filter(transfer => socketsInSubnet.has(transfer.senderSocketId))
 			.map((transfer) => ({
 				code: transfer.code,
 				fileCount: Number(transfer.fileCount || transfer.files?.length || 0),
@@ -373,7 +376,6 @@ async function emitNearbyDevices(socket) {
 				socketId: String(transfer.senderSocketId || ""),
 			}))
 			.filter((device) => {
-				// Exclude self
 				if (device.socketId === socket.id) {
 					logEvent("Nearby devices - filtered self", `CODE: ${device.code}`, `SOCKET: ${device.socketId}`);
 					return false;
@@ -428,15 +430,12 @@ function initSocket(server) {
 					return;
 				}
 
-				// Always allow known deployment platforms (Netlify, Render, Vercel, etc.)
-				if (isPlatformDeployOrigin(origin)) {
-					callback(null, true);
-					return;
-				}
-
+				// SECURITY: Only allow explicitly configured origins — no wildcard platform trust
+				// Platform subdomains (Vercel, Render, etc) must be explicitly listed in CORS_EXTRA_ORIGINS
+				// Do NOT trust all *.vercel.app or *.onrender.com — malicious clones could bypass CORS
 				if (
-					allowedOrigins.length === 0
-					|| allowedOrigins.some((configuredOrigin) => originsMatch(origin, configuredOrigin))
+					allowedOrigins.length > 0
+					&& allowedOrigins.some((configuredOrigin) => originsMatch(origin, configuredOrigin))
 				) {
 					callback(null, true);
 					return;
@@ -675,7 +674,7 @@ function initSocket(server) {
 			// Throttle nearby-device re-queries so socket pings do not spam MongoDB.
 			const now = Date.now();
 			const lastQuery = socket.data.lastNearbyQuery || 0;
-			if (now - lastQuery < 4000) {
+			if (now - lastQuery < 8000) {
 				return;
 			}
 			socket.data.lastNearbyQuery = now;

@@ -81,15 +81,27 @@ router.get("/", rateLimitMetadata, async (req, res, next) => {
 		}
 
 		const now = new Date();
-		// Pull active transfers with a live sender socket. We then cross-reference against
-		// connected sockets in the subnet room (set by the Socket.IO connection handler) —
-		// this is the production-correct discovery path because behind Render/Cloudflare
-		// proxies the senderIp is a CDN edge IP, so an IP-prefix regex never matches.
+
+		const io = getIo();
+		const subnetRoom = `subnet:${subnet}`;
+		// Subnet-first: get connected socket IDs from the subnet room, then query only
+		// those transfers. Removes global limit dependency entirely.
+		// Always fetch fresh room members to avoid stale socket references
+		const sockets = await io?.in(subnetRoom).fetchSockets();
+		const socketsInSubnet = sockets && Array.isArray(sockets)
+			? new Set(sockets.map((s) => s?.id).filter(Boolean))
+			: new Set();
+
+		if (socketsInSubnet.size === 0) {
+			return res.status(200).json({ devices: [] });
+		}
+
+		const socketIdArray = Array.from(socketsInSubnet);
 		const candidates = await Transfer.find(
 			{
 				isDeleted: false,
 				expiresAt: { $gt: now },
-				senderSocketId: { $exists: true, $ne: "" },
+				senderSocketId: { $in: socketIdArray },
 			},
 			{
 				code: 1,
@@ -100,22 +112,11 @@ router.get("/", rateLimitMetadata, async (req, res, next) => {
 				senderDeviceName: 1,
 				expiresAt: 1,
 				senderSocketId: 1,
-				createdAt: 1,
 			},
-		)
-			.sort({ createdAt: -1 })
-			.limit(50)
-			.lean();
-
-		const io = getIo();
-		const subnetRoom = `subnet:${subnet}`;
-		const socketsInSubnet = io
-			? new Set((await io.in(subnetRoom).fetchSockets()).map((s) => s.id))
-			: new Set();
+		).lean();
 
 		return res.status(200).json({
 			devices: candidates
-				.filter((transfer) => socketsInSubnet.has(String(transfer.senderSocketId || "")))
 				.map((transfer) => ({
 					code: transfer.code,
 					fileCount: Number(transfer.fileCount || transfer.files?.length || 0),

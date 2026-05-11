@@ -644,12 +644,22 @@ router.post("/", rateLimitUpload, sanitizeRequestBody, async (req, res) => {
 
 		// AI analysis: pass the full buffer if we retained it (file ≤ AI_BUFFER_LIMIT),
 		// otherwise pass the sniff buffer so the analyzer can at least classify the type.
-		fireAndForgetAi(code, files.map((f) => ({
+		// Build the AI input array first, then release references to free memory.
+		const aiInputFiles = files.map((f) => ({
 			originalname: f.originalName,
 			mimetype: f.mimeType,
 			size: f.size,
 			buffer: f.aiBuffer || f.sniff,
-		})));
+		}));
+		// Fire AI analysis asynchronously (non-blocking) after response is sent
+		setImmediate(() => {
+			fireAndForgetAi(code, aiInputFiles);
+		});
+		// Release all file stream references immediately to free memory
+		files.forEach((f) => {
+			try { if (f.passthrough && typeof f.passthrough.destroy === 'function') f.passthrough.destroy(); } catch (e) {}
+			try { if (f.uploader && typeof f.uploader.abort === 'function') f.uploader.abort(); } catch (e) {}
+		});
 
 		return res.status(200).json(response);
 	} catch (error) {
@@ -724,7 +734,13 @@ router.post("/clipboard", rateLimitUpload, sanitizeRequestBody, async (req, res)
 			expiryMinutes: parseExpiryMinutes(expiryMinutes),
 		});
 
-		fireAndForgetAi(code, [{ originalname: filename, mimetype: mimeType, size: buffer.length, buffer }]);
+		// Fire AI analysis asynchronously after response
+		const clipboardAiInput = [{ originalname: filename, mimetype: mimeType, size: buffer.length, buffer }];
+		setImmediate(() => {
+			fireAndForgetAi(code, clipboardAiInput);
+		});
+		// Clear buffer reference to avoid memory retention
+		clipboardAiInput[0].buffer = null;
 
 		return res.status(200).json(response);
 	} catch (error) {

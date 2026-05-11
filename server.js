@@ -145,11 +145,12 @@ function corsOrigin(origin, callback) {
 	if (!origin) { callback(null, true); return; }
 	if (allowAllOrigins) { callback(null, true); return; }
 	if (!isProduction && isDevOriginAllowed(origin)) { callback(null, true); return; }
-	// Always allow known deployment platforms (Netlify, Render, Vercel, etc.)
-	if (isPlatformDeployOrigin(origin)) { callback(null, true); return; }
+	// SECURITY: Only allow explicitly configured origins — no wildcard platform trust
+	// Platform subdomains (Vercel, Render, etc) must be explicitly listed in CORS_EXTRA_ORIGINS
+	// Do NOT trust all *.vercel.app or *.onrender.com — malicious clones could bypass CORS
 	if (
-		allowedFrontendOrigins.length === 0
-		|| allowedFrontendOrigins.some((o) => originsMatch(origin, o))
+		allowedFrontendOrigins.length > 0
+		&& allowedFrontendOrigins.some((o) => originsMatch(origin, o))
 	) { callback(null, true); return; }
 	logEvent("Blocked HTTP CORS origin", `ORIGIN: ${origin}`);
 	callback(null, false);
@@ -567,17 +568,8 @@ module.exports = {
 	isPlatformDeployOrigin 
 };
 
-// Keep Render free tier awake during active sessions
-const SELF_PING_URL = (process.env.RENDER_EXTERNAL_URL || process.env.BACKEND_URL || "").replace(/\/+$/, "");
-if (SELF_PING_URL && isProduction) {
-	setInterval(() => {
-		const controller = new AbortController();
-		const timer = setTimeout(() => controller.abort(), 8000);
-		fetch(`${SELF_PING_URL}/api/ping`, { signal: controller.signal })
-			.catch(() => {})
-			.finally(() => clearTimeout(timer));
-	}, 10 * 60 * 1000);
-}
+// Keep Render free tier awake during active sessions (production only, inside server.listen already handles this)
+// Removed duplicate self-ping — handled inside startServer() → server.listen callback above
 
 process.on("unhandledRejection", (reason) => {
 	logError("Unhandled promise rejection", reason instanceof Error ? reason : new Error(String(reason)));
