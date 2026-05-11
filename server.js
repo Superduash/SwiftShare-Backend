@@ -489,6 +489,20 @@ function startServer() {
 	server.listen(port, host, () => {
 		startCleanupJob();
 		printStartupStatus(port, host);
+
+		// Self-ping to prevent free tier cold starts
+		const externalUrl = process.env.RENDER_EXTERNAL_URL;
+		if (externalUrl) {
+			const pingIntervalMs = 14 * 60 * 1000; // 14 mins
+			setInterval(() => {
+				fetch(`${externalUrl}/api/ping`)
+					.then((res) => {
+						if (!res.ok) logWarn(`Self-ping failed with status: ${res.status}`);
+					})
+					.catch((err) => logError("Self-ping network error", err));
+			}, pingIntervalMs);
+			logSuccess(`Keep-alive active pinging ${externalUrl}/api/ping every 14m`);
+		}
 	});
 }
 
