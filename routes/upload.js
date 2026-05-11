@@ -471,66 +471,74 @@ async function finalizeTransfer({
 
 function fireAndForgetAi(code, aiInputFiles) {
 	const primaryFile = aiInputFiles && aiInputFiles[0];
-	void (async () => {
-		if (!primaryFile) return;
+	// Guard: skip if already in flight for this code
+	if (!primaryFile || aiInFlight.has(code)) {
 		if (aiInFlight.has(code)) {
 			logEvent("AI analysis skipped (already in flight)", `CODE: ${code}`);
-			return;
 		}
-		aiInFlight.add(code);
-		let emitted = false;
-		const emitUnavailable = (warning) => {
-			if (emitted) return;
-			emitToRoom(code, "ai-ready", {
-				summary: null, category: null, imageDescription: null,
-				files: [], detectedIntent: null, riskFlags: [],
-				warning: warning || "AI analysis unavailable",
-				model: null,
-				provider: null,
-			});
-			emitted = true;
-		};
-		
-		// Set a timeout to ensure we always emit something within 60 seconds
-		const timeoutId = setTimeout(() => {
-			if (!emitted) {
-				logEvent("AI analysis timeout", `CODE: ${code}`, "Emitting fallback after 60s");
-				emitUnavailable("AI analysis timed out");
+		return;
+	}
+
+	aiInFlight.add(code);
+	let emitted = false;
+
+	const emitUnavailable = (warning) => {
+		if (emitted) return;
+		emitted = true;
+		emitToRoom(code, "ai-ready", {
+			summary: null, category: null, imageDescription: null,
+			files: [], detectedIntent: null, riskFlags: [],
+			warning: warning || "AI analysis unavailable",
+			model: null,
+			provider: null,
+		});
+	};
+
+	// Strictly background — use setImmediate so upload response is sent first
+	setImmediate(() => {
+		void (async () => {
+			// Hard timeout: always emit within 60s
+			const timeoutId = setTimeout(() => {
+				if (!emitted) {
+					logEvent("AI analysis timeout", `CODE: ${code}`);
+					emitUnavailable("AI analysis timed out");
+				}
+			}, 60000);
+
+			try {
+				logEvent("AI analysis started", `CODE: ${code}`, `FILES: ${aiInputFiles.length}`);
+				const aiResult = await analyzeTransfer(aiInputFiles, code);
+				clearTimeout(timeoutId);
+
+				if (!isUsableAiResult(aiResult)) {
+					emitUnavailable(aiResult?.warning || "AI analysis unavailable");
+					logEvent("AI analysis completed", `CODE: ${code}`, "READY: false");
+					return;
+				}
+
+				await Transfer.updateOne({ code }, { $set: { ai: aiResult } });
+				emitToRoom(code, "ai-ready", {
+					summary: aiResult.summary || aiResult.overall_summary || null,
+					category: aiResult.category || null,
+					imageDescription: aiResult.imageDescription || null,
+					files: aiResult.files || [],
+					detectedIntent: aiResult.detectedIntent || aiResult.detected_intent || null,
+					riskFlags: aiResult.riskFlags || aiResult.risk_flags || [],
+					model: aiResult.model || null,
+					provider: aiResult.provider || null,
+				});
+				emitted = true;
+				logEvent("AI analysis completed", `CODE: ${code}`, "READY: true", `MODEL: ${aiResult.model || "unknown"}`, `PROVIDER: ${aiResult.provider || "unknown"}`);
+			} catch (aiError) {
+				clearTimeout(timeoutId);
+				logError("AI analysis failed", aiError, `CODE: ${code}`);
+				emitUnavailable("AI analysis unavailable");
+			} finally {
+				aiInFlight.delete(code);
+				if (!emitted) emitUnavailable("AI analysis unavailable");
 			}
-		}, 60000);
-		
-		try {
-			logEvent("AI analysis started", `CODE: ${code}`, `FILES: ${aiInputFiles.length}`);
-			const aiResult = await analyzeTransfer(aiInputFiles, code);
-			clearTimeout(timeoutId);
-			
-			if (!isUsableAiResult(aiResult)) {
-				emitUnavailable(aiResult?.warning || "AI analysis unavailable");
-				logEvent("AI analysis completed", `CODE: ${code}`, "READY: false");
-				return;
-			}
-			await Transfer.updateOne({ code }, { $set: { ai: aiResult } });
-			emitToRoom(code, "ai-ready", {
-				summary: aiResult.summary || aiResult.overall_summary || null,
-				category: aiResult.category || null,
-				imageDescription: aiResult.imageDescription || null,
-				files: aiResult.files || [],
-				detectedIntent: aiResult.detectedIntent || aiResult.detected_intent || null,
-				riskFlags: aiResult.riskFlags || aiResult.risk_flags || [],
-				model: aiResult.model || null,
-				provider: aiResult.provider || null,
-			});
-			emitted = true;
-			logEvent("AI analysis completed", `CODE: ${code}`, "READY: true", `MODEL: ${aiResult.model || "unknown"}`, `PROVIDER: ${aiResult.provider || "unknown"}`);
-		} catch (aiError) {
-			clearTimeout(timeoutId);
-			logError("AI analysis failed", aiError, `CODE: ${code}`);
-			emitUnavailable("AI analysis unavailable");
-		} finally {
-			aiInFlight.delete(code);
-			if (!emitted) emitUnavailable("AI analysis unavailable");
-		}
-	})();
+		})();
+	});
 }
 
 // ── Streaming POST /api/upload ───────────────────────────────
