@@ -4,6 +4,7 @@ const Transfer = require("../models/Transfer");
 const { rateLimitMetadata } = require("../middleware/rateLimiter");
 const { validateCode } = require("../middleware/validateCode");
 const { getClientIp, getDeviceName, isTransferExpired, getTransferStatus, isBurnClaimOwner, getRequestFingerprint } = require("../utils/helpers");
+const { sanitizeString } = require("../middleware/inputValidator");
 const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
 const { getObjectFromR2 } = require("../services/fileManager");
 const { analyzeTransfer } = require("../services/aiAnalyzer");

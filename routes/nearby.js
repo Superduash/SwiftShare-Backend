@@ -2,6 +2,7 @@ const express = require("express");
 
 const Transfer = require("../models/Transfer");
 const { getClientIp, getSubnet } = require("../utils/helpers");
+const { sanitizeString } = require("../middleware/inputValidator");
 const { logEvent } = require("../utils/logger");
 const { rateLimitMetadata } = require("../middleware/rateLimiter");
 const { buildErrorResponse, ERROR_CODES } = require("../utils/constants");
@@ -72,7 +73,7 @@ router.get("/", rateLimitMetadata, async (req, res, next) => {
 	try {
 		const clientIp = getClientIp(req);
 		const subnet = getSubnet(clientIp);
-		const requesterSocketId = String(req.query?.socketId || "").trim();
+		const requesterSocketId = sanitizeString(String(req.query?.socketId || "").trim(), 100);
 		logEvent("Nearby request", `IP: ${clientIp || "unknown"}`, `SUBNET: ${subnet || "n/a"}`);
 
 		if (!subnet) {

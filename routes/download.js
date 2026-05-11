@@ -18,6 +18,7 @@ const {
 	formatBytes,
 	isTransferExpired,
 } = require("../utils/helpers");
+const { sanitizeString } = require("../middleware/inputValidator");
 const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
 const { logEvent, logError, logWarn } = require("../utils/logger");
 
@@ -49,12 +50,12 @@ function sendUnavailableTransferResponse(req, res, transfer) {
 function getProvidedPassword(req) {
 	const headerPassword = req.get("x-transfer-password");
 	if (typeof headerPassword === "string" && headerPassword.length > 0) {
-		return headerPassword;
+		return sanitizeString(headerPassword, 64);
 	}
 
 	const queryPassword = req.query?.password;
 	if (typeof queryPassword === "string" && queryPassword.length > 0) {
-		return queryPassword;
+		return sanitizeString(queryPassword, 64);
 	}
 
 	return "";

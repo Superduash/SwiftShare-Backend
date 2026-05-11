@@ -8,6 +8,7 @@ const { rateLimitText } = require("../middleware/rateLimiter");
 const uploadModule = require("./upload");
 const Transfer = require("../models/Transfer");
 const { sanitizeFilename } = require("../utils/helpers");
+const { sanitizeString, validateTextContent } = require("../middleware/inputValidator");
 const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
 const { logEvent, logError } = require("../utils/logger");
 
@@ -55,17 +56,21 @@ router.post("/share", rateLimitText, async (req, res) => {
 				.json(buildErrorResponse(ERROR_CODES.NO_FILE_UPLOADED, "Snippet content is required"));
 		}
 
-		const buffer = Buffer.from(text, "utf8");
-		if (buffer.length > MAX_TEXT_BYTES) {
+		// Validate and sanitize text content
+		const textValidation = validateTextContent(text, MAX_TEXT_BYTES);
+		if (!textValidation.valid) {
 			return res.status(400).json(
 				buildErrorResponse(
 					ERROR_CODES.FILE_TOO_LARGE,
-					`Snippet exceeds ${Math.round(MAX_TEXT_BYTES / 1024)} KB limit`,
+					textValidation.error || `Snippet exceeds ${Math.round(MAX_TEXT_BYTES / 1024)} KB limit`,
 				),
 			);
 		}
 
-		const safeTitle = sanitizeFilename(trimNonString(title) || "snippet");
+		const sanitizedText = textValidation.sanitized;
+		const buffer = Buffer.from(sanitizedText, "utf8");
+
+		const safeTitle = sanitizeFilename(sanitizeString(trimNonString(title) || "snippet", 255));
 		// .txt extension keeps the receiver UX consistent with file downloads —
 		// browser/OS handle it as text, the existing preview route renders it,
 		// and the AI analyzer's text path can extract meaning from it directly.
@@ -110,7 +115,7 @@ router.post("/share", rateLimitText, async (req, res) => {
 		// the snippet immediately without needing to hit R2. This is safe because
 		// text shares are capped (MAX_TEXT_BYTES) and stored as UTF-8.
 		try {
-			await Transfer.updateOne({ code }, { $set: { 'files.0.inlineContent': text } });
+			await Transfer.updateOne({ code }, { $set: { 'files.0.inlineContent': sanitizedText } });
 		} catch (err) {
 			logError('Failed to persist inline text for transfer', err, `CODE: ${code}`);
 		}

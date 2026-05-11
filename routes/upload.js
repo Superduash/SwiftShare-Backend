@@ -485,12 +485,25 @@ function fireAndForgetAi(code, aiInputFiles) {
 				summary: null, category: null, imageDescription: null,
 				files: [], detectedIntent: null, riskFlags: [],
 				warning: warning || "AI analysis unavailable",
+				model: null,
+				provider: null,
 			});
 			emitted = true;
 		};
+		
+		// Set a timeout to ensure we always emit something within 60 seconds
+		const timeoutId = setTimeout(() => {
+			if (!emitted) {
+				logEvent("AI analysis timeout", `CODE: ${code}`, "Emitting fallback after 60s");
+				emitUnavailable("AI analysis timed out");
+			}
+		}, 60000);
+		
 		try {
 			logEvent("AI analysis started", `CODE: ${code}`, `FILES: ${aiInputFiles.length}`);
 			const aiResult = await analyzeTransfer(aiInputFiles, code);
+			clearTimeout(timeoutId);
+			
 			if (!isUsableAiResult(aiResult)) {
 				emitUnavailable(aiResult?.warning || "AI analysis unavailable");
 				logEvent("AI analysis completed", `CODE: ${code}`, "READY: false");
@@ -504,10 +517,13 @@ function fireAndForgetAi(code, aiInputFiles) {
 				files: aiResult.files || [],
 				detectedIntent: aiResult.detectedIntent || aiResult.detected_intent || null,
 				riskFlags: aiResult.riskFlags || aiResult.risk_flags || [],
+				model: aiResult.model || null,
+				provider: aiResult.provider || null,
 			});
 			emitted = true;
-			logEvent("AI analysis completed", `CODE: ${code}`, "READY: true");
+			logEvent("AI analysis completed", `CODE: ${code}`, "READY: true", `MODEL: ${aiResult.model || "unknown"}`, `PROVIDER: ${aiResult.provider || "unknown"}`);
 		} catch (aiError) {
+			clearTimeout(timeoutId);
 			logError("AI analysis failed", aiError, `CODE: ${code}`);
 			emitUnavailable("AI analysis unavailable");
 		} finally {
