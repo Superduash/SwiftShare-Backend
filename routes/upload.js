@@ -405,6 +405,7 @@ async function finalizeTransfer({
 	const shareLink = `${shareBaseUrl}/g/${code}`;
 	const senderIp = getClientIp(req);
 	const senderDevice = getDeviceName(req.get("user-agent") || "");
+	const ownershipToken = crypto.randomUUID();
 
 	const uploadedFiles = files.map((f) => ({
 		originalName: f.originalName,
@@ -430,6 +431,7 @@ async function finalizeTransfer({
 		totalSize,
 		burnAfterDownload,
 		passwordProtected: shouldProtectWithPassword,
+		ownershipToken,
 	};
 
 	await Transfer.create({
@@ -452,6 +454,7 @@ async function finalizeTransfer({
 		senderIp,
 		senderDeviceName: senderDevice,
 		senderSocketId: typeof req._senderSocketId === "string" ? req._senderSocketId : "",
+		ownershipToken,
 		qrDataUri: qr,
 		ai: null,
 		activity: [

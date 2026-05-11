@@ -637,20 +637,24 @@ function initSocket(server) {
 			}
 		});
 
-		socket.on("register-sender", async ({ code } = {}, ack) => {
+		socket.on("register-sender", async ({ code, ownershipToken } = {}, ack) => {
 			const normalizedCode = normalizeCode(code);
-			if (!normalizedCode) {
-				safeAck(ack, { ok: false, error: "invalid_code" });
+			if (!normalizedCode || !ownershipToken) {
+				safeAck(ack, { ok: false, error: "invalid_code_or_token" });
 				return;
 			}
 
 			socket.join(roomName(normalizedCode));
 
 			try {
-				await Transfer.updateOne(
-					{ code: normalizedCode },
+				const updateResult = await Transfer.updateOne(
+					{ code: normalizedCode, ownershipToken: ownershipToken },
 					{ $set: { senderSocketId: socket.id } },
 				);
+				if (updateResult.matchedCount === 0) {
+					safeAck(ack, { ok: false, error: "unauthorized" });
+					return;
+				}
 				safeAck(ack, { ok: true, code: normalizedCode, socketId: socket.id });
 			} catch (error) {
 				logError("Failed to register sender socket", error, `CODE: ${normalizedCode}`);
@@ -688,10 +692,20 @@ function initSocket(server) {
 			}
 		});
 
-		socket.on("push-transfer-offer", ({ targetSocketId, code, filename } = {}) => {
+		socket.on("push-transfer-offer", async ({ targetSocketId, code, filename } = {}) => {
 			const safeTargetSocketId = String(targetSocketId || "").trim();
 			const safeCode = normalizeCode(code);
 			if (!safeTargetSocketId || !safeCode || safeTargetSocketId === socket.id) {
+				return;
+			}
+
+			// Validate subnet
+			const targetSockets = await ioInstance.in(safeTargetSocketId).fetchSockets();
+			if (!targetSockets || targetSockets.length === 0) return;
+			const targetSocket = targetSockets[0];
+
+			if (targetSocket.data.subnet !== socket.data.subnet) {
+				logEvent("Blocked cross-subnet transfer push", `FROM_IP: ${socket.data.ip}`, `TO_IP: ${targetSocket.data.ip}`);
 				return;
 			}
 

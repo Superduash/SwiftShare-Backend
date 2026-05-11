@@ -145,9 +145,7 @@ function corsOrigin(origin, callback) {
 	if (!origin) { callback(null, true); return; }
 	if (allowAllOrigins) { callback(null, true); return; }
 	if (!isProduction && isDevOriginAllowed(origin)) { callback(null, true); return; }
-	// SECURITY: Only allow explicitly configured origins — no wildcard platform trust
-	// Platform subdomains (Vercel, Render, etc) must be explicitly listed in CORS_EXTRA_ORIGINS
-	// Do NOT trust all *.vercel.app or *.onrender.com — malicious clones could bypass CORS
+	if (isPlatformDeployOrigin(origin)) { callback(null, true); return; }
 	if (
 		allowedFrontendOrigins.length > 0
 		&& allowedFrontendOrigins.some((o) => originsMatch(origin, o))
@@ -225,7 +223,7 @@ app.use(express.json({ limit: "12mb" }));
 // Per-request timeout — upload/download routes get a longer window
 app.use((req, res, next) => {
 	const isUploadOrDownload = /^\/(api\/(upload|download))/i.test(req.path);
-	const defaultUploadTimeoutMs = process.env.RENDER ? 180000 : 120000;
+	const defaultUploadTimeoutMs = process.env.RENDER ? 600000 : 600000;
 	const defaultRequestTimeoutMs = process.env.RENDER ? 90000 : 60000;
 	const uploadTimeoutMs = Number(process.env.UPLOAD_REQUEST_TIMEOUT_MS) > 0
 		? Number(process.env.UPLOAD_REQUEST_TIMEOUT_MS)

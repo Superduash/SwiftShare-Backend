@@ -29,7 +29,7 @@ const connectionTimeoutMs = Number(process.env.R2_CONNECTION_TIMEOUT_MS) > 0
 	: 8000;
 const socketTimeoutMs = Number(process.env.R2_SOCKET_TIMEOUT_MS) > 0
 	? Number(process.env.R2_SOCKET_TIMEOUT_MS)
-	: 120000;
+	: 600000;
 const maxAttempts = Number(process.env.R2_MAX_ATTEMPTS) > 0
 	? Number(process.env.R2_MAX_ATTEMPTS)
 	: 4;

@@ -167,6 +167,10 @@ const transferSchema = new mongoose.Schema(
 			type: String,
 			default: "",
 		},
+		ownershipToken: {
+			type: String,
+			default: "",
+		},
 		qrDataUri: {
 			type: String,
 			default: "",
