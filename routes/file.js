@@ -10,6 +10,7 @@ const { getObjectFromR2 } = require("../services/fileManager");
 const { analyzeTransfer } = require("../services/aiAnalyzer");
 const { emitToRoom } = require("../config/socket");
 const { logError } = require("../utils/logger");
+const { isAiSummarizationEnabled, getMaintenanceAiResult } = require("../utils/aiMode");
 
 const router = express.Router();
 
@@ -48,6 +49,14 @@ function isUsableAiResult(aiResult) {
 
 	const summary = String(aiResult.overall_summary || aiResult.summary || "").trim();
 	return Boolean(summary && Array.isArray(aiResult.files) && aiResult.files.length > 0);
+}
+
+function getMetadataAi(transfer) {
+	if (isAiSummarizationEnabled()) {
+		return transfer.ai || null;
+	}
+
+	return transfer.ai && transfer.ai.aiDisabled ? transfer.ai : getMaintenanceAiResult();
 }
 
 function isBurnLockedForRequester(transfer, req) {
@@ -207,7 +216,7 @@ router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => 
 				secondsRemaining: 0,
 				burnAfterDownload: transfer.burnAfterDownload,
 				senderDeviceName: transfer.senderDeviceName,
-				ai: transfer.ai || null,
+				ai: getMetadataAi(transfer),
 			});
 		}
 
@@ -326,7 +335,7 @@ router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => 
 			secondsRemaining,
 			burnAfterDownload: transfer.burnAfterDownload,
 			senderDeviceName: transfer.senderDeviceName,
-			ai: transfer.ai || null,
+			ai: getMetadataAi(transfer),
 			text: textPayload,
 		});
 	} catch (error) {

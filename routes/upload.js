@@ -34,7 +34,7 @@ const {
 } = require("../utils/helpers");
 const { logEvent, logError, formatSizeMB } = require("../utils/logger");
 const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
-const { isAiSummarizationEnabled } = require("../utils/aiMode");
+const { isAiSummarizationEnabled, getMaintenanceAiResult } = require("../utils/aiMode");
 
 const router = express.Router();
 
@@ -439,7 +439,9 @@ async function finalizeTransfer({
 		burnAfterDownload,
 		passwordProtected: shouldProtectWithPassword,
 		ownershipToken,
+		ai: isAiSummarizationEnabled() ? null : getMaintenanceAiResult(),
 	};
+	const maintenanceAi = isAiSummarizationEnabled() ? null : getMaintenanceAiResult();
 
 	// Create database record asynchronously (don't wait for it)
 	setImmediate(() => {
@@ -465,7 +467,7 @@ async function finalizeTransfer({
 			senderSocketId: typeof req._senderSocketId === "string" ? req._senderSocketId : "",
 			ownershipToken,
 			qrDataUri: qr,
-			ai: null,
+			ai: maintenanceAi,
 			activity: [
 				{ event: "uploaded", device: senderDevice, ip: senderIp, timestamp: new Date() },
 			],
