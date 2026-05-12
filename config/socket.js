@@ -159,32 +159,6 @@ function originsMatch(requestOrigin, configuredOrigin) {
 	return isLoopbackHost(reqParsed.hostname) && isLoopbackHost(cfgParsed.hostname);
 }
 
-// Any subdomain on these deployment platforms is always allowed —
-// preview deploys, branch deploys, and custom aliases all share these TLDs.
-const ALWAYS_ALLOWED_PLATFORM_SUFFIXES = [
-	"netlify.app",
-	"onrender.com",
-	"vercel.app",
-	"pages.dev",
-	"web.app",
-	"firebaseapp.com",
-	"railway.app",
-];
-
-function hostnameOf(origin) {
-	const parsed = parseOrigin(origin);
-	return parsed ? String(parsed.hostname || "").toLowerCase() : "";
-}
-
-function isPlatformDeployOrigin(requestOrigin) {
-	const reqHost = hostnameOf(requestOrigin);
-	if (!reqHost) return false;
-	for (const suffix of ALWAYS_ALLOWED_PLATFORM_SUFFIXES) {
-		if (reqHost === suffix || reqHost.endsWith(`.${suffix}`)) return true;
-	}
-	return false;
-}
-
 function emitToRoom(code, event, data = {}) {
 	const room = roomName(code);
 	if (!ioInstance || !room) {
