@@ -256,7 +256,8 @@ app.use(createTimingMiddleware());
 
 app.get("/api/ping", (req, res) => {
 	if (res.headersSent) return;
-	res.status(200).json({ pong: true });
+	// Always respond immediately - don't wait for MongoDB
+	res.status(200).json({ pong: true, timestamp: Date.now() });
 });
 
 app.get("/api/metrics", (req, res) => {
@@ -427,8 +428,8 @@ async function restoreActiveCountdowns() {
 
 function connectMongoWithRetry() {
 	const isProduction = String(process.env.NODE_ENV || "").toLowerCase() === "production";
-	// Fast retries in dev (2s), slower in production (5s)
-	const retryDelayMs = isProduction ? 5000 : 2000;
+	// Fast retries in dev (1s), slower in production (5s)
+	const retryDelayMs = isProduction ? 5000 : 1000;
 	let hasConnected = false;
 	let hasAttempted = false;
 	const tryConnect = async () => {
@@ -441,7 +442,7 @@ function connectMongoWithRetry() {
 			}
 			return true;
 		} catch (error) {
-			if (hasAttempted) logError("MongoDB Failed", error);
+			if (hasAttempted) logWarn("MongoDB connection failed, retrying...");
 			hasAttempted = true;
 			setTimeout(tryConnect, retryDelayMs);
 			return false;
