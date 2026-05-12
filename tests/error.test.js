@@ -13,16 +13,14 @@ describe("Error Handler Edge Cases", () => {
 	it("hides stack traces in production for 500 errors", async () => {
 		const originalEnv = process.env.NODE_ENV;
 		process.env.NODE_ENV = "production";
-		
-		// Create a mock error endpoint just for this test
-		app.get("/api/test-error", (req, res, next) => {
-			next(new Error("Secret database error"));
-		});
 
+		// server.js registers /api/test-error when NODE_ENV is "test" at load time;
+		// we hit it directly here — the errorHandler hides the message in production.
 		const res = await request(app).get("/api/test-error");
 		
 		expect(res.status).toBe(500);
-		expect(res.body.error).toBe("Something went wrong");
+		// buildErrorResponse nests the error as { error: { code, message } }
+		expect(res.body.error.message).toBe("Something went wrong");
 		expect(res.body.stack).toBeUndefined();
 		
 		process.env.NODE_ENV = originalEnv;

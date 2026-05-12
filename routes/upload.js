@@ -484,6 +484,7 @@ function fireAndForgetAi(code, aiInputFiles) {
 
 	aiInFlight.add(code);
 	let emitted = false;
+	let timedOut = false;
 
 	const emitUnavailable = (warning) => {
 		if (emitted) return;
@@ -492,6 +493,7 @@ function fireAndForgetAi(code, aiInputFiles) {
 			summary: null, category: null, imageDescription: null,
 			files: [], detectedIntent: null, riskFlags: [],
 			warning: warning || "AI analysis unavailable",
+			error: warning || "AI analysis unavailable",
 			model: null,
 			provider: null,
 		});
@@ -500,18 +502,24 @@ function fireAndForgetAi(code, aiInputFiles) {
 	// Strictly background — use setImmediate so upload response is sent first
 	setImmediate(() => {
 		void (async () => {
-			// Hard timeout: always emit within 60s
+			// Hard timeout: always emit within 15s so the UI can fail fast.
 			const timeoutId = setTimeout(() => {
 				if (!emitted) {
+					timedOut = true;
 					logEvent("AI analysis timeout", `CODE: ${code}`);
-					emitUnavailable("AI analysis timed out");
+					emitUnavailable("AI analysis timed out after 15 seconds");
 				}
-			}, 60000);
+			}, 15000);
 
 			try {
 				logEvent("AI analysis started", `CODE: ${code}`, `FILES: ${aiInputFiles.length}`);
 				const aiResult = await analyzeTransfer(aiInputFiles, code);
 				clearTimeout(timeoutId);
+
+				if (timedOut) {
+					logEvent("AI analysis completed after timeout", `CODE: ${code}`);
+					return;
+				}
 
 				if (!isUsableAiResult(aiResult)) {
 					emitUnavailable(aiResult?.warning || "AI analysis unavailable");

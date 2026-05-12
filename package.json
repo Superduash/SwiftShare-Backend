@@ -7,9 +7,9 @@
     "node": ">=22"
   },
   "scripts": {
-    "start": "node --max-old-space-size=384 server.js",
+    "start": "node --expose-gc --max-old-space-size=384 server.js",
     "predev": "node scripts/ensure-port-free.js 3001",
-    "dev": "nodemon server.js",
+    "dev": "nodemon --expose-gc server.js",
     "health-check": "node scripts/health-check.js",
     "test": "jest"
   },

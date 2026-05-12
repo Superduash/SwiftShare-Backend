@@ -187,6 +187,9 @@ function resetMetrics() {
 const MEMORY_PRESSURE_THRESHOLD = 0.92; // 92% heap usage
 const MEMORY_PRESSURE_MIN_HEAP_MB = 100; // Only warn if heap is at least 100MB total
 
+// Module-level state for memory pressure tracking
+let _memoryPressureLastLogAt = 0;
+
 function isMemoryPressure() {
 	const usage = process.memoryUsage();
 	const heapTotalMb = usage.heapTotal / 1024 / 1024;
@@ -201,8 +204,8 @@ function checkMemoryPressure() {
 		const usage = getMemoryUsage();
 		// Only log if we haven't logged in the last 5 minutes to avoid log spam
 		const now = Date.now();
-		if (!checkMemoryPressure._lastLogAt || now - checkMemoryPressure._lastLogAt > 5 * 60 * 1000) {
-			checkMemoryPressure._lastLogAt = now;
+		if (!_memoryPressureLastLogAt || now - _memoryPressureLastLogAt > 5 * 60 * 1000) {
+			_memoryPressureLastLogAt = now;
 			logEvent(
 				'Memory pressure detected',
 				`HEAP_USED: ${usage.heapUsed}MB / ${usage.heapTotal}MB (${usage.heapUsedPercent})`,

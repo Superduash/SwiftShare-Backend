@@ -5,6 +5,9 @@ const TOKEN_SECRET = process.env.TOKEN_SECRET;
 if (!TOKEN_SECRET) {
 	throw new Error("TOKEN_SECRET environment variable is required. Generate with: node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\"");
 }
+if (!/^[0-9a-fA-F]{64}$/.test(TOKEN_SECRET)) {
+	throw new Error("TOKEN_SECRET must be a 64-character hex string (32 bytes). Generate: node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\"");
+}
 const TOKEN_EXPIRY_MS = 5 * 60 * 1000; // 5 minutes
 
 // Pre-create Buffer for performance (reuse instead of creating each time)
@@ -20,7 +23,13 @@ const TOKEN_SECRET_BUFFER = Buffer.from(TOKEN_SECRET, 'hex');
  */
 function generateAccessToken(transferCode, fileIndex, clientIp) {
 	// Use compact JSON (no spaces) for smaller tokens
-	const payload = `{"code":"${transferCode}","file":"${fileIndex}","ip":"${clientIp}","exp":${Date.now() + TOKEN_EXPIRY_MS},"nonce":"${crypto.randomBytes(8).toString("hex")}"}`;
+	const payload = JSON.stringify({
+		code: transferCode,
+		file: fileIndex,
+		ip: clientIp,
+		exp: Date.now() + TOKEN_EXPIRY_MS,
+		nonce: crypto.randomBytes(8).toString("hex"),
+	});
 	
 	const payloadB64 = Buffer.from(payload).toString("base64url");
 	
@@ -93,7 +102,12 @@ function verifyAccessToken(token, clientIp) {
  */
 function generatePreviewToken(transferCode, fileIndex) {
 	// Compact JSON for smaller tokens
-	const payload = `{"code":"${transferCode}","file":${fileIndex},"exp":${Date.now() + 120000},"type":"preview"}`;
+	const payload = JSON.stringify({
+		code: transferCode,
+		file: fileIndex,
+		exp: Date.now() + 120000,
+		type: "preview",
+	});
 	
 	const payloadB64 = Buffer.from(payload).toString("base64url");
 	

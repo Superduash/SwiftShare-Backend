@@ -1,6 +1,6 @@
 {
-  "watch": ["server.js", "config", "routes", "middleware", "models", "services", "utils"],
-  "ignore": ["*.log", "node_modules", ".git", "uploads", "temp"],
+  "watch": ["."],
+  "ignore": ["*.log", "node_modules", ".git", "uploads", "temp", "coverage"],
   "ext": "js,json",
   "delay": 250,
   "signal": "SIGTERM",

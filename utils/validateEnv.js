@@ -21,7 +21,7 @@ const OPTIONAL_ENV_VARS = [
 ];
 
 function validateEnvOrExit() {
-	const missingRequired = REQUIRED_ENV_VARS.filter((key) => !process.env[key]);
+	const missingRequired = REQUIRED_ENV_VARS.filter((key) => !process.env[key] || !process.env[key].trim());
 	if (missingRequired.length > 0) {
 		logError("Missing required environment variables", null);
 		for (const key of missingRequired) {

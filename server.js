@@ -66,7 +66,7 @@ function getOriginPort(parsed) {
 }
 
 function isLoopbackHost(hostname) {
-	return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+	return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]";
 }
 
 function isPrivateNetworkHost(hostname) {
@@ -93,7 +93,7 @@ function originsMatch(requestOrigin, configuredOrigin) {
 	if (wildcardMatch) {
 		const reqParsed = parseOrigin(requestOrigin);
 		if (!reqParsed) return false;
-		const requiredProtocol = wildcardMatch[1] ? wildcardMatch[1].toLowerCase() : "";
+		const requiredProtocol = wildcardMatch[1] ? wildcardMatch[1].toLowerCase().replace("//", "") : "";
 		if (requiredProtocol && reqParsed.protocol !== requiredProtocol) return false;
 		const suffix = String(wildcardMatch[2] || "").toLowerCase();
 		const hostname = String(reqParsed.hostname || "").toLowerCase();
@@ -143,9 +143,12 @@ function isPlatformDeployOrigin(requestOrigin) {
 
 function corsOrigin(origin, callback) {
 	if (!origin) { callback(null, true); return; }
+	const allowAllOrigins = String(process.env.CORS_ALLOW_ALL_ORIGINS || "").toLowerCase() === "true";
+	const isProd = String(process.env.NODE_ENV || "").toLowerCase() === "production";
 	if (allowAllOrigins) { callback(null, true); return; }
-	if (!isProduction && isDevOriginAllowed(origin)) { callback(null, true); return; }
+	if (!isProd && isDevOriginAllowed(origin)) { callback(null, true); return; }
 	if (isPlatformDeployOrigin(origin)) { callback(null, true); return; }
+	const allowedFrontendOrigins = getAllowedFrontendOrigins();
 	if (
 		allowedFrontendOrigins.length > 0
 		&& allowedFrontendOrigins.some((o) => originsMatch(origin, o))
@@ -381,11 +384,26 @@ app.get("/api/health", async (req, res) => {
 	}
 });
 
+if (process.env.NODE_ENV === "test") {
+	app.get("/api/test-error", (req, res, next) => {
+		next(new Error("Secret database error"));
+	});
+}
+
 app.use((req, res) => {
-	res.status(404).json(buildErrorResponse(ERROR_CODES.ROUTE_NOT_FOUND));
+	const resp = buildErrorResponse(ERROR_CODES.ROUTE_NOT_FOUND);
+	if (req.requestId) {
+		resp.requestId = req.requestId;
+	}
+	res.status(404).json(resp);
 });
 
-Sentry.setupExpressErrorHandler(app);
+// Only install Sentry's error handler when Sentry was actually initialized.
+// getClient() returns undefined if Sentry.init() was never called — the DSN check
+// alone isn't sufficient when express is required before instrument.js can fully init.
+if (process.env.SENTRY_DSN && typeof Sentry.getClient === "function" && Sentry.getClient()) {
+	Sentry.setupExpressErrorHandler(app);
+}
 app.use(errorHandler);
 
 // ── Startup ───────────────────────────────────────────────────────────────────
