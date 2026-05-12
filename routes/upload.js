@@ -517,9 +517,9 @@ function fireAndForgetAi(code, aiInputFiles) {
 				if (!emitted) {
 					timedOut = true;
 					logEvent("AI analysis timeout", `CODE: ${code}`);
-					emitUnavailable("AI analysis timed out after 15 seconds");
+					emitUnavailable("AI analysis timed out after 30 seconds");
 				}
-			}, 15000);
+			}, 30000);
 
 			try {
 				logEvent("AI analysis started", `CODE: ${code}`, `FILES: ${aiInputFiles.length}`);

@@ -60,6 +60,27 @@ function getOriginPort(parsed) {
 	return parsed.protocol === "https:" ? "443" : "80";
 }
 
+const ALWAYS_ALLOWED_PLATFORM_SUFFIXES = [
+	"netlify.app",
+	"onrender.com",
+	"vercel.app",
+	"pages.dev",
+	"web.app",
+	"firebaseapp.com",
+	"railway.app",
+];
+
+function isPlatformDeployOrigin(requestOrigin) {
+	const parsed = parseOrigin(requestOrigin);
+	if (!parsed) return false;
+	const host = String(parsed.hostname || "").toLowerCase();
+	if (!host) return false;
+	for (const suffix of ALWAYS_ALLOWED_PLATFORM_SUFFIXES) {
+		if (host === suffix || host.endsWith(`.${suffix}`)) return true;
+	}
+	return false;
+}
+
 function isLoopbackHost(hostname) {
 	return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
 }
@@ -398,27 +419,22 @@ function initSocket(server) {
 		httpCompression: false,
 		cors: {
 			origin: (origin, callback) => {
-				// Allow requests with no origin (mobile apps, Postman, etc.)
-				if (!origin) {
+				// No origin (mobile apps, Postman) — allow
+				if (!origin) { callback(null, true); return; }
+				// CORS_ALLOW_ALL_ORIGINS=true (diagnostics only)
+				if (allowAllOrigins) { callback(null, true); return; }
+				// Dev: localhost / private LAN
+				if (!isProduction && isDevOriginAllowed(origin)) { callback(null, true); return; }
+				// Platform deploys (Vercel/Netlify/Render/CF Pages/Firebase/Railway).
+				// Matches HTTP CORS — opt out by setting CORS_BLOCK_PLATFORM_DEPLOYS=true
+				if (
+					String(process.env.CORS_BLOCK_PLATFORM_DEPLOYS || "").toLowerCase() !== "true"
+					&& isPlatformDeployOrigin(origin)
+				) {
 					callback(null, true);
 					return;
 				}
-
-				// Allow all origins in development or if explicitly configured
-				if (allowAllOrigins) {
-					callback(null, true);
-					return;
-				}
-
-				// Allow localhost and private network IPs in development
-				if (!isProduction && isDevOriginAllowed(origin)) {
-					callback(null, true);
-					return;
-				}
-
-				// SECURITY: Only allow explicitly configured origins — no wildcard platform trust
-				// Platform subdomains (Vercel, Render, etc) must be explicitly listed in CORS_EXTRA_ORIGINS
-				// Do NOT trust all *.vercel.app or *.onrender.com — malicious clones could bypass CORS
+				// Explicitly configured origins (FRONTEND_URL + CORS_EXTRA_ORIGINS)
 				if (
 					allowedOrigins.length > 0
 					&& allowedOrigins.some((configuredOrigin) => originsMatch(origin, configuredOrigin))
@@ -426,7 +442,6 @@ function initSocket(server) {
 					callback(null, true);
 					return;
 				}
-
 				logEvent("Blocked Socket.IO CORS origin", `ORIGIN: ${origin}`);
 				callback(new Error("Origin not allowed by Socket.IO CORS"));
 			},
