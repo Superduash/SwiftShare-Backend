@@ -398,16 +398,19 @@ function initSocket(server) {
 		httpCompression: false,
 		cors: {
 			origin: (origin, callback) => {
+				// Allow requests with no origin (mobile apps, Postman, etc.)
 				if (!origin) {
 					callback(null, true);
 					return;
 				}
 
+				// Allow all origins in development or if explicitly configured
 				if (allowAllOrigins) {
 					callback(null, true);
 					return;
 				}
 
+				// Allow localhost and private network IPs in development
 				if (!isProduction && isDevOriginAllowed(origin)) {
 					callback(null, true);
 					return;
