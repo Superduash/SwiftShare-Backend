@@ -126,6 +126,7 @@ router.post("/:code/analyze", rateLimitMetadata, validateCode, async (req, res, 
 
 		const aiResult = await analyzeTransfer(validIncomingFiles, code, Boolean(forceFallback));
 		if (isUsableAiResult(aiResult)) {
+			// Save AI result with final successful model/provider
 			await Transfer.updateOne(
 				{ code },
 				{
@@ -141,7 +142,17 @@ router.post("/:code/analyze", rateLimitMetadata, validateCode, async (req, res, 
 				}
 			);
 
-			return res.status(200).json({ success: true, ai: aiResult });
+			// Return AI result with final successful model/provider
+			return res.status(200).json({ 
+				success: true, 
+				ai: {
+					...aiResult,
+					model: aiResult.model || null,
+					provider: aiResult.provider || null,
+					_model: aiResult._model || aiResult.model || null,
+					_provider: aiResult._provider || aiResult.provider || null,
+				}
+			});
 		}
 
 		return res.status(200).json({

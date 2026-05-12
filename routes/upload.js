@@ -519,7 +519,10 @@ function fireAndForgetAi(code, aiInputFiles) {
 					return;
 				}
 
+				// Save AI result to database with final successful model/provider
 				await Transfer.updateOne({ code }, { $set: { ai: aiResult } });
+				
+				// Emit AI result with final successful model/provider
 				emitToRoom(code, "ai-ready", {
 					summary: aiResult.summary || aiResult.overall_summary || null,
 					category: aiResult.category || null,
@@ -529,6 +532,8 @@ function fireAndForgetAi(code, aiInputFiles) {
 					riskFlags: aiResult.riskFlags || aiResult.risk_flags || [],
 					model: aiResult.model || null,
 					provider: aiResult.provider || null,
+					_model: aiResult._model || aiResult.model || null,
+					_provider: aiResult._provider || aiResult.provider || null,
 				});
 				emitted = true;
 				logEvent("AI analysis completed", `CODE: ${code}`, "READY: true", `MODEL: ${aiResult.model || "unknown"}`, `PROVIDER: ${aiResult.provider || "unknown"}`);
