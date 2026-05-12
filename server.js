@@ -13,6 +13,7 @@ const compression = require("compression");
 const { validateEnvOrExit } = require("./utils/validateEnv");
 const { createTimingMiddleware, getPerformanceSnapshot } = require("./utils/performance");
 const { getCacheStats } = require("./utils/cache");
+const { isAiSummarizationEnabled } = require("./utils/aiMode");
 
 validateEnvOrExit();
 
@@ -297,6 +298,7 @@ async function getR2Status() {
 }
 
 async function getGeminiStatus() {
+	if (!isAiSummarizationEnabled()) return "disabled";
 	return (await checkGeminiConnectionLive()) ? "connected" : "disconnected";
 }
 
@@ -470,7 +472,9 @@ function printStartupStatus(port, host) {
 		else logError("R2 Failed", null);
 	}).catch((error) => logError("Service startup checks failed", error));
 
-	if (!process.env.GEMINI_API_KEY) {
+	if (!isAiSummarizationEnabled()) {
+		logEvent("[•] AI summarization temporarily disabled (maintenance mode)");
+	} else if (!process.env.GEMINI_API_KEY) {
 		logEvent("Gemini Optional AI Disabled");
 	} else if (checkGeminiConnection()) {
 		logSuccess("Gemini Connected");

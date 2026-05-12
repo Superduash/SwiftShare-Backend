@@ -34,6 +34,7 @@ const {
 } = require("../utils/helpers");
 const { logEvent, logError, formatSizeMB } = require("../utils/logger");
 const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
+const { isAiSummarizationEnabled } = require("../utils/aiMode");
 
 const router = express.Router();
 
@@ -95,6 +96,7 @@ function createAppError(status, errorCode, message) {
 
 function isUsableAiResult(aiResult) {
 	if (!aiResult || aiResult.success === false) return false;
+	if (aiResult.aiDisabled) return true;
 	const summary = String(aiResult.overall_summary || aiResult.summary || "").trim();
 	return Boolean(summary && Array.isArray(aiResult.files) && aiResult.files.length > 0);
 }
@@ -500,6 +502,7 @@ function fireAndForgetAi(code, aiInputFiles) {
 		if (emitted) return;
 		emitted = true;
 		emitToRoom(code, "ai-ready", {
+			overallSummary: warning || "AI analysis unavailable",
 			summary: null, category: null, imageDescription: null,
 			files: [], detectedIntent: null, riskFlags: [],
 			warning: warning || "AI analysis unavailable",
@@ -512,6 +515,32 @@ function fireAndForgetAi(code, aiInputFiles) {
 	// Strictly background — use setImmediate so upload response is sent first
 	setImmediate(() => {
 		void (async () => {
+			if (!isAiSummarizationEnabled()) {
+				const maintenanceAi = {
+					success: true,
+					aiDisabled: true,
+					overallSummary: "AI-powered file previews are temporarily under maintenance.",
+					summary: "AI-powered file previews are temporarily under maintenance.",
+					overall_summary: "AI-powered file previews are temporarily under maintenance.",
+					topTags: [],
+					tags: [],
+					category: null,
+					imageDescription: null,
+					detectedIntent: null,
+					riskFlags: [],
+					files: [],
+					model: null,
+					provider: null,
+					_model: null,
+					_provider: null,
+				};
+				await Transfer.updateOne({ code }, { $set: { ai: maintenanceAi } });
+				emitToRoom(code, "ai-ready", maintenanceAi);
+				emitted = true;
+				aiInFlight.delete(code);
+				return;
+			}
+
 			// Hard timeout: always emit within 15s so the UI can fail fast.
 			const timeoutId = setTimeout(() => {
 				if (!emitted) {

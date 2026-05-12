@@ -42,6 +42,10 @@ function isUsableAiResult(aiResult) {
 		return false;
 	}
 
+	if (aiResult.aiDisabled) {
+		return true;
+	}
+
 	const summary = String(aiResult.overall_summary || aiResult.summary || "").trim();
 	return Boolean(summary && Array.isArray(aiResult.files) && aiResult.files.length > 0);
 }
