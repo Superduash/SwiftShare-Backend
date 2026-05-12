@@ -1,4 +1,5 @@
 const express = require("express");
+const crypto = require("crypto");
 const Busboy = require("busboy");
 const bcrypt = require("bcryptjs");
 const { PassThrough } = require("stream");
@@ -397,10 +398,8 @@ async function finalizeTransfer({
 		: getSessionExpiryMinutes();
 	const expiresAt = new Date(Date.now() + effectiveExpiryMinutes * 60 * 1000);
 	const shouldProtectWithPassword = Boolean(passwordProtected && password);
-	const passwordHash = shouldProtectWithPassword ? await bcrypt.hash(password, 10) : null;
 	const uploadDurationMs = Math.max(Date.now() - uploadStartedAt, 1);
 	const uploadSpeed = Math.round(totalSize / (uploadDurationMs / 1000));
-	const qr = await generateQR(code);
 	const shareBaseUrl = process.env.SHARE_BASE_URL;
 	const shareLink = `${shareBaseUrl}/g/${code}`;
 	const senderIp = getClientIp(req);
@@ -414,6 +413,12 @@ async function finalizeTransfer({
 		mimeType: f.mimeType,
 		icon: mimeToIcon(f.mimeType),
 	}));
+
+	// Generate QR and hash password in parallel (non-blocking)
+	const [qr, passwordHash] = await Promise.all([
+		generateQR(code),
+		shouldProtectWithPassword ? bcrypt.hash(password, 10) : Promise.resolve(null)
+	]);
 
 	const responsePayload = {
 		success: true,
@@ -434,32 +439,37 @@ async function finalizeTransfer({
 		ownershipToken,
 	};
 
-	await Transfer.create({
-		code,
-		files: uploadedFiles,
-		totalSize,
-		fileCount,
-		isZipped: false,
-		burnAfterDownload,
-		passwordProtected: shouldProtectWithPassword,
-		passwordHash,
-		passwordAttempts: 0,
-		downloadCount: 0,
-		uploadSpeed,
-		uploadDuration: uploadDurationMs,
-		downloadSpeed: 0,
-		downloadDuration: 0,
-		expiresAt,
-		isDeleted: false,
-		senderIp,
-		senderDeviceName: senderDevice,
-		senderSocketId: typeof req._senderSocketId === "string" ? req._senderSocketId : "",
-		ownershipToken,
-		qrDataUri: qr,
-		ai: null,
-		activity: [
-			{ event: "uploaded", device: senderDevice, ip: senderIp, timestamp: new Date() },
-		],
+	// Create database record asynchronously (don't wait for it)
+	setImmediate(() => {
+		Transfer.create({
+			code,
+			files: uploadedFiles,
+			totalSize,
+			fileCount,
+			isZipped: false,
+			burnAfterDownload,
+			passwordProtected: shouldProtectWithPassword,
+			passwordHash,
+			passwordAttempts: 0,
+			downloadCount: 0,
+			uploadSpeed,
+			uploadDuration: uploadDurationMs,
+			downloadSpeed: 0,
+			downloadDuration: 0,
+			expiresAt,
+			isDeleted: false,
+			senderIp,
+			senderDeviceName: senderDevice,
+			senderSocketId: typeof req._senderSocketId === "string" ? req._senderSocketId : "",
+			ownershipToken,
+			qrDataUri: qr,
+			ai: null,
+			activity: [
+				{ event: "uploaded", device: senderDevice, ip: senderIp, timestamp: new Date() },
+			],
+		}).catch((err) => {
+			logError("Failed to save transfer to database", err, `CODE: ${code}`);
+		});
 	});
 
 	emitToRoom(code, "upload-complete", responsePayload);
