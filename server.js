@@ -218,7 +218,7 @@ app.use(morgan((tokens, req, res) => {
 	const url = (req.originalUrl || "").split("?")[0];
 	return [tokens.method(req, res), url, tokens.status(req, res), tokens["response-time"](req, res), "ms"].join(" ");
 }, {
-	skip: (req, res) => req.path === '/api/health' && res.statusCode === 200
+	skip: (req, res) => (req.path === '/api/health' || req.path === '/api/ping') && res.statusCode === 200
 }));
 
 app.use(express.json({ limit: "12mb" }));
