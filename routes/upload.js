@@ -16,7 +16,6 @@ const {
 } = require("../config/socket");
 const { generateUniqueCode } = require("../services/codeGenerator");
 const { generateQR } = require("../services/qrGenerator");
-const { analyzeTransfer } = require("../services/aiAnalyzer");
 const { rateLimitUpload } = require("../middleware/rateLimiter");
 const {
 	sanitizeRequestBody,
@@ -34,12 +33,8 @@ const {
 } = require("../utils/helpers");
 const { logEvent, logError, formatSizeMB } = require("../utils/logger");
 const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
-const { isAiSummarizationEnabled, getMaintenanceAiResult } = require("../utils/aiMode");
 
 const router = express.Router();
-
-// Prevent the same transfer from running AI analysis more than once concurrently.
-const aiInFlight = new Set();
 
 // ── Configuration ─────────────────────────────────────────
 function getMaxFileCount() {
@@ -92,13 +87,6 @@ function createAppError(status, errorCode, message) {
 	error.status = status;
 	error.errorCode = errorCode;
 	return error;
-}
-
-function isUsableAiResult(aiResult) {
-	if (!aiResult || aiResult.success === false) return false;
-	if (aiResult.aiDisabled) return true;
-	const summary = String(aiResult.overall_summary || aiResult.summary || "").trim();
-	return Boolean(summary && Array.isArray(aiResult.files) && aiResult.files.length > 0);
 }
 
 // ── MIME / signature checks (sniff-buffer based) ──────────────
@@ -439,9 +427,7 @@ async function finalizeTransfer({
 		burnAfterDownload,
 		passwordProtected: shouldProtectWithPassword,
 		ownershipToken,
-		ai: isAiSummarizationEnabled() ? null : getMaintenanceAiResult(),
 	};
-	const maintenanceAi = isAiSummarizationEnabled() ? null : getMaintenanceAiResult();
 
 	// Create database record asynchronously (don't wait for it)
 	setImmediate(() => {
@@ -467,7 +453,6 @@ async function finalizeTransfer({
 			senderSocketId: typeof req._senderSocketId === "string" ? req._senderSocketId : "",
 			ownershipToken,
 			qrDataUri: qr,
-			ai: maintenanceAi,
 			activity: [
 				{ event: "uploaded", device: senderDevice, ip: senderIp, timestamp: new Date() },
 			],
@@ -481,121 +466,7 @@ async function finalizeTransfer({
 	broadcastNewTransferToSubnet(code, senderIp);
 	logEvent("Upload complete", `CODE: ${code}`, formatSizeMB(totalSize));
 
-	// AI analysis still runs from the original incoming buffers/sniffs when supplied.
-	// For streaming uploads we pass nothing here; aiAnalyzer should fetch from R2 if needed.
 	return responsePayload;
-}
-
-function fireAndForgetAi(code, aiInputFiles) {
-	const primaryFile = aiInputFiles && aiInputFiles[0];
-	// Guard: skip if already in flight for this code
-	if (!primaryFile || aiInFlight.has(code)) {
-		if (aiInFlight.has(code)) {
-			logEvent("AI analysis skipped (already in flight)", `CODE: ${code}`);
-		}
-		return;
-	}
-
-	aiInFlight.add(code);
-	let emitted = false;
-	let timedOut = false;
-
-	const emitUnavailable = (warning) => {
-		if (emitted) return;
-		emitted = true;
-		emitToRoom(code, "ai-ready", {
-			overallSummary: warning || "AI analysis unavailable",
-			summary: null, category: null, imageDescription: null,
-			files: [], detectedIntent: null, riskFlags: [],
-			warning: warning || "AI analysis unavailable",
-			error: warning || "AI analysis unavailable",
-			model: null,
-			provider: null,
-		});
-	};
-
-	// Strictly background — use setImmediate so upload response is sent first
-	setImmediate(() => {
-		void (async () => {
-			if (!isAiSummarizationEnabled()) {
-				const maintenanceAi = {
-					success: true,
-					aiDisabled: true,
-					overallSummary: "AI-powered file previews are temporarily under maintenance.",
-					summary: "AI-powered file previews are temporarily under maintenance.",
-					overall_summary: "AI-powered file previews are temporarily under maintenance.",
-					topTags: [],
-					tags: [],
-					category: null,
-					imageDescription: null,
-					detectedIntent: null,
-					riskFlags: [],
-					files: [],
-					model: null,
-					provider: null,
-					_model: null,
-					_provider: null,
-				};
-				await Transfer.updateOne({ code }, { $set: { ai: maintenanceAi } });
-				emitToRoom(code, "ai-ready", maintenanceAi);
-				emitted = true;
-				aiInFlight.delete(code);
-				return;
-			}
-
-			// Hard timeout: always emit within 15s so the UI can fail fast.
-			const timeoutId = setTimeout(() => {
-				if (!emitted) {
-					timedOut = true;
-					logEvent("AI analysis timeout", `CODE: ${code}`);
-					emitUnavailable("AI analysis timed out after 30 seconds");
-				}
-			}, 30000);
-
-			try {
-				logEvent("AI analysis started", `CODE: ${code}`, `FILES: ${aiInputFiles.length}`);
-				const aiResult = await analyzeTransfer(aiInputFiles, code);
-				clearTimeout(timeoutId);
-
-				if (timedOut) {
-					logEvent("AI analysis completed after timeout", `CODE: ${code}`);
-					return;
-				}
-
-				if (!isUsableAiResult(aiResult)) {
-					emitUnavailable(aiResult?.warning || "AI analysis unavailable");
-					logEvent("AI analysis completed", `CODE: ${code}`, "READY: false");
-					return;
-				}
-
-				// Save AI result to database with final successful model/provider
-				await Transfer.updateOne({ code }, { $set: { ai: aiResult } });
-				
-				// Emit AI result with final successful model/provider
-				emitToRoom(code, "ai-ready", {
-					summary: aiResult.summary || aiResult.overall_summary || null,
-					category: aiResult.category || null,
-					imageDescription: aiResult.imageDescription || null,
-					files: aiResult.files || [],
-					detectedIntent: aiResult.detectedIntent || aiResult.detected_intent || null,
-					riskFlags: aiResult.riskFlags || aiResult.risk_flags || [],
-					model: aiResult.model || null,
-					provider: aiResult.provider || null,
-					_model: aiResult._model || aiResult.model || null,
-					_provider: aiResult._provider || aiResult.provider || null,
-				});
-				emitted = true;
-				logEvent("AI analysis completed", `CODE: ${code}`, "READY: true", `MODEL: ${aiResult.model || "unknown"}`, `PROVIDER: ${aiResult.provider || "unknown"}`);
-			} catch (aiError) {
-				clearTimeout(timeoutId);
-				logError("AI analysis failed", aiError, `CODE: ${code}`);
-				emitUnavailable("AI analysis unavailable");
-			} finally {
-				aiInFlight.delete(code);
-				if (!emitted) emitUnavailable("AI analysis unavailable");
-			}
-		})();
-	});
 }
 
 // ── Streaming POST /api/upload ───────────────────────────────
@@ -699,19 +570,6 @@ router.post("/", rateLimitUpload, sanitizeRequestBody, async (req, res) => {
 			expiryMinutes,
 		});
 
-		// AI analysis: pass the full buffer if we retained it (file ≤ AI_BUFFER_LIMIT),
-		// otherwise pass the sniff buffer so the analyzer can at least classify the type.
-		// Build the AI input array first, then release references to free memory.
-		const aiInputFiles = files.map((f) => ({
-			originalname: f.originalName,
-			mimetype: f.mimeType,
-			size: f.size,
-			buffer: f.aiBuffer || f.sniff,
-		}));
-		// Fire AI analysis asynchronously (non-blocking) after response is sent
-		setImmediate(() => {
-			fireAndForgetAi(code, aiInputFiles);
-		});
 		// Release all file stream references immediately to free memory
 		files.forEach((f) => {
 			try { if (f.passthrough && typeof f.passthrough.destroy === 'function') f.passthrough.destroy(); } catch (e) {}
@@ -791,14 +649,6 @@ router.post("/clipboard", rateLimitUpload, sanitizeRequestBody, async (req, res)
 			expiryMinutes: parseExpiryMinutes(expiryMinutes),
 		});
 
-		// Fire AI analysis asynchronously after response
-		const clipboardAiInput = [{ originalname: filename, mimetype: mimeType, size: buffer.length, buffer }];
-		setImmediate(() => {
-			fireAndForgetAi(code, clipboardAiInput);
-		});
-		// Clear buffer reference to avoid memory retention
-		clipboardAiInput[0].buffer = null;
-
 		return res.status(200).json(response);
 	} catch (error) {
 		logError("Clipboard upload failed", error);
@@ -810,10 +660,9 @@ router.post("/clipboard", rateLimitUpload, sanitizeRequestBody, async (req, res)
 
 module.exports = router;
 // Internal helpers exposed for sibling routes (e.g. /api/text/share) so we don't
-// duplicate ~80 lines of finalize + AI dispatch logic. Hung off the router function
+// duplicate finalize logic. Hung off the router function
 // because Express routers are JS functions and accept extra properties.
 module.exports.finalizeTransfer = finalizeTransfer;
-module.exports.fireAndForgetAi = fireAndForgetAi;
 module.exports.getMaxFileSizeBytes = getMaxFileSizeBytes;
 module.exports.parseExpiryMinutes = parseExpiryMinutes;
 module.exports.parseBooleanFlag = parseBooleanFlag;

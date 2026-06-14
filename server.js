@@ -13,14 +13,12 @@ const compression = require("compression");
 const { validateEnvOrExit } = require("./utils/validateEnv");
 const { createTimingMiddleware, getPerformanceSnapshot } = require("./utils/performance");
 const { getCacheStats } = require("./utils/cache");
-const { isAiSummarizationEnabled } = require("./utils/aiMode");
 
 validateEnvOrExit();
 
 const { connectDB, isMongoReady } = require("./config/db");
 const { checkRedisConnection } = require("./config/redis");
 const { checkR2Connection } = require("./config/r2");
-const { checkGeminiConnection, checkGeminiConnectionLive } = require("./config/gemini");
 const { initSocket, scheduleTransferCountdown } = require("./config/socket");
 const Transfer = require("./models/Transfer");
 const uploadRoutes = require("./routes/upload");
@@ -297,11 +295,6 @@ async function getR2Status() {
 	return (await checkR2Connection()) ? "connected" : "disconnected";
 }
 
-async function getGeminiStatus() {
-	if (!isAiSummarizationEnabled()) return "disabled";
-	return (await checkGeminiConnectionLive()) ? "connected" : "disconnected";
-}
-
 async function withTimeout(promise, timeoutMs, fallbackValue) {
 	let timerId;
 	try {
@@ -471,16 +464,6 @@ function printStartupStatus(port, host) {
 		if (r2Status === "connected") logSuccess("R2 Connected");
 		else logError("R2 Failed", null);
 	}).catch((error) => logError("Service startup checks failed", error));
-
-	if (!isAiSummarizationEnabled()) {
-		logEvent("[•] AI summarization temporarily disabled (maintenance mode)");
-	} else if (!process.env.GEMINI_API_KEY) {
-		logEvent("Gemini Optional AI Disabled");
-	} else if (checkGeminiConnection()) {
-		logSuccess("Gemini Connected");
-	} else {
-		logWarn("Gemini Unavailable (optional)");
-	}
 
 	if (process.env.SENTRY_DSN) logSuccess("Sentry Enabled");
 	else logEvent("Sentry Disabled");

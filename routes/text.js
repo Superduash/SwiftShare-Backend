@@ -89,7 +89,6 @@ router.post("/share", rateLimitText, async (req, res) => {
 		});
 
 		const finalize = uploadModule.finalizeTransfer;
-		const fireAi = uploadModule.fireAndForgetAi;
 		const parseBool = uploadModule.parseBooleanFlag;
 		const parsePass = uploadModule.parsePassword;
 		const parseExpiry = uploadModule.parseExpiryMinutes;
@@ -119,15 +118,6 @@ router.post("/share", rateLimitText, async (req, res) => {
 		} catch (err) {
 			logError('Failed to persist inline text for transfer', err, `CODE: ${code}`);
 		}
-
-		// AI: text content is small enough to pass directly. Marker in the response
-		// so the frontend can render the snippet inline without an extra fetch.
-		fireAi(code, [{
-			originalname: filename,
-			mimetype: "text/plain; charset=utf-8",
-			size: buffer.length,
-			buffer,
-		}]);
 
 		logEvent("Text snippet shared", `CODE: ${code}`, `BYTES: ${buffer.length}`);
 		return res.status(200).json({ ...response, kind: "text" });

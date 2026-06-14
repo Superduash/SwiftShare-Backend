@@ -46,22 +46,8 @@ services:
         sync: false
       - key: CORS_ALLOW_ALL_ORIGINS
         value: "false"
-      - key: GEMINI_API_KEY
-        sync: false
-      - key: GROQ_API_KEY
-        sync: false
-      - key: OPENROUTER_API_KEY
-        sync: false
-      - key: OPENROUTER_SITE_URL
-        sync: false
-      - key: OPENROUTER_APP_NAME
-        value: "SwiftShare Backend"
       - key: SENTRY_DSN
         sync: false
-      - key: AI_REQUEST_TIMEOUT_MS
-        value: "20000"
-      - key: AI_CACHE_TTL_SECONDS
-        value: "3600"
       - key: HEALTH_CACHE_TTL_MS
         value: "15000"
       - key: HEALTH_CHECK_TIMEOUT_MS

@@ -175,10 +175,6 @@ const transferSchema = new mongoose.Schema(
 			type: String,
 			default: "",
 		},
-		ai: {
-			type: mongoose.Schema.Types.Mixed,
-			default: null,
-		},
 		activity: {
 			type: [transferActivitySchema],
 			default: [],
