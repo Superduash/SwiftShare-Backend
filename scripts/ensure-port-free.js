@@ -89,11 +89,11 @@ function main() {
   }
 
   if (failures.length > 0) {
-    console.error(`[port-guard] Failed to free port ${port}.`);
+    console.warn(`[port-guard] Warning: could not kill all PIDs on port ${port} — server will attempt to start anyway.`);
     for (const failure of failures) {
-      console.error(`- PID ${failure.pid}: ${failure.message}`);
+      console.warn(`- PID ${failure.pid}: ${failure.message}`);
     }
-    process.exit(1);
+    // Do NOT exit — let the server try to bind and fail with a clear error if needed
   }
 
   console.log(`[port-guard] Port ${port} is now free.`);

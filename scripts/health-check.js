@@ -4,7 +4,7 @@ const http = require("http");
 
 const MAX_RETRIES = 30; // 30 seconds max wait (1s per retry)
 const RETRY_INTERVAL = 1000; // 1 second between retries
-const HEALTH_URL = "http://localhost:3001/health";
+const HEALTH_URL = "http://localhost:3001/api/health";
 
 let attempts = 0;
 
