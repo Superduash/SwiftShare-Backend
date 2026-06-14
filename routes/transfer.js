@@ -79,7 +79,7 @@ function inferOriginalSessionMinutes(transfer) {
 router.post("/:code/verify-password", rateLimitPassword, validateCode, sanitizeRequestBody, async (req, res, next) => {
 	try {
 		const { code } = req.params;
-		const transfer = await Transfer.findOne({ code });
+		const transfer = await Transfer.findOne({ code }).lean();
 
 		if (!transfer) {
 			return res.status(404).json(buildErrorResponse(ERROR_CODES.CODE_NOT_FOUND));
@@ -202,7 +202,7 @@ router.get("/:code/status", validateCode, async (req, res, next) => {
 router.post("/:code/extend", validateCode, async (req, res, next) => {
 	try {
 		const { code } = req.params;
-		const transfer = await Transfer.findOne({ code });
+		const transfer = await Transfer.findOne({ code }).lean();
 
 		if (!transfer) {
 			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
@@ -282,7 +282,7 @@ router.post("/:code/extend", validateCode, async (req, res, next) => {
 router.delete("/:code", validateCode, async (req, res, next) => {
 	try {
 		const { code } = req.params;
-		const transfer = await Transfer.findOne({ code });
+		const transfer = await Transfer.findOne({ code }).lean();
 
 		if (!transfer) {
 			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
@@ -331,14 +331,14 @@ router.delete("/:code", validateCode, async (req, res, next) => {
 router.post("/:code/burn-finalize", validateCode, async (req, res, next) => {
 	try {
 		const { code } = req.params;
-		const transfer = await Transfer.findOne({ code });
+		const transfer = await Transfer.findOne({ code }).lean();
 
 		if (!transfer) {
 			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
 		}
 
 		if (!transfer.burnAfterDownload) {
-			return res.status(200).json({ success: true, code, status: transfer.status || "ACTIVE" });
+			return res.status(200).json({ success: true, code, status: getTransferStatus(transfer) || "ACTIVE" });
 		}
 
 		if (transfer.isDeleted) {

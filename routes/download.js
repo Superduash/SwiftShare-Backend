@@ -619,7 +619,7 @@ async function claimBurnDownload(transfer, req) {
 			},
 			{ $set: { burnLastActiveAt: now } },
 			{ new: true },
-		);
+		).lean();
 
 		return { transfer: ownedTransfer, claimedNow: false };
 	}
@@ -647,7 +647,7 @@ async function claimBurnDownload(transfer, req) {
 			},
 		},
 		{ new: true },
-	);
+	).lean();
 
 	if (claimedTransfer) {
 		return { transfer: claimedTransfer, claimedNow: true };
@@ -662,7 +662,7 @@ async function claimBurnDownload(transfer, req) {
 		},
 		{ $set: { burnLastActiveAt: now } },
 		{ new: true },
-	);
+	).lean();
 
 	return { transfer: ownerTransfer, claimedNow: false };
 }
@@ -765,7 +765,7 @@ function buildTransferReceipt({
 router.get("/:code", rateLimitDownload, validateCode, async (req, res, next) => {
 	try {
 		const { code } = req.params;
-		let transfer = await Transfer.findOne({ code });
+		let transfer = await Transfer.findOne({ code }).lean();
 		const receiverDevice = getDeviceName(req.get("user-agent") || "");
 		const receiverIp = getClientIp(req);
 
@@ -805,7 +805,7 @@ router.get("/:code", rateLimitDownload, validateCode, async (req, res, next) => 
 		if (transfer.files.length === 1) {
 			receiptFileName = transfer.files[0].originalName || receiptFileName;
 			streamedBytes = await streamSingleFile(res, {
-				...transfer.files[0].toObject(),
+				...transfer.files[0],
 			}, code);
 		} else {
 			streamedBytes = await streamZip(res, transfer.code, transfer.files);
@@ -849,7 +849,7 @@ router.get("/:code", rateLimitDownload, validateCode, async (req, res, next) => 
 router.get("/:code/single/:index", rateLimitDownload, validateCode, async (req, res, next) => {
 	try {
 		const { code, index } = req.params;
-		let transfer = await Transfer.findOne({ code });
+		let transfer = await Transfer.findOne({ code }).lean();
 		const receiverDevice = getDeviceName(req.get("user-agent") || "");
 		const receiverIp = getClientIp(req);
 
@@ -886,7 +886,7 @@ router.get("/:code/single/:index", rateLimitDownload, validateCode, async (req, 
 		const selectedFile = transfer.files[fileIndex];
 		const streamStart = Date.now();
 		const streamedBytes = await streamSingleFile(res, {
-			...transfer.files[fileIndex].toObject(),
+			...transfer.files[fileIndex],
 		}, code);
 		const downloadDuration = Math.max(Date.now() - streamStart, 1);
 		const downloadSpeed = Math.round(streamedBytes / (downloadDuration / 1000));
@@ -940,7 +940,7 @@ router.options("/:code/preview/:index", (req, res) => {
 router.head("/:code/preview/:index", validateCode, async (req, res, next) => {
 	try {
 		const { code, index } = req.params;
-		const transfer = await Transfer.findOne({ code });
+		const transfer = await Transfer.findOne({ code }).lean();
 
 		const unavailableResponse = sendUnavailableTransferResponse(req, res, transfer);
 		if (unavailableResponse) {
@@ -996,7 +996,7 @@ router.head("/:code/preview/:index", validateCode, async (req, res, next) => {
 router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 	try {
 		const { code, index } = req.params;
-		const transfer = await Transfer.findOne({ code });
+		const transfer = await Transfer.findOne({ code }).lean();
 
 		const unavailableResponse = sendUnavailableTransferResponse(req, res, transfer);
 		if (unavailableResponse) {
@@ -1116,7 +1116,7 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 router.get("/:code/preview/:index/docx-html", validateCode, async (req, res, next) => {
 	try {
 		const { code, index } = req.params;
-		const transfer = await Transfer.findOne({ code });
+		const transfer = await Transfer.findOne({ code }).lean();
 
 		const unavailableResponse = sendUnavailableTransferResponse(req, res, transfer);
 		if (unavailableResponse) {
