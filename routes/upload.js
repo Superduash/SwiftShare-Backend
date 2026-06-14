@@ -429,38 +429,37 @@ async function finalizeTransfer({
 		ownershipToken,
 	};
 
-	// Create database record asynchronously (don't wait for it)
-	setImmediate(() => {
-		Transfer.create({
-			code,
-			files: uploadedFiles,
-			totalSize,
-			fileCount,
-			isZipped: false,
-			burnAfterDownload,
-			passwordProtected: shouldProtectWithPassword,
-			passwordHash,
-			passwordAttempts: 0,
-			downloadCount: 0,
-			uploadSpeed,
-			uploadDuration: uploadDurationMs,
-			downloadSpeed: 0,
-			downloadDuration: 0,
-			expiresAt,
-			isDeleted: false,
-			senderIp,
-			senderDeviceName: senderDevice,
-			senderSocketId: typeof req._senderSocketId === "string" ? req._senderSocketId : "",
-			ownershipToken,
-			qrDataUri: qr,
-			activity: [
-				{ event: "uploaded", device: senderDevice, ip: senderIp, timestamp: new Date() },
-			],
-		}).catch((err) => {
-			logError("Failed to save transfer to database", err, `CODE: ${code}`);
-		});
+	// Create database record and confirm it is persisted before emitting upload-complete.
+	// Emitting before the write is confirmed risks the receiver page loading a transfer
+	// that doesn't exist in the DB yet (race condition on fast connections / cold DB).
+	await Transfer.create({
+		code,
+		files: uploadedFiles,
+		totalSize,
+		fileCount,
+		isZipped: false,
+		burnAfterDownload,
+		passwordProtected: shouldProtectWithPassword,
+		passwordHash,
+		passwordAttempts: 0,
+		downloadCount: 0,
+		uploadSpeed,
+		uploadDuration: uploadDurationMs,
+		downloadSpeed: 0,
+		downloadDuration: 0,
+		expiresAt,
+		isDeleted: false,
+		senderIp,
+		senderDeviceName: senderDevice,
+		senderSocketId: typeof req._senderSocketId === "string" ? req._senderSocketId : "",
+		ownershipToken,
+		qrDataUri: qr,
+		activity: [
+			{ event: "uploaded", device: senderDevice, ip: senderIp, timestamp: new Date() },
+		],
 	});
 
+	// DB write confirmed — safe to notify clients now
 	emitToRoom(code, "upload-complete", responsePayload);
 	scheduleTransferCountdown(code, expiresAt);
 	broadcastNewTransferToSubnet(code, senderIp);
