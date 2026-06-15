@@ -372,7 +372,7 @@ async function emitNearbyDevices(socket) {
 }
 
 function initSocket(server) {
-	const allowedOrigins = `${String(process.env.FRONTEND_URL || "")},${String(process.env.CORS_EXTRA_ORIGINS || "")}`
+	const allowedFrontendOrigins = `${String(process.env.FRONTEND_URL || "")},${String(process.env.CORS_EXTRA_ORIGINS || "")}`
 		.split(",")
 		.map((origin) => normalizeConfiguredOrigin(origin))
 		.filter(Boolean);
@@ -392,33 +392,7 @@ function initSocket(server) {
 		perMessageDeflate: false,
 		httpCompression: false,
 		cors: {
-			origin: (origin, callback) => {
-				// No origin (mobile apps, Postman) — allow
-				if (!origin) { callback(null, true); return; }
-				// CORS_ALLOW_ALL_ORIGINS=true (diagnostics only)
-				if (allowAllOrigins) { callback(null, true); return; }
-				// Dev: localhost / private LAN
-				if (!isProduction && isDevOriginAllowed(origin)) { callback(null, true); return; }
-				// Platform deploys (Vercel/Netlify/Render/CF Pages/Firebase/Railway).
-				// Matches HTTP CORS — opt out by setting CORS_BLOCK_PLATFORM_DEPLOYS=true
-				if (
-					String(process.env.CORS_BLOCK_PLATFORM_DEPLOYS || "").toLowerCase() !== "true"
-					&& isPlatformDeployOrigin(origin)
-				) {
-					callback(null, true);
-					return;
-				}
-				// Explicitly configured origins (FRONTEND_URL + CORS_EXTRA_ORIGINS)
-				if (
-					allowedOrigins.length > 0
-					&& allowedOrigins.some((configuredOrigin) => originsMatch(origin, configuredOrigin))
-				) {
-					callback(null, true);
-					return;
-				}
-				logEvent("Blocked Socket.IO CORS origin", `ORIGIN: ${origin}`);
-				callback(new Error("Origin not allowed by Socket.IO CORS"));
-			},
+			origin: allowedFrontendOrigins,
 			methods: ["GET", "POST"],
 			credentials: false,
 		},

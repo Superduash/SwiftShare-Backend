@@ -1,6 +1,6 @@
 {
   "name": "swiftshare-backend",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "main": "server.js",
   "engines": {
@@ -50,6 +50,10 @@
     "pdf-parse": "^2.4.5",
     "qrcode": "^1.5.4",
     "socket.io": "^4.8.3"
+  },
+  "optionalDependencies": {
+    "bufferutil": "^4.0.8",
+    "utf-8-validate": "^6.0.3"
   },
   "devDependencies": {
     "jest": "^30.4.2",
