@@ -229,36 +229,20 @@ R2_BUCKET_NAME=
 FRONTEND_URL=
 SHARE_BASE_URL=
 ```
-
----
-
-# Related Repository
-
-### SwiftShare
-
-The main project repository containing the React frontend and user experience layer.
-
-➡️ https://github.com/Superduash/SwiftShare
-
 ---
 
 # Engineering Goals
 
 SwiftShare Backend was built around four principles:
-
 - Fast
 - Secure
 - Temporary
 - Reliable
 
 Every transfer should be:
-
 ⚡ Fast
-
 🔒 Secure
-
 📦 Temporary
-
 🌍 Accessible
 
 ---
