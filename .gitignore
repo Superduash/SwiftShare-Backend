@@ -69,3 +69,21 @@ exportfront.py
 # Lockfile backups
 package-lock.json.bak
 yarn.lock.bak
+
+# Media & Archives
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.zip
+*.tar
+*.gz
+*.rar
+*.7z
+
+# AI Artifacts
+.kiro/
+.gemini/
+.ai/
+scratchpad_*
+media_*
