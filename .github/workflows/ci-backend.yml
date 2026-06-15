@@ -30,6 +30,15 @@ jobs:
         env:
           NODE_ENV: test
           CI: true
+          # Stub required env vars for tests
+          MONGODB_URI: mongodb://localhost:27017/swiftshare-test
+          R2_ACCOUNT_ID: test-account
+          R2_ACCESS_KEY_ID: test-key
+          R2_SECRET_ACCESS_KEY: test-secret
+          R2_BUCKET_NAME: test-bucket
+          FRONTEND_URL: http://localhost:5173
+          SHARE_BASE_URL: http://localhost:5173
+          TOKEN_SECRET: test-token-secret-min-32-chars-long
 
       - name: Audit dependencies
         run: npm audit --audit-level=high || true
