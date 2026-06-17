@@ -378,14 +378,15 @@ function initSocket(server) {
 		.filter(Boolean);
 
 	ioInstance = new Server(server, {
-		// Mobile-friendly timeouts: the default 20s pingTimeout drops connections
-		// when a phone screen sleeps or signal briefly flaps. 60s tolerates
-		// background tabs, lock screens, and brief radio handoffs.
-		pingInterval: 25000,
-		pingTimeout: 60000,
+		// Mobile-optimized timeouts: Wait 2 minutes before assuming mobile dropped
+		// Send pings less frequently to save mobile battery and reduce load
+		pingInterval: 30000,  // 30s (was 25s)
+		pingTimeout: 120000,  // 120s / 2 minutes (was 60s) - tolerates screen lock, WiFi<->data handoff
+		connectTimeout: 45000, // 45s - give mobile more time to establish connection
 		// Match the express body limit. Sockets carry only small JSON events.
 		maxHttpBufferSize: 1e6,
 		// Security: Prevent WebSocket transport downgrade attacks
+		// Note: websocket first, polling fallback for mobile networks
 		transports: ["websocket", "polling"],
 		allowUpgrades: true,
 		// Security: Limit connection attempts
