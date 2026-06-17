@@ -175,6 +175,12 @@ app.use(compression({
 app.use((req, res, next) => {
 	req.requestId = crypto.randomUUID();
 	res.setHeader("X-Request-ID", req.requestId);
+	
+	// Log all incoming requests to /api/upload for debugging
+	if (req.path === '/api/upload') {
+		logEvent("REQUEST ARRIVED", `${req.method} ${req.path}`, `Content-Type: ${req.headers['content-type']}`, `Request-ID: ${req.requestId}`);
+	}
+	
 	next();
 });
 

@@ -158,6 +158,7 @@ const PROGRESS_EMIT_INTERVAL_MS = 100;
 // to the sender, since on slow network the sender wants to see its own throughput.
 function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 	return new Promise((resolve, reject) => {
+		logEvent("CREATING BUSBOY", `CODE: ${code}`);
 		let busboy;
 		try {
 			busboy = Busboy({
@@ -170,7 +171,9 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 					fields: 50,
 				},
 			});
+			logEvent("BUSBOY CREATED", `CODE: ${code}`);
 		} catch (err) {
+			logError("BUSBOY CREATION FAILED", err, `CODE: ${code}`);
 			reject(createAppError(400, ERROR_CODES.INVALID_FILE_TYPE, "Invalid upload payload"));
 			return;
 		}
@@ -222,6 +225,7 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 
 		busboy.on("field", (name, value) => {
 			if (aborted) return;
+			logEvent("BUSBOY FIELD", `CODE: ${code}`, `${name}=${String(value).substring(0, 50)}`);
 			if (typeof value === "string" && value.length <= 4096) {
 				fields[name] = value;
 			}
@@ -230,8 +234,11 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 		busboy.on("file", (fieldname, fileStream, info) => {
 			if (aborted) return;
 
+			logEvent("BUSBOY FILE EVENT", `CODE: ${code}`, `fieldname: ${fieldname}`, `filename: ${info?.filename}`);
+
 			if (fieldname !== "files") {
 				// Drain unknown fields without raising errors.
+				logEvent("BUSBOY UNKNOWN FIELD - DRAINING", `CODE: ${code}`, `fieldname: ${fieldname}`);
 				fileStream.resume();
 				return;
 			}
@@ -344,17 +351,32 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 		});
 
 		busboy.on("filesLimit", () => {
+			logError("BUSBOY FILES LIMIT EXCEEDED", null, `CODE: ${code}`);
 			abortAll(createAppError(400, ERROR_CODES.TOO_MANY_FILES, "Too many files"));
 		});
 
-		busboy.on("error", (err) => abortAll(err));
-		req.on("aborted", () => abortAll(createAppError(499, ERROR_CODES.SERVER_ERROR, "Client aborted upload")));
-		req.on("error", (err) => abortAll(err));
+		busboy.on("error", (err) => {
+			logError("BUSBOY ERROR", err, `CODE: ${code}`);
+			abortAll(err);
+		});
+		
+		req.on("aborted", () => {
+			logError("REQUEST ABORTED BY CLIENT", null, `CODE: ${code}`);
+			abortAll(createAppError(499, ERROR_CODES.SERVER_ERROR, "Client aborted upload"));
+		});
+		
+		req.on("error", (err) => {
+			logError("REQUEST ERROR", err, `CODE: ${code}`);
+			abortAll(err);
+		});
 
 		busboy.on("close", async () => {
 			if (aborted) return;
+			logEvent("BUSBOY CLOSE EVENT", `CODE: ${code}`, `FILES: ${files.length}`);
 			try {
+				logEvent("WAITING FOR R2 UPLOADS", `CODE: ${code}`);
 				await Promise.all(uploadPromises);
+				logEvent("R2 UPLOADS COMPLETE", `CODE: ${code}`);
 				if (!files.length) {
 					reject(createAppError(400, ERROR_CODES.NO_FILE_UPLOADED, "No file uploaded"));
 					return;
@@ -362,10 +384,12 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 				maybeEmitProgress(true); // Final 100% tick.
 				finish(() => resolve({ fields, files, totalBytes }));
 			} catch (err) {
+				logError("R2 UPLOAD FAILED IN BUSBOY CLOSE", err, `CODE: ${code}`);
 				if (!settled) finish(() => reject(err));
 			}
 		});
 
+		logEvent("PIPING REQUEST TO BUSBOY", `CODE: ${code}`);
 		req.pipe(busboy);
 	});
 }
@@ -470,28 +494,36 @@ async function finalizeTransfer({
 
 // ── Streaming POST /api/upload ───────────────────────────────
 router.post("/", rateLimitUpload, sanitizeRequestBody, async (req, res) => {
+	logEvent("UPLOAD ROUTE HIT", `Content-Type: ${req.headers["content-type"]}`, `Content-Length: ${req.headers["content-length"]}`);
+	
 	if (!isR2Configured) {
+		logError("R2 NOT CONFIGURED", null);
 		return res.status(503).json(buildErrorResponse(ERROR_CODES.SERVER_ERROR, "Storage is not configured"));
 	}
 
 	const shareBaseUrl = process.env.SHARE_BASE_URL;
 	if (!shareBaseUrl) {
+		logError("SHARE_BASE_URL NOT SET", null);
 		return res.status(500).json(buildErrorResponse(ERROR_CODES.SERVER_ERROR, "SHARE_BASE_URL is not set"));
 	}
 
 	const contentType = String(req.headers["content-type"] || "");
 	if (!/^multipart\/form-data/i.test(contentType)) {
+		logError("INVALID CONTENT TYPE", null, `Received: ${contentType}`);
 		return res.status(400).json(buildErrorResponse(ERROR_CODES.INVALID_FILE_TYPE, "Expected multipart/form-data"));
 	}
 
 	const code = await generateUniqueCode();
+	logEvent("GENERATED CODE", code);
 	const maxFileCount = getMaxFileCount();
 	const maxTotalBytes = getMaxFileSizeBytes();
 	const uploadStartedAt = Date.now();
 	let parsed;
 
+	logEvent("STARTING BUSBOY PARSE", `CODE: ${code}`);
 	try {
 		parsed = await parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes });
+		logEvent("BUSBOY PARSE COMPLETE", `CODE: ${code}`, `FILES: ${parsed.files.length}`, `BYTES: ${parsed.totalBytes}`);
 	} catch (error) {
 		logError("Upload stream failed", error, `CODE: ${code}`);
 		// Cleanup any partially-written R2 objects (Upload.abort already handles in-flight parts;
