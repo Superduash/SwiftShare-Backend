@@ -1,101 +1,269 @@
 <p align="center">
-  <img src="https://capsule-render.vercel.app/api?type=rect&height=180&color=0:1E293B,100:0F766E&text=SwiftShare%20Backend&fontSize=44&fontColor=ffffff&desc=Express%20API%20for%20secure%20temporary%20transfers&descAlignY=70" alt="SwiftShare Backend banner" />
+  <img src="https://capsule-render.vercel.app/api?type=waving&height=240&color=0:111827,50:f97316,100:facc15&text=SwiftShare%20Backend&fontSize=56&fontColor=ffffff&animation=fadeIn&fontAlignY=40&desc=The%20Infrastructure%20Behind%20Every%20Transfer&descAlignY=63&descColor=f3f4f6&descSize=18"/>
 </p>
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Node-%3E%3D22-3C873A?style=for-the-badge&logo=node.js&logoColor=white" alt="Node >=22" />
-  <img src="https://img.shields.io/badge/Framework-Express%205-111827?style=for-the-badge&logo=express" alt="Express 5" />
-  <img src="https://img.shields.io/badge/DB-MongoDB-0B7D3E?style=for-the-badge&logo=mongodb&logoColor=white" alt="MongoDB" />
-  <img src="https://img.shields.io/badge/Realtime-Socket.IO-111111?style=for-the-badge&logo=socket.io" alt="Socket.IO" />
-  <img src="https://img.shields.io/badge/Object%20Storage-Cloudflare%20R2-F38020?style=for-the-badge" alt="Cloudflare R2" />
-</p>
+<div align="center">
+
+### ⚙️ Upload Pipeline • ☁️ Storage Engine • ⚡ Real-Time Events • 🛡️ Security
+
+The backend architecture powering SwiftShare's temporary file transfer ecosystem.
+
+<br>
+
+<img src="https://img.shields.io/badge/Node.js-22-339933?style=for-the-badge&logo=node.js&logoColor=white"/>
+<img src="https://img.shields.io/badge/Express-5-black?style=for-the-badge&logo=express"/>
+<img src="https://img.shields.io/badge/MongoDB-47A248?style=for-the-badge&logo=mongodb&logoColor=white"/>
+<img src="https://img.shields.io/badge/Cloudflare_R2-F38020?style=for-the-badge&logo=cloudflare&logoColor=white"/>
+<img src="https://img.shields.io/badge/Socket.IO-Real_Time-black?style=for-the-badge&logo=socketdotio"/>
+
+<br>
+
+### 🎨 Frontend Repository
+
+https://github.com/Superduash/SwiftShare
+
+</div>
 
 ---
 
-## Overview 👋
+# Overview
 
-SwiftShare Backend is the modern API architecture powering secure file sharing.
-The backend seemingly handles all your traffic in the background, providing you an uninterrupted, clean, and blazing fast experience when serving file streams, AI data, and socket events.
+SwiftShare Backend manages the complete lifecycle of every transfer.
 
-SwiftShare Backend features robust real-time updates, integrates flawlessly with your frontend themes, and includes a suite of security features like rate limiting and payload verification.
+From the moment a file is uploaded until it expires, gets downloaded, or is destroyed in burn mode, the backend coordinates storage, security, transfer management, and real-time communication.
 
-## Features ✨
+Core responsibilities include:
 
-- 🚀 **Lightning Fast Streams:** Upload and metadata pipelines for multi-file sessions.
-- 🔒 **Password Protection:** Safe verification endpoints for locked transfers.
-- 🔥 **Burn-After-Downloading:** Claimant ownership with explicit finalize endpoints.
-- 👁️ **Media Previews:** Real-time file and document preview conversion routes.
-- ⚡ **Real-Time Sync:** Transfer updates and progress via Socket.IO rooms.
-- 🧹 **Auto-Cleanup:** Scheduled cleanup job for expired/deleted transfers.
-- 🤖 **Generative AI:** Summary support through Google's Gemini Models.
-- 🛡️ **Rate Limiting:** IP and Redis-based rate limiting across all critical endpoints.
-- 🔒 **Security Hardened:** Strict CORS policies, comprehensive security headers (Helmet), input sanitization, and signature-based file validation.
-- 🐛 **Error Tracking:** Production monitoring through Sentry with redacted PII logging.
+- File uploads
+- Download streaming
+- Transfer codes
+- Password verification
+- Burn-after-download logic
+- Activity tracking
+- Nearby discovery
+- Cloud storage management
+- Automatic cleanup
 
-> *"Does a better job than what legacy file share websites officially offer."* — **Tech Enthusiast**
+---
 
-## API Surface 🌐
+# Core Systems
 
-Mounted route groups:
+### 📤 Upload Pipeline
 
-- 📤 `/api/upload` - File uploads
-- 📄 `/api/file` - File metadata & previews
-- 📥 `/api/download` - Stream resolution
-- 🔄 `/api/transfer` - Transfer lifecycle
-- 📡 `/api/nearby` - Local discovery
-- 📊 `/api/stats` - Server metrics
+- Multi-file uploads
+- Streaming architecture
+- Metadata generation
+- Validation and sanitization
+- Direct Cloudflare R2 storage
 
-Utility endpoints:
+### 📥 Download System
 
-- 🏓 `GET /api/ping`
-- 🏥 `GET /api/health`
+- Direct file streaming
+- ZIP downloads
+- Secure transfer validation
+- Download tracking
 
-## How to install 📥
+### 🔥 Burn-After-Download
+
+Transfers can automatically self-destruct after a successful download.
+
+The backend handles:
+
+- One-time claims
+- Ownership validation
+- Automatic deletion
+- Transfer invalidation
+
+### ⚡ Real-Time Infrastructure
+
+Powered by Socket.IO:
+
+- Transfer updates
+- Download notifications
+- Activity events
+- Nearby discovery broadcasts
+
+### ☁️ Cloud Storage
+
+Cloudflare R2 provides:
+
+- Scalable object storage
+- Fast file delivery
+- Multipart uploads
+- Automated cleanup integration
+
+### 🛡 Security
+
+Built-in protections include:
+
+- Password-protected transfers
+- Rate limiting
+- MIME validation
+- Dangerous file filtering
+- Security headers
+- Input sanitization
+- Secure token generation
+
+---
+
+# Architecture
+
+```text
+           Client Browser
+                 │
+                 ▼
+         Express API Server
+                 │
+ ┌───────────────┼─────────────┐
+ ▼               ▼             ▼
+MongoDB    Cloudflare R2    Socket.IO
+Metadata       Files        Real-Time
+```
+
+---
+
+# API Surface
+
+### Uploads
+
+```text
+/api/upload
+```
+
+### Downloads
+
+```text
+/api/download
+```
+
+### Files
+
+```text
+/api/file
+```
+
+### Transfers
+
+```text
+/api/transfer
+```
+
+### Nearby Devices
+
+```text
+/api/nearby
+```
+
+### Statistics
+
+```text
+/api/stats
+```
+
+### Health Checks
+
+```text
+/api/ping
+/api/health
+```
+
+---
+
+# Technology Stack
+
+| Component | Technology |
+|------------|------------|
+| Runtime | Node.js 22 |
+| Framework | Express 5 |
+| Database | MongoDB |
+| Storage | Cloudflare R2 |
+| Real-Time | Socket.IO |
+| Monitoring | Sentry |
+| Security | Helmet |
+| Rate Limiting | Upstash Redis |
+| Scheduling | Node Cron |
+
+---
+
+# Project Structure
+
+```text
+SwiftShare-Backend
+│
+├── config/
+├── middleware/
+├── models/
+├── routes/
+├── services/
+├── tests/
+├── utils/
+│
+├── server.js
+├── package.json
+├── render.yaml
+└── .env.example
+```
+
+---
+
+# Local Development
 
 ```bash
-cd Backend
+git clone https://github.com/Superduash/SwiftShare-Backend.git
+
+cd SwiftShare-Backend
+
 npm install
-cp .env.example .env
+
 npm run dev
 ```
 
-Default port: `3001`
-
-## Environment Variables ⚙️
-
-Minimum required in `.env`:
+Required Environment Variables:
 
 ```env
 MONGODB_URI=
 R2_ACCOUNT_ID=
 R2_ACCESS_KEY_ID=
 R2_SECRET_ACCESS_KEY=
-R2_BUCKET_NAME=swiftshare
-FRONTEND_URL=https://your-frontend.vercel.app
-SHARE_BASE_URL=https://your-frontend.vercel.app
+R2_BUCKET_NAME=
+FRONTEND_URL=
+SHARE_BASE_URL=
 ```
+---
 
-Optional Configs:
+# Engineering Goals
 
-- `GEMINI_API_KEY`, `GEMINI_MODEL`
-- `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`
-- `SENTRY_DSN`
-- tuning values such as `SESSION_EXPIRY_MINUTES`, `MAX_FILE_SIZE_MB`, `MAX_FILE_COUNT`
+SwiftShare Backend was built around four principles:
+- Fast
+- Secure
+- Temporary
+- Reliable
 
-## Credits 🙌
-
-- **Superduash** - Backend Architecture & Development
-
-## Dependencies 📦
-
-- `express`
-- `mongoose`
-- `socket.io`
-- `@aws-sdk/client-s3` (Cloudflare R2)
-- `@google/generative-ai`
+Every transfer should be:
+⚡ Fast
+🔒 Secure
+📦 Temporary
+🌍 Accessible
 
 ---
 
+# License
+
+MIT License
+
+Free to use, modify, and distribute.
+
+---
+
+<div align="center">
+
+⭐ If you found the project interesting, consider starring the repository.
+
+Powering SwiftShare behind the scenes.
+
+Built with ❤️ by Superduash.
+</div>
+
 <p align="center">
-  Backend built with 💖 by Superduash
+  <img src="https://capsule-render.vercel.app/api?type=waving&height=110&section=footer&color=0:facc15,50:f97316,100:111827"/>
 </p>
