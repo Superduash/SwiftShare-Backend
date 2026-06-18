@@ -91,10 +91,6 @@ function createAppError(status, errorCode, message) {
 
 // ── MIME / signature checks (sniff-buffer based) ──────────────
 const SNIFF_BYTES = 8192;
-// Up to this size, retain the full file in memory as a side-buffer for AI analysis.
-// Beyond this, AI only sees the sniff buffer (8KB) — sufficient for MIME classification
-// but not for content extraction. Keeps streaming honest for large files.
-const AI_BUFFER_LIMIT = 6 * 1024 * 1024; // 6 MB
 const BLOCKED_DETECTED_EXTENSIONS = new Set([
 	".exe", ".bat", ".sh", ".cmd", ".msi", ".scr", ".com", ".vbs", ".ps1", ".jar",
 ]);
@@ -158,7 +154,6 @@ const PROGRESS_EMIT_INTERVAL_MS = 100;
 // to the sender, since on slow network the sender wants to see its own throughput.
 function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 	return new Promise((resolve, reject) => {
-		logEvent("CREATING BUSBOY", `CODE: ${code}`);
 		let busboy;
 		try {
 			busboy = Busboy({
@@ -171,7 +166,6 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 					fields: 50,
 				},
 			});
-			logEvent("BUSBOY CREATED", `CODE: ${code}`);
 		} catch (err) {
 			logError("BUSBOY CREATION FAILED", err, `CODE: ${code}`);
 			reject(createAppError(400, ERROR_CODES.INVALID_FILE_TYPE, "Invalid upload payload"));
@@ -225,7 +219,6 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 
 		busboy.on("field", (name, value) => {
 			if (aborted) return;
-			logEvent("BUSBOY FIELD", `CODE: ${code}`, `${name}=${String(value).substring(0, 50)}`);
 			if (typeof value === "string" && value.length <= 4096) {
 				fields[name] = value;
 			}
@@ -234,11 +227,8 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 		busboy.on("file", (fieldname, fileStream, info) => {
 			if (aborted) return;
 
-			logEvent("BUSBOY FILE EVENT", `CODE: ${code}`, `fieldname: ${fieldname}`, `filename: ${info?.filename}`);
-
 			if (fieldname !== "files") {
 				// Drain unknown fields without raising errors.
-				logEvent("BUSBOY UNKNOWN FIELD - DRAINING", `CODE: ${code}`, `fieldname: ${fieldname}`);
 				fileStream.resume();
 				return;
 			}
@@ -264,9 +254,6 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 			let sniffParts = [];
 			let sniffLen = 0;
 			let bytes = 0;
-			let aiParts = [];
-			let aiLen = 0;
-			let aiBufferDropped = false;
 
 			fileStream.on("data", (chunk) => {
 				if (aborted) return;
@@ -284,18 +271,6 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 					const slice = chunk.length <= need ? chunk : chunk.subarray(0, need);
 					sniffParts.push(slice);
 					sniffLen += slice.length;
-				}
-
-				if (!aiBufferDropped) {
-					if (aiLen + chunk.length <= AI_BUFFER_LIMIT) {
-						aiParts.push(chunk);
-						aiLen += chunk.length;
-					} else {
-						// Exceeded threshold: drop the AI buffer and continue streaming.
-						aiBufferDropped = true;
-						aiParts = [];
-						aiLen = 0;
-					}
 				}
 
 				maybeEmitProgress(false);
@@ -336,9 +311,6 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 				uploader,
 				get size() { return bytes; },
 				get sniff() { return Buffer.concat(sniffParts, sniffLen); },
-				get aiBuffer() {
-					return aiBufferDropped ? null : Buffer.concat(aiParts, aiLen);
-				},
 			};
 			files.push(fileEntry);
 
@@ -372,11 +344,8 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 
 		busboy.on("close", async () => {
 			if (aborted) return;
-			logEvent("BUSBOY CLOSE EVENT", `CODE: ${code}`, `FILES: ${files.length}`);
 			try {
-				logEvent("WAITING FOR R2 UPLOADS", `CODE: ${code}`);
 				await Promise.all(uploadPromises);
-				logEvent("R2 UPLOADS COMPLETE", `CODE: ${code}`);
 				if (!files.length) {
 					reject(createAppError(400, ERROR_CODES.NO_FILE_UPLOADED, "No file uploaded"));
 					return;
@@ -389,7 +358,6 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 			}
 		});
 
-		logEvent("PIPING REQUEST TO BUSBOY", `CODE: ${code}`);
 		req.pipe(busboy);
 	});
 }
@@ -494,8 +462,6 @@ async function finalizeTransfer({
 
 // ── Streaming POST /api/upload ───────────────────────────────
 router.post("/", rateLimitUpload, sanitizeRequestBody, async (req, res) => {
-	logEvent("UPLOAD ROUTE HIT", `Content-Type: ${req.headers["content-type"]}`, `Content-Length: ${req.headers["content-length"]}`);
-	
 	if (!isR2Configured) {
 		logError("R2 NOT CONFIGURED", null);
 		return res.status(503).json(buildErrorResponse(ERROR_CODES.SERVER_ERROR, "Storage is not configured"));
@@ -514,16 +480,13 @@ router.post("/", rateLimitUpload, sanitizeRequestBody, async (req, res) => {
 	}
 
 	const code = await generateUniqueCode();
-	logEvent("GENERATED CODE", code);
 	const maxFileCount = getMaxFileCount();
 	const maxTotalBytes = getMaxFileSizeBytes();
 	const uploadStartedAt = Date.now();
 	let parsed;
 
-	logEvent("STARTING BUSBOY PARSE", `CODE: ${code}`);
 	try {
 		parsed = await parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes });
-		logEvent("BUSBOY PARSE COMPLETE", `CODE: ${code}`, `FILES: ${parsed.files.length}`, `BYTES: ${parsed.totalBytes}`);
 	} catch (error) {
 		logError("Upload stream failed", error, `CODE: ${code}`);
 		// Cleanup any partially-written R2 objects (Upload.abort already handles in-flight parts;
@@ -619,7 +582,6 @@ router.post("/", rateLimitUpload, sanitizeRequestBody, async (req, res) => {
 // ── Clipboard upload (small in-memory image) ──────────────────
 router.post("/clipboard", rateLimitUpload, sanitizeRequestBody, async (req, res) => {
 	try {
-		logEvent("Clipboard upload", "REQUEST_RECEIVED");
 		const {
 			imageBase64, base64,
 			burnAfterDownload, senderSocketId, socketId,
