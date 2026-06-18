@@ -316,8 +316,12 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 
 			uploadPromises.push(
 				uploader.done().catch((err) => {
-					if (!aborted) abortAll(err);
-					throw err;
+					if (!aborted) {
+						abortAll(err);
+						throw err; // propagate to Promise.all() only when we're the first to abort
+					}
+					// Already aborted: abortAll() has already rejected the parent promise.
+					// Swallowing here prevents unhandled rejection × N files.
 				}),
 			);
 		});
