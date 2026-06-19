@@ -32,6 +32,17 @@ const {
 } = require("../utils/helpers");
 const { logEvent, logError, formatSizeMB } = require("../utils/logger");
 const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
+const {
+	uploadDebug,
+	uploadDebugSection,
+	uploadDebugQuestion,
+	logRequestDetails,
+	logFileStart,
+	logFileEnd,
+	logBusboyError,
+	logR2Error,
+	logValidationError,
+} = require("../utils/uploadDebug");
 
 const router = express.Router();
 
@@ -156,6 +167,8 @@ const PROGRESS_EMIT_INTERVAL_MS = 100;
 // to the sender, since on slow network the sender wants to see its own throughput.
 function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 	return new Promise((resolve, reject) => {
+		uploadDebug('Starting busboy multipart parsing', { code, maxFileCount, maxTotalBytes });
+
 		let busboy;
 		try {
 			busboy = Busboy({
@@ -169,7 +182,7 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 				},
 			});
 		} catch (err) {
-			logError("BUSBOY CREATION FAILED", err, `CODE: ${code}`);
+			logBusboyError(code, err, { stage: 'busboy creation' });
 			reject(createAppError(400, ERROR_CODES.INVALID_FILE_TYPE, "Invalid upload payload"));
 			return;
 		}
@@ -199,6 +212,8 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 				bytesReceived: totalBytes,
 				percent,
 			});
+			
+			uploadDebug('Progress emitted', { code, bytesReceived: totalBytes, percent });
 		};
 
 		const finish = (fn) => {
@@ -210,6 +225,13 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 		const abortAll = (err) => {
 			if (aborted) return;
 			aborted = true;
+			
+			uploadDebug('Aborting all file uploads', {
+				code,
+				reason: err?.message || 'unknown',
+				filesInProgress: files.length,
+			});
+			
 			for (const f of files) {
 				try { f.passthrough.destroy(err || new Error("upload aborted")); } catch {}
 				try { if (f.uploader && typeof f.uploader.abort === "function") f.uploader.abort(); } catch {}
@@ -223,6 +245,7 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 			if (aborted) return;
 			if (typeof value === "string" && value.length <= 4096) {
 				fields[name] = value;
+				uploadDebug('Field received', { code, fieldName: name, valueLength: value.length });
 			}
 		});
 
@@ -231,11 +254,13 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 
 			if (fieldname !== "files") {
 				// Drain unknown fields without raising errors.
+				uploadDebug('Unknown file field - draining', { code, fieldname });
 				fileStream.resume();
 				return;
 			}
 
 			if (files.length >= maxFileCount) {
+				uploadDebug('Too many files', { code, currentCount: files.length, maxCount: maxFileCount });
 				fileStream.resume();
 				abortAll(createAppError(400, ERROR_CODES.TOO_MANY_FILES, "Too many files"));
 				return;
@@ -244,7 +269,10 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 			const originalName = info?.filename || "file";
 			const declaredMime = info?.mimeType || info?.mimetype || "application/octet-stream";
 
+			logFileStart(code, originalName, declaredMime);
+
 			if (isBlockedExtension(originalName)) {
+				uploadDebug('Blocked file extension', { code, filename: originalName });
 				fileStream.resume();
 				abortAll(createAppError(400, ERROR_CODES.INVALID_FILE_TYPE, "Invalid file type"));
 				return;
@@ -263,6 +291,12 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 				totalBytes += chunk.length;
 
 				if (totalBytes > maxTotalBytes) {
+					uploadDebug('Total size limit exceeded', {
+						code,
+						filename: originalName,
+						totalBytes,
+						maxTotalBytes,
+					});
 					fileStream.unpipe();
 					abortAll(createAppError(400, ERROR_CODES.FILE_TOO_LARGE, "Upload exceeds total size limit"));
 					return;
@@ -278,7 +312,19 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 				maybeEmitProgress(false);
 			});
 
-			fileStream.on("error", (err) => abortAll(err));
+			fileStream.on("error", (err) => {
+				uploadDebug('File stream error', {
+					code,
+					filename: originalName,
+					error: err.message,
+					bytesReceived: bytes,
+				});
+				abortAll(err);
+			});
+
+			fileStream.on("end", () => {
+				logFileEnd(code, originalName, bytes);
+			});
 
 			fileStream.pipe(passthrough);
 
@@ -299,7 +345,15 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 						ContentType: declaredMime,
 					},
 				});
+				
+				uploadDebug('R2 upload started', {
+					code,
+					filename: originalName,
+					storedKey,
+					contentType: declaredMime,
+				});
 			} catch (err) {
+				logR2Error(code, originalName, err);
 				abortAll(err);
 				return;
 			}
@@ -317,8 +371,15 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 			files.push(fileEntry);
 
 			uploadPromises.push(
-				uploader.done().catch((err) => {
+				uploader.done().then(() => {
+					uploadDebug('R2 upload completed', {
+						code,
+						filename: originalName,
+						bytesUploaded: bytes,
+					});
+				}).catch((err) => {
 					if (!aborted) {
+						logR2Error(code, originalName, err);
 						abortAll(err);
 						throw err; // propagate to Promise.all() only when we're the first to abort
 					}
@@ -329,34 +390,49 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 		});
 
 		busboy.on("filesLimit", () => {
-			logError("BUSBOY FILES LIMIT EXCEEDED", null, `CODE: ${code}`);
+			logBusboyError(code, new Error('Files limit exceeded'), { stage: 'filesLimit event' });
 			abortAll(createAppError(400, ERROR_CODES.TOO_MANY_FILES, "Too many files"));
 		});
 
 		busboy.on("error", (err) => {
-			logError("BUSBOY ERROR", err, `CODE: ${code}`);
+			logBusboyError(code, err, { stage: 'busboy error event' });
 			abortAll(err);
 		});
 		
 		req.on("aborted", () => {
-			logError("REQUEST ABORTED BY CLIENT", null, `CODE: ${code}`);
+			uploadDebug('Client aborted request', { code, bytesReceived: totalBytes });
 			abortAll(createAppError(499, ERROR_CODES.SERVER_ERROR, "Client aborted upload"));
 		});
 		
 		req.on("error", (err) => {
-			logError("REQUEST ERROR", err, `CODE: ${code}`);
+			uploadDebug('Request error', { code, error: err.message, bytesReceived: totalBytes });
 			abortAll(err);
 		});
 
 		busboy.on("close", async () => {
 			if (aborted) return;
+			
+			uploadDebug('Busboy close event - waiting for R2 uploads', {
+				code,
+				fileCount: files.length,
+				totalBytes,
+			});
+			
 			try {
 				await Promise.all(uploadPromises);
 				if (!files.length) {
+					uploadDebug('No files uploaded', { code });
 					reject(createAppError(400, ERROR_CODES.NO_FILE_UPLOADED, "No file uploaded"));
 					return;
 				}
 				maybeEmitProgress(true); // Final 100% tick.
+				
+				uploadDebug('All R2 uploads completed successfully', {
+					code,
+					fileCount: files.length,
+					totalBytes,
+				});
+				
 				finish(() => resolve({ fields, files, totalBytes }));
 			} catch (err) {
 				logError("R2 UPLOAD FAILED IN BUSBOY CLOSE", err, `CODE: ${code}`);
@@ -473,6 +549,12 @@ async function finalizeTransfer({
 
 // ── Streaming POST /api/upload ───────────────────────────────
 router.post("/", rateLimitUpload, sanitizeRequestBody, async (req, res) => {
+	const code = await generateUniqueCode();
+	
+	uploadDebugSection(`REQUEST RECEIVED: ${code}`);
+	logRequestDetails(req, code);
+	uploadDebugQuestion('Did backend receive request?', true, { code });
+
 	if (!isR2Configured) {
 		logError("R2 NOT CONFIGURED", null);
 		return res.status(503).json(buildErrorResponse(ERROR_CODES.SERVER_ERROR, "Storage is not configured"));
@@ -486,11 +568,10 @@ router.post("/", rateLimitUpload, sanitizeRequestBody, async (req, res) => {
 
 	const contentType = String(req.headers["content-type"] || "");
 	if (!/^multipart\/form-data/i.test(contentType)) {
-		logError("INVALID CONTENT TYPE", null, `Received: ${contentType}`);
+		uploadDebug('Invalid content type', { code, contentType });
 		return res.status(400).json(buildErrorResponse(ERROR_CODES.INVALID_FILE_TYPE, "Expected multipart/form-data"));
 	}
 
-	const code = await generateUniqueCode();
 	const maxFileCount = getMaxFileCount();
 	const maxTotalBytes = getMaxFileSizeBytes();
 	const uploadStartedAt = Date.now();
@@ -499,9 +580,15 @@ router.post("/", rateLimitUpload, sanitizeRequestBody, async (req, res) => {
 	try {
 		parsed = await parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes });
 	} catch (error) {
+		uploadDebugSection(`UPLOAD PARSING FAILED: ${code}`);
+		uploadDebug('Multipart parsing error', {
+			code,
+			errorName: error.name,
+			errorMessage: error.message,
+			errorCode: error.errorCode,
+			errorStack: error.stack,
+		});
 		logError("Upload stream failed", error, `CODE: ${code}`);
-		// Cleanup any partially-written R2 objects (Upload.abort already handles in-flight parts;
-		// no completed objects exist if we aborted before busboy.close).
 		const status = error?.status || 500;
 		const errorCode = error?.errorCode || ERROR_CODES.SERVER_ERROR;
 		if (!res.headersSent) {
@@ -512,24 +599,37 @@ router.post("/", rateLimitUpload, sanitizeRequestBody, async (req, res) => {
 
 	const { fields, files, totalBytes } = parsed;
 
-	// Bind sender socket → room (for upload-complete fan-out) before validation/finalize.
+	// Bind sender socket → room
 	const senderSocketId = typeof fields.senderSocketId === "string" && fields.senderSocketId
 		? fields.senderSocketId
 		: (typeof fields.socketId === "string" ? fields.socketId : "");
 	if (senderSocketId) bindSocketToRoom(code, senderSocketId);
 	req._senderSocketId = senderSocketId;
 
+	uploadDebugSection(`VALIDATION STARTING: ${code}`);
+	uploadDebug('Files received - starting validation', {
+		code,
+		fileCount: files.length,
+		totalBytes,
+		senderSocketId,
+		clientUploadId: fields.clientUploadId || 'not provided',
+	});
 	logEvent("Upload received", `CODE: ${code}`, `FILES: ${files.length}`, formatSizeMB(totalBytes));
 
-	// Post-stream validation against sniff buffers. If any file fails, we have to delete
-	// what was uploaded to R2 (since streams completed successfully).
+	// Post-stream validation against sniff buffers
 	try {
 		await Promise.all(files.map(f => validateSniffBuffer(f)));
+		uploadDebugQuestion('Did all files pass validation?', true, { code });
+		uploadDebug('All files passed validation', { code });
 	} catch (validationErr) {
-		// Best-effort cleanup of completed objects.
+		uploadDebugQuestion('Did all files pass validation?', false, { code });
+		logValidationError(code, validationErr.fileName || 'unknown', validationErr);
+		
+		// Cleanup
 		try {
 			const { deleteFilesFromR2 } = require("../services/fileManager");
 			await deleteFilesFromR2(files.map((f) => ({ storedKey: f.storedKey })));
+			uploadDebug('Cleaned up R2 objects after validation failure', { code });
 		} catch (cleanupErr) {
 			logError("R2 cleanup after validation failure failed", cleanupErr, `CODE: ${code}`);
 		}
@@ -544,12 +644,10 @@ router.post("/", rateLimitUpload, sanitizeRequestBody, async (req, res) => {
 		const password = parsePassword(fields.password);
 		const expiryMinutes = parseExpiryMinutes(fields.expiryMinutes);
 		
-		// Validate only if password protection is enabled (skip unnecessary validation)
 		if (passwordProtected && password && !isValidPassword(password)) {
 			return res.status(400).json(buildErrorResponse(ERROR_CODES.INVALID_REQUEST, "Invalid password format"));
 		}
 		
-		// Validate only if expiry is provided (skip unnecessary validation)
 		if (expiryMinutes !== null && !isValidExpiryMinutes(expiryMinutes)) {
 			return res.status(400).json(buildErrorResponse(ERROR_CODES.INVALID_REQUEST, "Invalid expiry time"));
 		}
@@ -560,6 +658,8 @@ router.post("/", rateLimitUpload, sanitizeRequestBody, async (req, res) => {
 			mimeType: f.mimeType,
 			size: f.size,
 		}));
+
+		uploadDebugSection(`FINALIZING TRANSFER: ${code}`);
 
 		const response = await finalizeTransfer({
 			req,
@@ -579,8 +679,20 @@ router.post("/", rateLimitUpload, sanitizeRequestBody, async (req, res) => {
 			try { if (f.uploader && typeof f.uploader.abort === 'function') f.uploader.abort(); } catch (e) {}
 		});
 
+		uploadDebugQuestion('Did transfer finalize successfully?', true, { code, transferCode: response.code });
+		uploadDebugSection(`RESPONSE SENT: ${code}`);
+		uploadDebug('Response sent to client', { code, status: 200 });
+
 		return res.status(200).json(response);
 	} catch (error) {
+		uploadDebugQuestion('Did transfer finalize successfully?', false, { code });
+		uploadDebugSection(`FINALIZATION FAILED: ${code}`);
+		uploadDebug('Transfer finalization error', {
+			code,
+			errorName: error.name,
+			errorMessage: error.message,
+			errorStack: error.stack,
+		});
 		logError("Upload finalize failed", error, `CODE: ${code}`);
 		const status = error?.status || 500;
 		const errorCode = error?.errorCode || ERROR_CODES.SERVER_ERROR;
