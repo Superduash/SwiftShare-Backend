@@ -835,6 +835,7 @@ router.get("/:code", rateLimitDownload, validateCode, async (req, res, next) => 
 
 		emitToRoom(code, "download-complete", { receiverDevice });
 		emitToRoom(code, "transfer-receipt", receipt);
+		emitToRoom(code, "activity-updated");
 		logEvent("Download completed", `CODE: ${code}`, `DEVICE: ${receiverDevice}`);
 		return null;
 	} catch (error) {
@@ -912,6 +913,7 @@ router.get("/:code/single/:index", rateLimitDownload, validateCode, async (req, 
 
 		emitToRoom(code, "download-complete", { receiverDevice });
 		emitToRoom(code, "transfer-receipt", receipt);
+		emitToRoom(code, "activity-updated");
 		logEvent("Download completed", `CODE: ${code}`, `DEVICE: ${receiverDevice}`, "MODE: single");
 		return null;
 	} catch (error) {

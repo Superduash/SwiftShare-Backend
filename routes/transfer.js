@@ -1,4 +1,5 @@
 const express = require("express");
+const crypto = require("crypto");
 const bcrypt = require("bcryptjs");
 
 const Transfer = require("../models/Transfer");
@@ -28,6 +29,22 @@ const STATUS_CACHE_TTL_MS = 1200;
 const ACTIVITY_CACHE_TTL_MS = 1200;
 const statusCache = new Map();
 const activityCache = new Map();
+
+function validateOwnershipToken(transfer, req) {
+  const provided = (
+    req.headers['x-ownership-token'] ||
+    req.body?.ownershipToken ||
+    ''
+  ).trim();
+  const stored = String(transfer.ownershipToken || '').trim();
+  if (!provided || !stored) return false;
+  if (provided.length !== stored.length) return false;
+  try {
+    return crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(stored));
+  } catch {
+    return false;
+  }
+}
 
 function getCachedPayload(cache, code) {
 	const entry = cache.get(code);
@@ -220,6 +237,10 @@ router.post("/:code/extend", validateCode, async (req, res, next) => {
 			return res.status(409).json(buildErrorResponse(ERROR_CODES.SERVER_ERROR, "Transfer can only be extended once"));
 		}
 
+		if (!validateOwnershipToken(transfer, req)) {
+			return res.status(403).json(buildErrorResponse(ERROR_CODES.INVALID_REQUEST, 'Ownership token required to extend this transfer'));
+		}
+
 		const extensionMinutes = inferOriginalSessionMinutes(transfer);
 		const currentExpiryMs = transfer.expiresAt ? new Date(transfer.expiresAt).getTime() : Date.now();
 		const baseExpiryMs = Number.isFinite(currentExpiryMs)
@@ -286,6 +307,10 @@ router.delete("/:code", validateCode, async (req, res, next) => {
 
 		if (!transfer) {
 			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
+		}
+
+		if (!validateOwnershipToken(transfer, req)) {
+			return res.status(403).json(buildErrorResponse(ERROR_CODES.INVALID_REQUEST, 'Ownership token required to delete this transfer'));
 		}
 
 		if (!transfer.isDeleted) {
