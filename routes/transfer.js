@@ -37,7 +37,13 @@ function validateOwnershipToken(transfer, req) {
     ''
   ).trim();
   const stored = String(transfer.ownershipToken || '').trim();
-  if (!provided || !stored) return false;
+  
+  // If transfer has no ownership token, allow the operation (old transfers)
+  if (!stored) return true;
+  
+  // If token is required but not provided, deny
+  if (!provided) return false;
+  
   if (provided.length !== stored.length) return false;
   try {
     return crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(stored));
