@@ -1,6 +1,6 @@
 {
   "name": "swiftshare-backend",
-  "version": "0.6.0",
+  "version": "0.6.2",
   "private": true,
   "main": "server.js",
   "engines": {
@@ -41,7 +41,6 @@
     "express": "^5.2.1",
     "file-type": "^22.0.1",
     "helmet": "^8.1.0",
-    "mammoth": "^1.12.0",
     "mongoose": "^9.6.2",
     "morgan": "^1.10.1",
     "node-cron": "^4.2.1",

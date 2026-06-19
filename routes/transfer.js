@@ -207,6 +207,7 @@ router.get("/:code/status", validateCode, async (req, res, next) => {
 			downloadCount: Number(transfer.downloadCount || 0),
 			expiresAt: transfer.expiresAt,
 			secondsRemaining,
+			serverTime: Date.now(), // Add server time for sync
 		};
 
 		setCachedPayload(statusCache, code, payload, STATUS_CACHE_TTL_MS);
@@ -219,6 +220,7 @@ router.get("/:code/status", validateCode, async (req, res, next) => {
 router.post("/:code/extend", validateCode, async (req, res, next) => {
 	try {
 		const { code } = req.params;
+		const { minutes } = req.body; // Get minutes from request body
 		const transfer = await Transfer.findOne({ code }).lean();
 
 		if (!transfer) {
@@ -241,7 +243,10 @@ router.post("/:code/extend", validateCode, async (req, res, next) => {
 			return res.status(403).json(buildErrorResponse(ERROR_CODES.INVALID_REQUEST, 'Ownership token required to extend this transfer'));
 		}
 
-		const extensionMinutes = inferOriginalSessionMinutes(transfer);
+		// Allow 10, 30, or 60 minute extensions
+		const validMinutes = [10, 30, 60];
+		const extensionMinutes = validMinutes.includes(Number(minutes)) ? Number(minutes) : 10;
+		
 		const currentExpiryMs = transfer.expiresAt ? new Date(transfer.expiresAt).getTime() : Date.now();
 		const baseExpiryMs = Number.isFinite(currentExpiryMs)
 			? Math.max(Date.now(), currentExpiryMs)
@@ -280,7 +285,12 @@ router.post("/:code/extend", validateCode, async (req, res, next) => {
 
 		// Schedule new countdown AFTER save
 		scheduleTransferCountdown(code, expiresAt);
-		emitToRoom(code, "transfer-extended", { code, expiresAt, extensionMinutes });
+		emitToRoom(code, "transfer-extended", { 
+			code, 
+			expiresAt, 
+			extensionMinutes,
+			serverTime: Date.now() // Add server timestamp for sync
+		});
 		logEvent(
 			"Transfer extended",
 			`CODE: ${code}`,

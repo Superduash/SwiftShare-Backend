@@ -1,7 +1,6 @@
 const express = require("express");
 const { Readable } = require("stream");
 const bcrypt = require("bcryptjs");
-const mammoth = require("mammoth");
 
 const Transfer = require("../models/Transfer");
 const { getObjectFromR2, getObjectHeadFromR2, deleteFilesFromR2 } = require("../services/fileManager");
@@ -136,133 +135,9 @@ async function toBuffer(body) {
 	return Buffer.concat(chunks);
 }
 
-function sanitizeDocxHtml(htmlValue) {
-	return String(htmlValue || "")
-		// Strip dangerous element blocks (open + content + close, and self-closing)
-		.replace(/<script\b[\s\S]*?<\/script>/gi, "")
-		.replace(/<style\b[\s\S]*?<\/style>/gi, "")
-		.replace(/<iframe\b[\s\S]*?<\/iframe>/gi, "")
-		.replace(/<object\b[\s\S]*?<\/object>/gi, "")
-		.replace(/<embed\b[^>]*\/?>/gi, "")
-		.replace(/<form\b[\s\S]*?<\/form>/gi, "")
-		.replace(/<svg\b[\s\S]*?<\/svg>/gi, "")
-		.replace(/<link\b[^>]*>/gi, "")
-		.replace(/<meta\b[^>]*>/gi, "")
-		// Strip event handlers (unquoted, single, double quoted)
-		.replace(/\s+on[a-z]+\s*=\s*"[^"]*"/gi, "")
-		.replace(/\s+on[a-z]+\s*=\s*'[^']*'/gi, "")
-		.replace(/\s+on[a-z]+\s*=\s*[^\s>]+/gi, "")
-		// Neutralize dangerous URIs in href (block data:, javascript:, vbscript: entirely)
-		.replace(/\s(href)\s*=\s*"\s*(?:javascript|data|vbscript):[^"]*"/gi, ' $1="#"')
-		.replace(/\s(href)\s*=\s*'\s*(?:javascript|data|vbscript):[^']*'/gi, " $1='#'")
-		// In src: allow data:image/ (mammoth embeds DOCX images as base64), block everything else
-		.replace(/\s(src)\s*=\s*"\s*(?:javascript|vbscript):[^"]*"/gi, ' $1="#"')
-		.replace(/\s(src)\s*=\s*'\s*(?:javascript|vbscript):[^']*'/gi, " $1='#'")
-		.replace(/\s(src)\s*=\s*"\s*data:(?!image\/)[^"]*"/gi, ' $1="#"')
-		.replace(/\s(src)\s*=\s*'\s*data:(?!image\/)[^']*'/gi, " $1='#'");
-}
-
-function renderDocxPreviewDocument(fileName, bodyHtml) {
-	const title = sanitizeFilename(fileName || "Document");
-	const safeBody = String(bodyHtml || "").trim() || "<p>No preview content was extracted from this document.</p>";
-
-	return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>${title}</title>
-  <style>
-    *, *::before, *::after { box-sizing: border-box; }
-    html { font-size: 15px; }
-    body {
-      margin: 0;
-      padding: 32px 24px;
-      font-family: 'Segoe UI', Arial, sans-serif;
-      color: #1a1a1a;
-      background: #f5f5f5;
-      line-height: 1.6;
-    }
-    .doc-page {
-      background: #ffffff;
-      max-width: 820px;
-      margin: 0 auto;
-      padding: 56px 72px;
-      box-shadow: 0 1px 4px rgba(0,0,0,0.12);
-      border-radius: 2px;
-      min-height: 400px;
-    }
-    h1, h2, h3, h4, h5, h6 {
-      font-weight: 600;
-      line-height: 1.3;
-      margin: 1.2em 0 0.4em;
-      color: #111;
-    }
-    h1 { font-size: 1.8em; }
-    h2 { font-size: 1.4em; }
-    h3 { font-size: 1.15em; }
-    h4, h5, h6 { font-size: 1em; }
-    p { margin: 0 0 0.75em; }
-    p:last-child { margin-bottom: 0; }
-    ul, ol { margin: 0.5em 0 0.75em 1.6em; padding: 0; }
-    li { margin-bottom: 0.25em; }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      margin: 1em 0;
-      font-size: 0.93em;
-    }
-    th, td {
-      border: 1px solid #d1d5db;
-      padding: 6px 10px;
-      vertical-align: top;
-      text-align: left;
-    }
-    th { background: #f3f4f6; font-weight: 600; }
-    tr:nth-child(even) td { background: #fafafa; }
-    img { max-width: 100%; height: auto; display: block; margin: 0.5em auto; }
-    pre, code {
-      font-family: 'Consolas', 'Courier New', monospace;
-      font-size: 0.88em;
-      background: #f3f4f6;
-      border-radius: 3px;
-    }
-    pre { padding: 10px 14px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; margin: 0.75em 0; }
-    code { padding: 1px 4px; }
-    blockquote {
-      border-left: 3px solid #d1d5db;
-      margin: 0.75em 0 0.75em 0;
-      padding: 4px 16px;
-      color: #4b5563;
-    }
-    a { color: #2563eb; text-decoration: underline; }
-    strong, b { font-weight: 600; }
-    hr { border: none; border-top: 1px solid #e5e7eb; margin: 1.25em 0; }
-    @media (max-width: 600px) {
-      .doc-page { padding: 24px 16px; }
-      body { padding: 12px 0; }
-    }
-  </style>
-</head>
-<body>
-  <div class="doc-page">
-${safeBody}
-  </div>
-</body>
-</html>`;
-}
-
-function isDocxFile(file) {
-	const mime = String(file?.mimeType || "").toLowerCase();
-	const name = String(file?.originalName || "").toLowerCase();
-	return mime.includes("wordprocessingml") || name.endsWith(".docx");
-}
-
 const PREVIEW_EXTENSION_MIME_MAP = {
 	// Documents
 	pdf: "application/pdf",
-	docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-	doc: "application/msword",
 	ppt: "application/vnd.ms-powerpoint",
 	pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 	// Audio
@@ -1111,53 +986,6 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 			return null;
 		}
 		logError("Preview stream initialization error", error.message, `CODE: ${req.params?.code || ""}`, `FILE: ${req.params?.index || ""}`);
-		return next(error);
-	}
-});
-
-router.get("/:code/preview/:index/docx-html", validateCode, async (req, res, next) => {
-	try {
-		const { code, index } = req.params;
-		const transfer = await Transfer.findOne({ code }).lean();
-
-		const unavailableResponse = sendUnavailableTransferResponse(req, res, transfer);
-		if (unavailableResponse) {
-			return unavailableResponse;
-		}
-
-		const passwordError = await getPasswordErrorResponse(req, transfer);
-		if (passwordError) {
-			return res.status(passwordError.status).json(passwordError.body);
-		}
-
-		const fileIndex = Number(index);
-		if (!Number.isInteger(fileIndex) || fileIndex < 0 || fileIndex >= transfer.files.length) {
-			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
-		}
-
-		const file = transfer.files[fileIndex];
-		if (!isDocxFile(file)) {
-			return res.status(415).json(buildErrorResponse(ERROR_CODES.INVALID_FILE_TYPE, "DOCX preview is only available for .docx files"));
-		}
-
-		const objectResponse = await getObjectFromR2(file.storedKey);
-		const buffer = await toBuffer(objectResponse.Body);
-		const converted = await mammoth.convertToHtml({ buffer });
-		const sanitizedHtml = sanitizeDocxHtml(converted?.value || "");
-
-		applyPreviewEmbedHeaders(req, res);
-		res.setHeader("Content-Type", "text/html; charset=utf-8");
-		res.setHeader("Content-Disposition", `inline; filename="${sanitizeFilename(file.originalName || "preview")}.html"`);
-		res.setHeader("Cache-Control", "private, max-age=120");
-		res.send(renderDocxPreviewDocument(file.originalName, sanitizedHtml));
-
-		logEvent("DOCX preview served", `CODE: ${code}`, `FILE: ${fileIndex}`);
-		return null;
-	} catch (error) {
-		if (res.headersSent) {
-			logError("DOCX preview stream error", error, `CODE: ${req.params?.code || ""}`, `FILE: ${req.params?.index || ""}`);
-			return null;
-		}
 		return next(error);
 	}
 });
