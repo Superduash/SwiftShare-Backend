@@ -2,7 +2,7 @@ const express = require("express");
 const crypto = require("crypto");
 const Busboy = require("busboy");
 const bcrypt = require("bcryptjs");
-const { PassThrough } = require("stream");
+const { PassThrough, Transform } = require("stream");
 const { Upload } = require("@aws-sdk/lib-storage");
 
 const Transfer = require("../models/Transfer");
@@ -257,30 +257,38 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 			let sniffLen = 0;
 			let bytes = 0;
 
-			fileStream.on("data", (chunk) => {
-				if (aborted) return;
-				bytes += chunk.length;
-				totalBytes += chunk.length;
+			const progressStream = new Transform({
+				transform(chunk, encoding, callback) {
+					if (aborted) {
+						callback();
+						return;
+					}
+					bytes += chunk.length;
+					totalBytes += chunk.length;
 
-				if (totalBytes > maxTotalBytes) {
-					fileStream.unpipe();
-					abortAll(createAppError(400, ERROR_CODES.FILE_TOO_LARGE, "Upload exceeds total size limit"));
-					return;
+					if (totalBytes > maxTotalBytes) {
+						fileStream.unpipe();
+						abortAll(createAppError(400, ERROR_CODES.FILE_TOO_LARGE, "Upload exceeds total size limit"));
+						callback(new Error("Upload exceeds total size limit"));
+						return;
+					}
+
+					if (sniffLen < SNIFF_BYTES) {
+						const need = SNIFF_BYTES - sniffLen;
+						const slice = chunk.length <= need ? chunk : chunk.subarray(0, need);
+						sniffParts.push(slice);
+						sniffLen += slice.length;
+					}
+
+					maybeEmitProgress(false);
+					callback(null, chunk);
 				}
-
-				if (sniffLen < SNIFF_BYTES) {
-					const need = SNIFF_BYTES - sniffLen;
-					const slice = chunk.length <= need ? chunk : chunk.subarray(0, need);
-					sniffParts.push(slice);
-					sniffLen += slice.length;
-				}
-
-				maybeEmitProgress(false);
 			});
 
 			fileStream.on("error", (err) => abortAll(err));
+			progressStream.on("error", (err) => abortAll(err));
 
-			fileStream.pipe(passthrough);
+			fileStream.pipe(progressStream).pipe(passthrough);
 
 			// Configure multipart upload to R2:
 			// - 8MB part size, 8 concurrent parts (64MB in-flight) for max throughput
