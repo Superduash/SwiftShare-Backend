@@ -4,7 +4,7 @@
   "private": true,
   "main": "server.js",
   "engines": {
-    "node": ">=22"
+    "node": "22.x"
   },
   "scripts": {
     "start": "node --expose-gc --max-old-space-size=384 server.js",
