@@ -654,12 +654,17 @@ router.get("/:code", rateLimitDownload, validateCode, async (req, res, next) => 
 			return res.status(passwordError.status).json(passwordError.body);
 		}
 
-		emitToRoom(code, "download-started", { receiverDevice });
-		logEvent("Download started", `CODE: ${code}`, `DEVICE: ${receiverDevice}`);
+		const senderIp = String(transfer?.senderIp || "").trim();
+		const isSenderRequest = senderIp && senderIp === receiverIp;
+
+		if (!isSenderRequest) {
+			emitToRoom(code, "download-started", { receiverDevice });
+			logEvent("Download started", `CODE: ${code}`, `DEVICE: ${receiverDevice}`);
+		}
 
 		let isBurnFlow = false;
 		let claimedNow = false;
-		if (transfer.burnAfterDownload) {
+		if (transfer.burnAfterDownload && !isSenderRequest) {
 			const burnClaim = await claimBurnDownload(transfer, req);
 			if (!burnClaim?.transfer) {
 				return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
@@ -689,29 +694,31 @@ router.get("/:code", rateLimitDownload, validateCode, async (req, res, next) => 
 		const downloadDuration = Math.max(Date.now() - streamStart, 1);
 		const downloadSpeed = Math.round(streamedBytes / (downloadDuration / 1000));
 
-		await finalizeDownload(transfer, {
-			isBurnFlow,
-			claimedNow,
-			downloadDuration,
-			downloadSpeed,
-			receiverDevice,
-			receiverIp,
-		});
+		if (!isSenderRequest) {
+			await finalizeDownload(transfer, {
+				isBurnFlow,
+				claimedNow,
+				downloadDuration,
+				downloadSpeed,
+				receiverDevice,
+				receiverIp,
+			});
 
-		const receipt = buildTransferReceipt({
-			code,
-			fileName: receiptFileName,
-			fileSizeBytes: streamedBytes,
-			sender: transfer.senderDeviceName || "Unknown Device",
-			receiver: receiverDevice,
-			downloadDuration,
-			downloadSpeed,
-		});
+			const receipt = buildTransferReceipt({
+				code,
+				fileName: receiptFileName,
+				fileSizeBytes: streamedBytes,
+				sender: transfer.senderDeviceName || "Unknown Device",
+				receiver: receiverDevice,
+				downloadDuration,
+				downloadSpeed,
+			});
 
-		emitToRoom(code, "download-complete", { receiverDevice });
-		emitToRoom(code, "transfer-receipt", receipt);
-		emitToRoom(code, "activity-updated");
-		logEvent("Download completed", `CODE: ${code}`, `DEVICE: ${receiverDevice}`);
+			emitToRoom(code, "download-complete", { receiverDevice });
+			emitToRoom(code, "transfer-receipt", receipt);
+			emitToRoom(code, "activity-updated");
+			logEvent("Download completed", `CODE: ${code}`, `DEVICE: ${receiverDevice}`);
+		}
 		return null;
 	} catch (error) {
 		if (res.headersSent) {
@@ -739,12 +746,17 @@ router.get("/:code/single/:index", rateLimitDownload, validateCode, async (req, 
 			return res.status(passwordError.status).json(passwordError.body);
 		}
 
-		emitToRoom(code, "download-started", { receiverDevice });
-		logEvent("Download started", `CODE: ${code}`, `DEVICE: ${receiverDevice}`, "MODE: single");
+		const senderIp = String(transfer?.senderIp || "").trim();
+		const isSenderRequest = senderIp && senderIp === receiverIp;
+
+		if (!isSenderRequest) {
+			emitToRoom(code, "download-started", { receiverDevice });
+			logEvent("Download started", `CODE: ${code}`, `DEVICE: ${receiverDevice}`, "MODE: single");
+		}
 
 		let isBurnFlow = false;
 		let claimedNow = false;
-		if (transfer.burnAfterDownload) {
+		if (transfer.burnAfterDownload && !isSenderRequest) {
 			const burnClaim = await claimBurnDownload(transfer, req);
 			if (!burnClaim?.transfer) {
 				return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
@@ -767,29 +779,31 @@ router.get("/:code/single/:index", rateLimitDownload, validateCode, async (req, 
 		const downloadDuration = Math.max(Date.now() - streamStart, 1);
 		const downloadSpeed = Math.round(streamedBytes / (downloadDuration / 1000));
 
-		await finalizeDownload(transfer, {
-			isBurnFlow,
-			claimedNow,
-			downloadDuration,
-			downloadSpeed,
-			receiverDevice,
-			receiverIp,
-		});
+		if (!isSenderRequest) {
+			await finalizeDownload(transfer, {
+				isBurnFlow,
+				claimedNow,
+				downloadDuration,
+				downloadSpeed,
+				receiverDevice,
+				receiverIp,
+			});
 
-		const receipt = buildTransferReceipt({
-			code,
-			fileName: selectedFile.originalName || "download",
-			fileSizeBytes: streamedBytes,
-			sender: transfer.senderDeviceName || "Unknown Device",
-			receiver: receiverDevice,
-			downloadDuration,
-			downloadSpeed,
-		});
+			const receipt = buildTransferReceipt({
+				code,
+				fileName: selectedFile.originalName || "download",
+				fileSizeBytes: streamedBytes,
+				sender: transfer.senderDeviceName || "Unknown Device",
+				receiver: receiverDevice,
+				downloadDuration,
+				downloadSpeed,
+			});
 
-		emitToRoom(code, "download-complete", { receiverDevice });
-		emitToRoom(code, "transfer-receipt", receipt);
-		emitToRoom(code, "activity-updated");
-		logEvent("Download completed", `CODE: ${code}`, `DEVICE: ${receiverDevice}`, "MODE: single");
+			emitToRoom(code, "download-complete", { receiverDevice });
+			emitToRoom(code, "transfer-receipt", receipt);
+			emitToRoom(code, "activity-updated");
+			logEvent("Download completed", `CODE: ${code}`, `DEVICE: ${receiverDevice}`, "MODE: single");
+		}
 		return null;
 	} catch (error) {
 		if (res.headersSent) {
