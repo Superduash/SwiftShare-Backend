@@ -588,9 +588,6 @@ async function finalizeDownload(transfer, {
 			},
 		);
 
-		if (claimedNow) {
-			emitToRoom(transfer.code, "transfer-claimed", { code: transfer.code, status: "CLAIMED" });
-		}
 		return;
 	}
 
@@ -672,6 +669,9 @@ router.get("/:code", rateLimitDownload, validateCode, async (req, res, next) => 
 			transfer = burnClaim.transfer;
 			claimedNow = Boolean(burnClaim.claimedNow);
 			isBurnFlow = true;
+			if (claimedNow) {
+				emitToRoom(code, "transfer-claimed", { code, status: "CLAIMED" });
+			}
 		}
 
 		if (!transfer.files || transfer.files.length === 0) {
@@ -764,6 +764,10 @@ router.get("/:code/single/:index", rateLimitDownload, validateCode, async (req, 
 			transfer = burnClaim.transfer;
 			claimedNow = Boolean(burnClaim.claimedNow);
 			isBurnFlow = true;
+
+			if (claimedNow) {
+				emitToRoom(code, "transfer-claimed", { code, status: "CLAIMED" });
+			}
 		}
 
 		const fileIndex = Number(index);
