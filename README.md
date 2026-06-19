@@ -2,223 +2,127 @@
   <img src="https://capsule-render.vercel.app/api?type=waving&height=240&color=0:111827,50:f97316,100:facc15&text=SwiftShare%20Backend&fontSize=56&fontColor=ffffff&animation=fadeIn&fontAlignY=40&desc=The%20Infrastructure%20Behind%20Every%20Transfer&descAlignY=63&descColor=f3f4f6&descSize=18"/>
 </p>
 
-<div align="center">
+<p align="center">
+  <img src="https://img.shields.io/badge/Node.js_22-339933?style=flat-square&logo=node.js&logoColor=white"/>
+  <img src="https://img.shields.io/badge/Express_5-black?style=flat-square&logo=express"/>
+  <img src="https://img.shields.io/badge/MongoDB-47A248?style=flat-square&logo=mongodb&logoColor=white"/>
+  <img src="https://img.shields.io/badge/Cloudflare_R2-F38020?style=flat-square&logo=cloudflare&logoColor=white"/>
+  <img src="https://img.shields.io/badge/Socket.IO-black?style=flat-square&logo=socketdotio"/>
+</p>
 
-### ⚙️ Upload Pipeline • ☁️ Storage Engine • ⚡ Real-Time Events • 🛡️ Security
+<p align="center">
+  <a href="https://github.com/Superduash/SwiftShare">Frontend repo →</a>
+</p>
 
-The backend architecture powering SwiftShare's temporary file transfer ecosystem.
-
-<br>
-
-<img src="https://img.shields.io/badge/Node.js-22-339933?style=for-the-badge&logo=node.js&logoColor=white"/>
-<img src="https://img.shields.io/badge/Express-5-black?style=for-the-badge&logo=express"/>
-<img src="https://img.shields.io/badge/MongoDB-47A248?style=for-the-badge&logo=mongodb&logoColor=white"/>
-<img src="https://img.shields.io/badge/Cloudflare_R2-F38020?style=for-the-badge&logo=cloudflare&logoColor=white"/>
-<img src="https://img.shields.io/badge/Socket.IO-Real_Time-black?style=for-the-badge&logo=socketdotio"/>
-
-<br>
-
-### 🎨 Frontend Repository
-
-https://github.com/Superduash/SwiftShare
-
-</div>
+The API and infrastructure layer for [SwiftShare](https://swiftsharegg.vercel.app) — handles every file from the moment it's selected to the moment it's deleted: streaming it to storage, generating the transfer code, enforcing expiry/burn rules, and pushing real-time status back to the client over WebSockets.
 
 ---
 
-# Overview
+## Contents
 
-SwiftShare Backend manages the complete lifecycle of every transfer.
-
-From the moment a file is uploaded until it expires, gets downloaded, or is destroyed in burn mode, the backend coordinates storage, security, transfer management, and real-time communication.
-
-Core responsibilities include:
-
-- File uploads
-- Download streaming
-- Transfer codes
-- Password verification
-- Burn-after-download logic
-- Activity tracking
-- Nearby discovery
-- Cloud storage management
-- Automatic cleanup
+- [System overview](#system-overview)
+- [Upload pipeline](#upload-pipeline)
+- [Design decisions worth mentioning](#design-decisions-worth-mentioning)
+- [API surface](#api-surface)
+- [Tech stack](#tech-stack)
+- [Project structure](#project-structure)
+- [Running locally](#running-locally)
 
 ---
 
-# Core Systems
-
-### 📤 Upload Pipeline
-
-- Multi-file uploads
-- Streaming architecture
-- Metadata generation
-- Validation and sanitization
-- Direct Cloudflare R2 storage
-
-### 📥 Download System
-
-- Direct file streaming
-- ZIP downloads
-- Secure transfer validation
-- Download tracking
-
-### 🔥 Burn-After-Download
-
-Transfers can automatically self-destruct after a successful download.
-
-The backend handles:
-
-- One-time claims
-- Ownership validation
-- Automatic deletion
-- Transfer invalidation
-
-### ⚡ Real-Time Infrastructure
-
-Powered by Socket.IO:
-
-- Transfer updates
-- Download notifications
-- Activity events
-- Nearby discovery broadcasts
-
-### ☁️ Cloud Storage
-
-Cloudflare R2 provides:
-
-- Scalable object storage
-- Fast file delivery
-- Multipart uploads
-- Automated cleanup integration
-
-### 🛡 Security
-
-Built-in protections include:
-
-- Password-protected transfers
-- Rate limiting
-- MIME validation
-- Dangerous file filtering
-- Security headers
-- Input sanitization
-- Secure token generation
-
----
-
-# Architecture
+## System overview
 
 ```text
-           Client Browser
-                 │
-                 ▼
-         Express API Server
-                 │
- ┌───────────────┼─────────────┐
- ▼               ▼             ▼
-MongoDB    Cloudflare R2    Socket.IO
-Metadata       Files        Real-Time
+                         Client (browser)
+                                │
+                          multipart upload
+                                │
+                                ▼
+                      Express API + Busboy parser
+                                │
+                 ┌──────────────┼──────────────┐
+                 ▼              ▼              ▼
+          Validation      Streamed to      Socket.IO
+        (MIME sniff,        Cloudflare        room
+       size, filename)         R2          (live progress)
+                 │              │
+                 └──────┬───────┘
+                        ▼
+                 MongoDB (transfer
+                  metadata, TTL)
+                        │
+                        ▼
+              node-cron sweep → expired
+            transfers purged from R2 + DB
 ```
 
----
+Rate limiting (Upstash Redis) and security headers (Helmet) sit in front of all of this; Sentry watches for anything that slips through.
 
-# API Surface
+## Upload pipeline
 
-### Uploads
+This is the part that isn't a typical CRUD-and-multer setup, so it's worth spelling out:
 
-```text
-/api/upload
-```
+1. **Streamed, not buffered.** Incoming multipart requests are parsed with Busboy and piped directly into a Cloudflare R2 multipart upload as bytes arrive — files are never written to disk or held fully in memory, even for multi-file batches.
+2. **Mid-stream limit enforcement.** Total bytes received are tracked live; if a request exceeds the allowed size the stream is aborted and unwound immediately rather than rejecting only after the full body has already been received.
+3. **Content is verified, not trusted.** Client-reported MIME types are cross-checked against the actual file signature (magic bytes) rather than taken at face value — this matters in practice, since phone file managers frequently mislabel screenshots and images with the wrong MIME type.
+4. **Filenames are sanitized and extensions checked against a blocklist** before a key is ever written to storage, alongside a check for known dangerous file signatures.
+5. **Metadata lands in MongoDB only after storage succeeds** — code generation, expiry, and burn-after-download flags are written as one consistent record, not assembled from partial state.
 
-### Downloads
+## Design decisions worth mentioning
 
-```text
-/api/download
-```
+- **Burn-after-download as an atomic claim, not a soft delete.** A burned transfer is claimed exactly once — the validation, the deletion trigger, and the response to the downloader happen as a single guarded operation so two simultaneous requests can't both succeed against the same one-time file.
+- **Real-time status is scoped per transfer.** Socket.IO clients join a room keyed by transfer code, so progress and download events are pushed only to the people actually involved in that transfer — not broadcast globally.
+- **Expiry is enforced on a schedule, not on read.** A cron job sweeps and deletes expired transfers from both MongoDB and R2, so storage doesn't quietly accumulate orphaned files between requests.
+- **Rate limiting lives outside the process.** Upstash Redis backs the limiter so limits hold up across multiple server instances, not just per-process memory.
 
-### Files
+## API surface
 
-```text
-/api/file
-```
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `POST` | `/api/upload` | Stream one or more files into a new transfer |
+| `GET` | `/api/download/:code` | Resolve and stream a transfer by code |
+| `GET` | `/api/file/:code/:id` | Stream/preview a single file from a transfer |
+| `GET` | `/api/transfer/:code` | Fetch transfer metadata (expiry, file list, password state) |
+| `GET` | `/api/nearby` | Local-network device discovery |
+| `GET` | `/api/stats` | Aggregate, non-identifying usage stats |
+| `GET` | `/api/ping`, `/api/health` | Liveness / readiness checks |
 
-### Transfers
-
-```text
-/api/transfer
-```
-
-### Nearby Devices
-
-```text
-/api/nearby
-```
-
-### Statistics
-
-```text
-/api/stats
-```
-
-### Health Checks
-
-```text
-/api/ping
-/api/health
-```
-
----
-
-# Technology Stack
+## Tech stack
 
 | Component | Technology |
-|------------|------------|
+|---|---|
 | Runtime | Node.js 22 |
 | Framework | Express 5 |
 | Database | MongoDB |
-| Storage | Cloudflare R2 |
-| Real-Time | Socket.IO |
+| Object storage | Cloudflare R2 |
+| Real-time | Socket.IO |
+| Rate limiting | Upstash Redis |
+| Scheduling | node-cron |
 | Monitoring | Sentry |
-| Security | Helmet |
-| Rate Limiting | Upstash Redis |
-| Scheduling | Node Cron |
+| Security headers | Helmet |
 
----
-
-# Project Structure
+## Project structure
 
 ```text
 SwiftShare-Backend
-│
-├── config/
-├── middleware/
-├── models/
-├── routes/
-├── services/
+├── config/        # Service + environment configuration
+├── middleware/     # Validation, rate limiting, security headers
+├── models/         # MongoDB schemas
+├── routes/         # API route handlers
+├── services/        # R2, Socket.IO, cleanup, mailing/etc.
+├── utils/           # Sanitization, MIME sniffing, helpers
 ├── tests/
-├── utils/
-│
-├── server.js
-├── package.json
-├── render.yaml
-└── .env.example
+└── server.js
 ```
 
----
-
-# Local Development
+## Running locally
 
 ```bash
 git clone https://github.com/Superduash/SwiftShare-Backend.git
-
 cd SwiftShare-Backend
-
 npm install
-
 npm run dev
 ```
-
-Required Environment Variables:
 
 ```env
 MONGODB_URI=
@@ -231,29 +135,9 @@ SHARE_BASE_URL=
 ```
 ---
 
-# Engineering Goals
-
-SwiftShare Backend was built around four principles:
-- Fast
-- Secure
-- Temporary
-- Reliable
-
-Every transfer should be:
-⚡ Fast
-🔒 Secure
-📦 Temporary
-🌍 Accessible
-
----
-
-# License
-
-MIT License
-
-Free to use, modify, and distribute.
-
----
+<p align="center">
+MIT Licensed · Free to use, modify, and distribute.
+</p>
 
 <div align="center">
 
