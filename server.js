@@ -506,19 +506,48 @@ function startServer() {
 		// Self-ping to prevent free tier cold starts
 		const externalUrl = process.env.RENDER_EXTERNAL_URL;
 		if (externalUrl) {
-			const pingIntervalMs = 14 * 60 * 1000; // 14 mins
-			setInterval(() => {
+			const PING_INTERVAL_MS = 14 * 60 * 1000;
+			const THROTTLE_BACKOFF_MS = 5 * 60 * 1000; // 5 extra min on 429
+			let pingTimer = null;
+
+			function schedulePing(delayMs) {
+				if (pingTimer) clearTimeout(pingTimer);
+				pingTimer = setTimeout(doPing, delayMs);
+				pingTimer.unref?.(); // Don't block process exit
+			}
+
+			async function doPing() {
 				try {
-					fetch(`${externalUrl}/api/ping`)
-						.then((res) => {
-							if (!res.ok) logWarn(`Self-ping failed with status: ${res.status}`);
-						})
-						.catch((err) => logError("Self-ping network error", err));
+					const controller = new AbortController();
+					const timeoutId = setTimeout(() => controller.abort(), 10_000);
+					const res = await fetch(`${externalUrl}/api/ping`, {
+						headers: {
+							'User-Agent': 'swiftshare-keepalive/1.0',
+							'X-Keep-Alive': '1',
+						},
+						signal: controller.signal,
+					});
+					clearTimeout(timeoutId);
+					if (res.status === 429) {
+						logWarn(`Self-ping throttled (429) — backing off ${(PING_INTERVAL_MS + THROTTLE_BACKOFF_MS) / 60000}m`);
+						schedulePing(PING_INTERVAL_MS + THROTTLE_BACKOFF_MS);
+						return;
+					}
+					if (!res.ok) {
+						logWarn(`Self-ping returned ${res.status}`);
+					}
 				} catch (err) {
-					logError("Self-ping crashed", err);
+					if (err?.name !== 'AbortError') {
+						logError('Self-ping failed', err);
+					}
 				}
-			}, pingIntervalMs);
-			logSuccess(`Keep-alive active pinging ${externalUrl}/api/ping every 14m`);
+				schedulePing(PING_INTERVAL_MS);
+			}
+
+			// First ping fires 30s after start rather than 14 min — catches any missed
+			// initial warmup window on fresh deploys without hammering on boot.
+			schedulePing(30_000);
+			logSuccess(`Keep-alive active — pinging ${externalUrl}/api/ping every 14m`);
 		}
 	});
 }

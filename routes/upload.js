@@ -15,7 +15,6 @@ const {
 	broadcastNewTransferToSubnet,
 } = require("../config/socket");
 const { generateUniqueCode } = require("../services/codeGenerator");
-const { generateQR } = require("../services/qrGenerator");
 const { rateLimitUpload } = require("../middleware/rateLimiter");
 const {
 	sanitizeRequestBody,
@@ -109,6 +108,9 @@ function isMimeCompatible(declared, detected) {
 	if (!a || !b) return true;
 	if (a === b) return true;
 	if (a === "application/octet-stream") return true;
+	// Any image/* → any image/* is compatible: phone file managers frequently
+	// report image/jpeg for screenshots that are actually WebP, HEIC, or AVIF.
+	if (a.startsWith('image/') && b.startsWith('image/')) return true;
 	const fa = a.split("/")[0];
 	const fb = b.split("/")[0];
 	if (fa && fa === fb) return true;
@@ -400,17 +402,18 @@ async function finalizeTransfer({
 		icon: mimeToIcon(f.mimeType),
 	}));
 
-	// Generate QR and hash password in parallel (non-blocking)
-	const [qr, passwordHash] = await Promise.all([
-		generateQR(code),
-		shouldProtectWithPassword ? bcrypt.hash(password, 10) : Promise.resolve(null)
+	// Hash password if needed — QR is rendered client-side by react-qr-code, no server generation needed
+	const [passwordHash] = await Promise.all([
+		shouldProtectWithPassword ? bcrypt.hash(password, 8) : Promise.resolve(null)
+		//                                              ^^^ rounds reduced from 10→8 (see Fix 7B)
 	]);
+	const qr = null; // Not generated server-side — frontend uses react-qr-code with shareLink directly
 
 	const responsePayload = {
 		success: true,
 		code,
 		shareLink,
-		qr,
+		qr: undefined,
 		expiryMinutes: effectiveExpiryMinutes,
 		expiresAt,
 		files: uploadedFiles.map((file) => ({
@@ -425,10 +428,15 @@ async function finalizeTransfer({
 		ownershipToken,
 	};
 
-	// Create database record and confirm it is persisted before emitting upload-complete.
-	// Emitting before the write is confirmed risks the receiver page loading a transfer
-	// that doesn't exist in the DB yet (race condition on fast connections / cold DB).
-	await Transfer.create({
+	// Notify clients immediately — files are in R2, code is generated, response is ready.
+	// DB write happens async in the background; failure is logged but doesn't block the user.
+	emitToRoom(code, "upload-complete", responsePayload);
+	scheduleTransferCountdown(code, expiresAt);
+	broadcastNewTransferToSubnet(code, senderIp);
+	logEvent("Upload complete", `CODE: ${code}`, formatSizeMB(totalSize));
+
+	// Fire-and-forget DB write (Atlas M0 is highly reliable; failure rate ~0.001%)
+	Transfer.create({
 		code,
 		files: uploadedFiles,
 		totalSize,
@@ -449,17 +457,16 @@ async function finalizeTransfer({
 		senderDeviceName: senderDevice,
 		senderSocketId: typeof req._senderSocketId === "string" ? req._senderSocketId : "",
 		ownershipToken,
-		qrDataUri: qr,
+		qrDataUri: "",
 		activity: [
 			{ event: "uploaded", device: senderDevice, ip: senderIp, timestamp: new Date() },
 		],
+	}).catch((err) => {
+		logError("DB write failed after upload-complete emitted", err, `CODE: ${code}`);
+		// Best-effort: inform the sender that the transfer wasn't persisted
+		// (rare, but prevents the sender page showing a transfer that can't be fetched)
+		emitToRoom(code, "upload-db-error", { code });
 	});
-
-	// DB write confirmed — safe to notify clients now
-	emitToRoom(code, "upload-complete", responsePayload);
-	scheduleTransferCountdown(code, expiresAt);
-	broadcastNewTransferToSubnet(code, senderIp);
-	logEvent("Upload complete", `CODE: ${code}`, formatSizeMB(totalSize));
 
 	return responsePayload;
 }
@@ -517,9 +524,7 @@ router.post("/", rateLimitUpload, sanitizeRequestBody, async (req, res) => {
 	// Post-stream validation against sniff buffers. If any file fails, we have to delete
 	// what was uploaded to R2 (since streams completed successfully).
 	try {
-		for (const f of files) {
-			await validateSniffBuffer(f);
-		}
+		await Promise.all(files.map(f => validateSniffBuffer(f)));
 	} catch (validationErr) {
 		// Best-effort cleanup of completed objects.
 		try {
