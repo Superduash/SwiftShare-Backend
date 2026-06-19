@@ -473,16 +473,6 @@ async function finalizeTransfer({
 
 // ── Streaming POST /api/upload ───────────────────────────────
 router.post("/", rateLimitUpload, sanitizeRequestBody, async (req, res) => {
-	const code = await generateUniqueCode();
-	
-	// === LOG 1: Request received ===
-	console.log("[UPLOAD_DEBUG] Request received", {
-		code,
-		contentType: req.headers["content-type"],
-		contentLength: req.headers["content-length"],
-		userAgent: req.headers["user-agent"]?.slice(0, 100),
-	});
-
 	if (!isR2Configured) {
 		logError("R2 NOT CONFIGURED", null);
 		return res.status(503).json(buildErrorResponse(ERROR_CODES.SERVER_ERROR, "Storage is not configured"));
@@ -500,6 +490,7 @@ router.post("/", rateLimitUpload, sanitizeRequestBody, async (req, res) => {
 		return res.status(400).json(buildErrorResponse(ERROR_CODES.INVALID_FILE_TYPE, "Expected multipart/form-data"));
 	}
 
+	const code = await generateUniqueCode();
 	const maxFileCount = getMaxFileCount();
 	const maxTotalBytes = getMaxFileSizeBytes();
 	const uploadStartedAt = Date.now();
@@ -507,24 +498,7 @@ router.post("/", rateLimitUpload, sanitizeRequestBody, async (req, res) => {
 
 	try {
 		parsed = await parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes });
-		
-		// === LOG 2: Files parsed successfully ===
-		console.log("[UPLOAD_DEBUG] Files parsed", {
-			code,
-			fileCount: parsed.files.length,
-			names: parsed.files.map(f => f.originalName),
-			sizes: parsed.files.map(f => f.size),
-			mimeTypes: parsed.files.map(f => f.mimeType),
-			totalBytes: parsed.totalBytes,
-		});
 	} catch (error) {
-		// === LOG 3: Parsing failed ===
-		console.error("[UPLOAD_DEBUG] Parsing failed", {
-			code,
-			error: error.message,
-			errorCode: error.errorCode,
-			status: error.status,
-		});
 		logError("Upload stream failed", error, `CODE: ${code}`);
 		// Cleanup any partially-written R2 objects (Upload.abort already handles in-flight parts;
 		// no completed objects exist if we aborted before busboy.close).
@@ -551,16 +525,7 @@ router.post("/", rateLimitUpload, sanitizeRequestBody, async (req, res) => {
 	// what was uploaded to R2 (since streams completed successfully).
 	try {
 		await Promise.all(files.map(f => validateSniffBuffer(f)));
-		
-		// === LOG 4: Validation passed ===
-		console.log("[UPLOAD_DEBUG] Validation passed", { code });
 	} catch (validationErr) {
-		// === LOG 5: Validation failed ===
-		console.error("[UPLOAD_DEBUG] Validation failed", {
-			code,
-			error: validationErr.message,
-			errorCode: validationErr.errorCode,
-		});
 		// Best-effort cleanup of completed objects.
 		try {
 			const { deleteFilesFromR2 } = require("../services/fileManager");
@@ -608,13 +573,6 @@ router.post("/", rateLimitUpload, sanitizeRequestBody, async (req, res) => {
 			expiryMinutes,
 		});
 
-		// === LOG 6: Finalization complete, sending response ===
-		console.log("[UPLOAD_DEBUG] Sending success response", {
-			code,
-			transferCode: response.code,
-			fileCount: response.files.length,
-		});
-
 		// Release all file stream references immediately to free memory
 		files.forEach((f) => {
 			try { if (f.passthrough && typeof f.passthrough.destroy === 'function') f.passthrough.destroy(); } catch (e) {}
@@ -623,13 +581,6 @@ router.post("/", rateLimitUpload, sanitizeRequestBody, async (req, res) => {
 
 		return res.status(200).json(response);
 	} catch (error) {
-		// === LOG 7: Finalization failed ===
-		console.error("[UPLOAD_DEBUG] Finalization failed", {
-			code,
-			error: error.message,
-			stack: error.stack,
-			errorCode: error.errorCode,
-		});
 		logError("Upload finalize failed", error, `CODE: ${code}`);
 		const status = error?.status || 500;
 		const errorCode = error?.errorCode || ERROR_CODES.SERVER_ERROR;
