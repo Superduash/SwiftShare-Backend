@@ -7,6 +7,7 @@ const { isMongoReady } = require("./db");
 
 let ioInstance;
 const countdownMap = new Map();
+const gracePeriodTimers = new Map();
 const isProduction = String(process.env.NODE_ENV || "").toLowerCase() === "production";
 const allowAllOrigins = String(process.env.CORS_ALLOW_ALL_ORIGINS || "").toLowerCase() === "true";
 
@@ -616,6 +617,47 @@ function initSocket(server) {
 			}
 		});
 
+		socket.on("register-claimant", async ({ code, claimantToken } = {}, ack) => {
+			const normalizedCode = normalizeCode(code);
+			if (!normalizedCode || !claimantToken) {
+				safeAck(ack, { ok: false, error: "invalid_code_or_token" });
+				return;
+			}
+
+			socket.join(roomName(normalizedCode));
+
+			try {
+				// We update it if it exists and matches, but we don't block if it hasn't been claimed yet.
+				// This allows the socket to register its intended token before the actual download claim occurs.
+				await Transfer.updateOne(
+					{
+						code: normalizedCode,
+						$or: [
+							{ claimantToken: claimantToken },
+							{ claimantToken: "" },
+							{ claimantToken: null },
+							{ claimantToken: { $exists: false } }
+						]
+					},
+					{ $set: { claimantSocketId: socket.id } },
+				);
+
+				socket.data.claimantCode = normalizedCode;
+				socket.data.claimantToken = claimantToken;
+
+				// Cancel any existing grace period destruction timer
+				if (gracePeriodTimers.has(normalizedCode)) {
+					clearTimeout(gracePeriodTimers.get(normalizedCode));
+					gracePeriodTimers.delete(normalizedCode);
+				}
+
+				safeAck(ack, { ok: true, code: normalizedCode, socketId: socket.id });
+			} catch (error) {
+				logError("Failed to register claimant socket", error, `CODE: ${normalizedCode}`);
+				safeAck(ack, { ok: false, error: "register_failed" });
+			}
+		});
+
 		socket.on("nearby-ping", async ({ code } = {}) => {
 			const normalizedCode = normalizeCode(code);
 			if (normalizedCode) {
@@ -677,12 +719,36 @@ function initSocket(server) {
 					{ senderSocketId: socket.id },
 					{ $set: { senderSocketId: "" } },
 				);
+
+				// Handle claimant grace period
+				if (socket.data.claimantCode && socket.data.claimantToken) {
+					const cCode = socket.data.claimantCode;
+					const cToken = socket.data.claimantToken;
+					
+					const timer = setTimeout(async () => {
+						gracePeriodTimers.delete(cCode);
+						
+						// Check if the transfer is still active and has the same claimant token/socket
+						const transfer = await Transfer.findOne({ code: cCode, claimantToken: cToken }).lean();
+						if (transfer && !transfer.isDeleted && transfer.claimantSocketId === socket.id) {
+							// Trigger burn
+							await Transfer.updateOne(
+								{ _id: transfer._id },
+								{ $set: { isDeleted: true, burnFinalizedAt: new Date() } }
+							);
+							emitToRoom(cCode, "transfer-deleted", { reason: "burn" });
+							logEvent("Burn transfer finalized after grace period", `CODE: ${cCode}`);
+						}
+					}, 15000); // 15 seconds grace period
+					
+					gracePeriodTimers.set(cCode, timer);
+				}
 				
 				logEvent("Socket disconnected", `SOCKET: ${socket.id}`, `REASON: ${reason}`);
 			} catch (error) {
 				// Only log non-operational errors (ECONNRESET is expected on mobile)
 				if (error?.code !== 'ECONNRESET' && error?.code !== 'EPIPE') {
-					logError("Failed to clean up sender socket on disconnect", error);
+					logError("Failed to clean up socket on disconnect", error);
 				}
 			}
 		});

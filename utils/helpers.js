@@ -1,4 +1,4 @@
-﻿const path = require("path");
+const path = require("path");
 const crypto = require("crypto");
 
 const BLOCKED_EXTENSIONS = new Set([
@@ -241,20 +241,29 @@ function getRequestFingerprint(req) {
 	}
 }
 
-function isBurnClaimOwner(transfer, reqOrFingerprint) {
-	if (!transfer?.burnClaimOwner) {
+function isBurnClaimOwner(transfer, req) {
+	if (!transfer?.claimantToken && !transfer?.burnClaimOwner) {
 		return false;
 	}
 
-	const fingerprint = typeof reqOrFingerprint === "string"
-		? reqOrFingerprint
-		: getRequestFingerprint(reqOrFingerprint);
+	let providedToken = "";
+	if (req && typeof req.get === "function") {
+		providedToken = req.get("x-claimant-token") || req.query?.claimantToken || "";
+	} else if (typeof req === "string") {
+		providedToken = req;
+	}
 
+	if (transfer.claimantToken && providedToken) {
+		return transfer.claimantToken === providedToken;
+	}
+
+	// Legacy fallback
+	const fingerprint = typeof req === "string" ? req : getRequestFingerprint(req);
 	return transfer.burnClaimOwner === fingerprint;
 }
 
 function isBurnClaimOpen(transfer) {
-	return Boolean(transfer?.burnAfterDownload && transfer?.burnClaimOwner && !transfer?.isDeleted);
+	return Boolean(transfer?.burnAfterDownload && (transfer?.claimantToken || transfer?.burnClaimOwner) && !transfer?.isDeleted);
 }
 
 function getTransferStatus(transfer) {

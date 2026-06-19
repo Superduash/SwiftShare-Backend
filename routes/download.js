@@ -39,7 +39,7 @@ function sendUnavailableTransferResponse(req, res, transfer) {
 	const senderIp = String(transfer?.senderIp || "").trim();
 	const isSenderRequest = senderIp && senderIp === getClientIp(req);
 
-	if (transfer.burnAfterDownload && transfer.burnClaimOwner && !isSenderRequest && !isBurnClaimOwner(transfer, req)) {
+	if (transfer.burnAfterDownload && (transfer.claimantToken || transfer.burnClaimOwner) && !isSenderRequest && !isBurnClaimOwner(transfer, req)) {
 		return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
 	}
 
@@ -482,15 +482,16 @@ async function streamZip(res, code, files) {
 
 async function claimBurnDownload(transfer, req) {
 	const requesterFingerprint = getRequestFingerprint(req);
+	const providedToken = req.get("x-claimant-token") || req.query?.claimantToken || "";
 	const now = new Date();
 
-	if (transfer?.burnClaimOwner === requesterFingerprint) {
+	if ((transfer.claimantToken && transfer.claimantToken === providedToken) || 
+		(!transfer.claimantToken && transfer.burnClaimOwner === requesterFingerprint)) {
 		const ownedTransfer = await Transfer.findOneAndUpdate(
 			{
 				_id: transfer._id,
 				isDeleted: false,
 				burnAfterDownload: true,
-				burnClaimOwner: requesterFingerprint,
 			},
 			{ $set: { burnLastActiveAt: now } },
 			{ new: true },
@@ -499,7 +500,7 @@ async function claimBurnDownload(transfer, req) {
 		return { transfer: ownedTransfer, claimedNow: false };
 	}
 
-	if (transfer?.burnClaimOwner && transfer.burnClaimOwner !== requesterFingerprint) {
+	if (transfer.claimantToken || transfer.burnClaimOwner) {
 		return { transfer: null, claimedNow: false };
 	}
 
@@ -509,13 +510,14 @@ async function claimBurnDownload(transfer, req) {
 			isDeleted: false,
 			burnAfterDownload: true,
 			$or: [
-				{ burnClaimOwner: { $exists: false } },
-				{ burnClaimOwner: null },
-				{ burnClaimOwner: "" },
+				{ claimantToken: { $exists: false } },
+				{ claimantToken: null },
+				{ claimantToken: "" },
 			],
 		},
 		{
 			$set: {
+				claimantToken: providedToken,
 				burnClaimOwner: requesterFingerprint,
 				burnClaimedAt: now,
 				burnLastActiveAt: now,
@@ -533,7 +535,7 @@ async function claimBurnDownload(transfer, req) {
 			_id: transfer._id,
 			isDeleted: false,
 			burnAfterDownload: true,
-			burnClaimOwner: requesterFingerprint,
+			claimantToken: providedToken,
 		},
 		{ $set: { burnLastActiveAt: now } },
 		{ new: true },
@@ -670,7 +672,7 @@ router.get("/:code", rateLimitDownload, validateCode, async (req, res, next) => 
 			claimedNow = Boolean(burnClaim.claimedNow);
 			isBurnFlow = true;
 			if (claimedNow) {
-				emitToRoom(code, "transfer-claimed", { code, status: "CLAIMED" });
+				emitToRoom(code, "transfer-claimed", { code, status: "CLAIMED", claimantToken: transfer.claimantToken });
 			}
 		}
 
@@ -766,7 +768,7 @@ router.get("/:code/single/:index", rateLimitDownload, validateCode, async (req, 
 			isBurnFlow = true;
 
 			if (claimedNow) {
-				emitToRoom(code, "transfer-claimed", { code, status: "CLAIMED" });
+				emitToRoom(code, "transfer-claimed", { code, status: "CLAIMED", claimantToken: transfer.claimantToken });
 			}
 		}
 

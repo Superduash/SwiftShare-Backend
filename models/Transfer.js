@@ -111,6 +111,14 @@ const transferSchema = new mongoose.Schema(
 			type: String,
 			default: "",
 		},
+		claimantToken: {
+			type: String,
+			default: "",
+		},
+		claimantSocketId: {
+			type: String,
+			default: "",
+		},
 		burnClaimedAt: {
 			type: Date,
 			default: null,
@@ -196,7 +204,7 @@ transferSchema.virtual("status").get(function () {
 		return "DELETED";
 	}
 
-	if (this.burnAfterDownload && this.burnClaimOwner) {
+	if (this.burnAfterDownload && (this.claimantToken || this.burnClaimOwner)) {
 		return "CLAIMED";
 	}
 
