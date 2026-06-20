@@ -134,6 +134,10 @@ function createRateLimitMiddleware(limiter) {
 							ERROR_CODES.RATE_LIMIT_EXCEEDED,
 							RATE_LIMIT_MESSAGE,
 						);
+						if (result.reset) {
+							const retryAfterSeconds = Math.max(1, Math.ceil((result.reset - Date.now()) / 1000));
+							res.setHeader('Retry-After', String(retryAfterSeconds));
+						}
 						return res
 							.status(429)
 							.json({ ...payload, message: RATE_LIMIT_MESSAGE });
@@ -158,6 +162,11 @@ function createRateLimitMiddleware(limiter) {
 					ERROR_CODES.RATE_LIMIT_EXCEEDED,
 					RATE_LIMIT_MESSAGE,
 				);
+				const entry = ipRateLimitMap.get(ip);
+				if (entry?.resetAt) {
+					const retryAfterSeconds = Math.max(1, Math.ceil((entry.resetAt - Date.now()) / 1000));
+					res.setHeader('Retry-After', String(retryAfterSeconds));
+				}
 				return res
 					.status(429)
 					.json({ ...payload, message: RATE_LIMIT_MESSAGE });

@@ -147,7 +147,6 @@ function corsOrigin(origin, callback) {
 	if (allowAllOrigins) { callback(null, true); return; }
 	if (!isProd && isDevOriginAllowed(origin)) { callback(null, true); return; }
 	if (isPlatformDeployOrigin(origin)) { callback(null, true); return; }
-	const allowedFrontendOrigins = getAllowedFrontendOrigins();
 	if (
 		allowedFrontendOrigins.length > 0
 		&& allowedFrontendOrigins.some((o) => originsMatch(origin, o))
@@ -228,7 +227,7 @@ app.use(morgan((tokens, req, res) => {
 	skip: (req, res) => (req.path === '/api/health' || req.path === '/api/ping') && res.statusCode === 200
 }));
 
-app.use(express.json({ limit: "12mb" }));
+app.use(express.json({ limit: "1mb" }));
 
 // Per-request timeout — upload/download routes get a longer window
 app.use((req, res, next) => {
@@ -283,6 +282,9 @@ app.post("/api/client-error", (req, res) => {
 
 app.get("/api/metrics", (req, res) => {
 	if (res.headersSent) return;
+	if (isProduction) {
+		return res.status(404).json(buildErrorResponse(ERROR_CODES.ROUTE_NOT_FOUND));
+	}
 	try {
 		res.status(200).json({
 			performance: getPerformanceSnapshot(),

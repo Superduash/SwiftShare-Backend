@@ -26,7 +26,6 @@ function validateOwnershipToken(transfer, req) {
   const provided = (
     req.headers['x-ownership-token'] ||
     req.body?.ownershipToken ||
-    req.query?.ownershipToken ||
     ''
   ).trim();
   const stored = String(transfer.ownershipToken || '').trim();

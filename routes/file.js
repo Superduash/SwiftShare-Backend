@@ -12,6 +12,14 @@ const { logError } = require("../utils/logger");
 
 const router = express.Router();
 
+router.use((req, res, next) => {
+	// File streams set their own cache headers; only apply to metadata routes
+	if (req.method === 'GET' && (req.path === '/' || /^\/?[A-Za-z0-9]{6}\/?$/.test(req.path))) {
+		res.setHeader('Cache-Control', 'no-store');
+	}
+	next();
+});
+
 // Throttle "viewed" activity writes per (code,fingerprint). Without this, a polling
 // frontend (e.g. status refresh every few seconds) would push a viewed event on every
 // GET — bloating activity[] and killing write throughput. 30s is short enough to

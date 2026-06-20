@@ -25,11 +25,30 @@ const {
 } = require("../utils/helpers");
 
 const router = express.Router();
+
+// Transfer state is mutable — never let browsers or CDNs cache these responses
+router.use((req, res, next) => {
+	res.setHeader('Cache-Control', 'no-store');
+	next();
+});
+
 const MINUTE_MS = 60 * 1000;
 const STATUS_CACHE_TTL_MS = 1200;
 const ACTIVITY_CACHE_TTL_MS = 1200;
 const statusCache = new Map();
 const activityCache = new Map();
+
+// Periodic cleanup of expired cache entries — prevents unbounded Map growth
+// under high traffic with many unique transfer codes.
+setInterval(() => {
+	const now = Date.now();
+	for (const [key, entry] of statusCache) {
+		if (entry.expiresAt <= now) statusCache.delete(key);
+	}
+	for (const [key, entry] of activityCache) {
+		if (entry.expiresAt <= now) activityCache.delete(key);
+	}
+}, 60_000).unref(); // Run every minute, don't block process exit
 
 function getCachedPayload(cache, code) {
 	const entry = cache.get(code);
@@ -81,7 +100,10 @@ function inferOriginalSessionMinutes(transfer) {
 router.post("/:code/verify-password", rateLimitPassword, validateCode, sanitizeRequestBody, async (req, res, next) => {
 	try {
 		const { code } = req.params;
-		const transfer = await Transfer.findOne({ code }).lean();
+		const transfer = await Transfer.findOne(
+			{ code },
+			{ _id: 1, code: 1, isDeleted: 1, expiresAt: 1, passwordProtected: 1, passwordHash: 1, passwordAttempts: 1 }
+		).lean();
 
 		if (!transfer) {
 			return res.status(404).json(buildErrorResponse(ERROR_CODES.CODE_NOT_FOUND));
@@ -150,7 +172,10 @@ router.get("/:code/activity", validateCode, async (req, res, next) => {
 			return res.status(200).json(cached);
 		}
 
-		const transfer = await Transfer.findOne({ code }).lean();
+		const transfer = await Transfer.findOne(
+			{ code },
+			{ code: 1, activity: 1 }
+		).lean();
 
 		if (!transfer) {
 			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
@@ -176,7 +201,10 @@ router.get("/:code/status", validateCode, async (req, res, next) => {
 			return res.status(200).json(cached);
 		}
 
-		const transfer = await Transfer.findOne({ code }).lean();
+		const transfer = await Transfer.findOne(
+			{ code },
+			{ code: 1, isDeleted: 1, cancelledAt: 1, burnAfterDownload: 1, claimantToken: 1, burnClaimOwner: 1, expiresAt: 1, downloadCount: 1 }
+		).lean();
 
 		if (!transfer) {
 			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
@@ -205,7 +233,10 @@ router.get("/:code/status", validateCode, async (req, res, next) => {
 router.get("/:code/verify-ownership", validateCode, async (req, res, next) => {
 	try {
 		const { code } = req.params;
-		const transfer = await Transfer.findOne({ code }).lean();
+		const transfer = await Transfer.findOne(
+			{ code },
+			{ _id: 1, code: 1, ownershipToken: 1 }
+		).lean();
 
 		if (!transfer) {
 			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
@@ -225,7 +256,10 @@ router.post("/:code/extend", validateCode, async (req, res, next) => {
 	try {
 		const { code } = req.params;
 		const { minutes } = req.body; // Get minutes from request body
-		const transfer = await Transfer.findOne({ code }).lean();
+		const transfer = await Transfer.findOne(
+			{ code },
+			{ _id: 1, code: 1, isDeleted: 1, expiresAt: 1, extendedOnce: 1, ownershipToken: 1 }
+		).lean();
 
 		if (!transfer) {
 			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
@@ -317,7 +351,10 @@ router.post("/:code/extend", validateCode, async (req, res, next) => {
 router.delete("/:code", validateCode, async (req, res, next) => {
 	try {
 		const { code } = req.params;
-		const transfer = await Transfer.findOne({ code }).lean();
+		const transfer = await Transfer.findOne(
+			{ code },
+			{ _id: 1, code: 1, isDeleted: 1, files: 1, ownershipToken: 1 }
+		).lean();
 
 		if (!transfer) {
 			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
@@ -370,7 +407,10 @@ router.delete("/:code", validateCode, async (req, res, next) => {
 router.post("/:code/burn-finalize", validateCode, async (req, res, next) => {
 	try {
 		const { code } = req.params;
-		const transfer = await Transfer.findOne({ code }).lean();
+		const transfer = await Transfer.findOne(
+			{ code },
+			{ _id: 1, code: 1, isDeleted: 1, cancelledAt: 1, burnAfterDownload: 1, burnClaimOwner: 1, claimantToken: 1, claimantSocketId: 1, files: 1, expiresAt: 1 }
+		).lean();
 
 		if (!transfer) {
 			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));

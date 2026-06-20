@@ -182,6 +182,8 @@ const transferSchema = new mongoose.Schema(
 		qrDataUri: {
 			type: String,
 			default: "",
+			// @deprecated: Server-side QR generation was removed. Frontend renders QR
+			// from shareLink using react-qr-code. Field retained for schema backward-compat.
 		},
 		activity: {
 			type: [transferActivitySchema],

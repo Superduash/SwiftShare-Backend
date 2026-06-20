@@ -21,6 +21,7 @@ const {
 const { sanitizeString } = require("../middleware/inputValidator");
 const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
 const { logEvent, logError, logWarn } = require("../utils/logger");
+const { recordDownload } = require("../utils/performance");
 
 const router = express.Router();
 
@@ -710,6 +711,7 @@ router.get("/:code", rateLimitDownload, validateCode, async (req, res, next) => 
 				receiverDevice,
 				receiverIp,
 			});
+			recordDownload(Number(streamedBytes || 0));
 
 			const receipt = buildTransferReceipt({
 				code,
@@ -799,6 +801,7 @@ router.get("/:code/single/:index", rateLimitDownload, validateCode, async (req, 
 				receiverDevice,
 				receiverIp,
 			});
+			recordDownload(Number(streamedBytes || 0));
 
 			const receipt = buildTransferReceipt({
 				code,

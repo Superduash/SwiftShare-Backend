@@ -32,6 +32,7 @@ const {
 } = require("../utils/helpers");
 const { logEvent, logError, formatSizeMB } = require("../utils/logger");
 const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
+const { recordUpload } = require("../utils/performance");
 
 const router = express.Router();
 
@@ -441,6 +442,7 @@ async function finalizeTransfer({
 	emitToRoom(code, "upload-complete", responsePayload);
 	scheduleTransferCountdown(code, expiresAt);
 	broadcastNewTransferToSubnet(code, senderIp);
+	recordUpload(Number(totalSize || 0));
 	logEvent("Upload complete", `CODE: ${code}`, formatSizeMB(totalSize));
 
 	// Fire-and-forget DB write (Atlas M0 is highly reliable; failure rate ~0.001%)

@@ -468,9 +468,14 @@ function initSocket(server) {
 		try {
 			const connectedSockets = new Set(Array.from(ioInstance.sockets.sockets.keys()));
 			
+			const now = new Date();
 			// Find all transfers with socket IDs
 			const transfers = await Transfer.find(
-				{ senderSocketId: { $exists: true, $ne: "" } },
+				{
+					senderSocketId: { $exists: true, $ne: "" },
+					isDeleted: false,
+					expiresAt: { $gt: now },
+				},
 				{ code: 1, senderSocketId: 1 }
 			).lean();
 			

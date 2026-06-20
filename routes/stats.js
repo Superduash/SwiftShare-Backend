@@ -23,6 +23,11 @@ let inFlight = null; // dedupe concurrent recomputes
 
 const router = express.Router();
 
+router.use((req, res, next) => {
+	res.setHeader('Cache-Control', 'public, max-age=30, stale-while-revalidate=60');
+	next();
+});
+
 async function computeStats() {
 	const now = new Date();
 
@@ -53,6 +58,14 @@ async function computeStats() {
 		}),
 		Transfer.aggregate([
 			{
+				$match: {
+					$or: [
+						{ downloadSpeed: { $gt: 0 } },
+						{ uploadSpeed: { $gt: 0 } },
+					],
+				},
+			},
+			{
 				$project: {
 					effectiveSpeed: {
 						$cond: [
@@ -63,7 +76,6 @@ async function computeStats() {
 					},
 				},
 			},
-			{ $match: { effectiveSpeed: { $gt: 0 } } },
 			{ $group: { _id: null, averageTransferSpeed: { $avg: "$effectiveSpeed" } } },
 		]).allowDiskUse(true),
 	]);

@@ -7,7 +7,7 @@ let lastCheck = Date.now();
 
 function measureEventLoopLag() {
 	const now = Date.now();
-	const expected = 100; // Check every 100ms
+	const expected = 1000; // Check every 1000ms
 	const actual = now - lastCheck;
 	eventLoopLag = Math.max(0, actual - expected);
 	lastCheck = now;
@@ -16,7 +16,7 @@ function measureEventLoopLag() {
 // Start monitoring event loop lag
 setInterval(() => {
 	try { measureEventLoopLag(); } catch (err) { logError("measureEventLoopLag crashed", err); }
-}, 100).unref();
+}, 1000).unref();
 
 function getEventLoopLag() {
 	return eventLoopLag;
@@ -66,6 +66,7 @@ function createTimingMiddleware() {
 		res.on('finish', () => {
 			const end = process.hrtime.bigint();
 			const durationMs = Number(end - start) / 1000000; // Convert to ms
+			recordRequest(res.statusCode, durationMs);
 			
 			// Log slow requests (> 1000ms) — don't try to set headers here, response is done
 			if (durationMs > 1000) {

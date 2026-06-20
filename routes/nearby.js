@@ -10,6 +10,11 @@ const { getIo } = require("../config/socket");
 
 const router = express.Router();
 
+router.use((req, res, next) => {
+	res.setHeader('Cache-Control', 'no-store');
+	next();
+});
+
 // Debug endpoint to check IP detection and subnet matching (dev only)
 router.get("/debug", rateLimitMetadata, async (req, res, next) => {
 	// Block debug endpoint in production
