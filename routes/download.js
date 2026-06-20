@@ -1,6 +1,7 @@
 const express = require("express");
 const { Readable } = require("stream");
 const bcrypt = require("bcryptjs");
+const crypto = require("crypto");
 
 const Transfer = require("../models/Transfer");
 const { getObjectFromR2, getObjectHeadFromR2, deleteFilesFromR2 } = require("../services/fileManager");
@@ -25,6 +26,28 @@ const { recordDownload } = require("../utils/performance");
 
 const router = express.Router();
 
+// GET-only streaming routes (download, single-download, preview) can't receive
+// custom headers — <img src>, <video src>, and window.location.href navigations
+// never send them. This accepts the ownership token via query string ONLY for
+// these read-only routes, mirroring the existing pattern already used for
+// `password` and `claimantToken` on the same routes. Never use this for POST
+// extend/delete — those stay strictly header/body-only via validateOwnershipToken.
+function isOwnerViaQuery(transfer, req) {
+	if (validateOwnershipToken(transfer, req)) return true; // header/body path still wins first
+	
+	const queryToken = String(req.query?.ownershipToken || '').trim();
+	const stored = String(transfer.ownershipToken || '').trim();
+	if (!queryToken || !stored || queryToken.length !== stored.length) return false;
+	
+	try {
+		const isOwner = crypto.timingSafeEqual(Buffer.from(queryToken), Buffer.from(stored));
+		logEvent("OWNER_VIA_QUERY", `CODE: ${transfer.code}`, `MATCH: ${isOwner}`);
+		return isOwner;
+	} catch {
+		return false;
+	}
+}
+
 function sendUnavailableTransferResponse(req, res, transfer) {
 	if (!transfer) {
 		return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
@@ -38,8 +61,8 @@ function sendUnavailableTransferResponse(req, res, transfer) {
 		return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
 	}
 
-	// FIX: Use validateOwnershipToken instead of IP comparison to determine if this is the sender
-	const isSenderRequest = validateOwnershipToken(transfer, req);
+	// FIX: Use query-aware check for streaming routes
+	const isSenderRequest = isOwnerViaQuery(transfer, req);
 
 	if (transfer.burnAfterDownload && (transfer.claimantToken || transfer.burnClaimOwner) && !isSenderRequest && !isBurnClaimOwner(transfer, req)) {
 		return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
@@ -67,7 +90,8 @@ async function getPasswordErrorResponse(req, transfer) {
 		return null;
 	}
 
-	if (validateOwnershipToken(transfer, req)) {
+	// FIX: Use query-aware check for streaming routes
+	if (isOwnerViaQuery(transfer, req)) {
 		return null;
 	}
 

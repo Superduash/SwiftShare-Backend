@@ -182,7 +182,7 @@ app.use(cors({
 	maxAge: 86400,
 	// Range must be in allowedHeaders so CORS preflight for media streaming succeeds
 	// on cross-origin deployments (e.g. Vercel frontend → Railway backend).
-	allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Range', 'x-transfer-password', 'X-Ownership-Token'],
+	allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Range', 'x-transfer-password', 'X-Ownership-Token', 'X-Claimant-Token'],
 	exposedHeaders: ['Content-Range', 'Content-Length', 'Accept-Ranges', 'X-Request-ID'],
 }));
 
