@@ -22,6 +22,29 @@ const DANGEROUS_SIGNATURES = [
 	Buffer.from([0xfe, 0xed, 0xfa, 0xcf]), // Mach-O 64-bit
 ];
 
+function validateOwnershipToken(transfer, req) {
+  const provided = (
+    req.headers['x-ownership-token'] ||
+    req.body?.ownershipToken ||
+    req.query?.ownershipToken ||
+    ''
+  ).trim();
+  const stored = String(transfer.ownershipToken || '').trim();
+  
+  // If transfer has no ownership token, allow the operation (old transfers)
+  if (!stored) return true;
+  
+  // If token is required but not provided, deny
+  if (!provided) return false;
+  
+  if (provided.length !== stored.length) return false;
+  try {
+    return crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(stored));
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Safely parse environment variable as positive integer with fallback
  * @param {string} value - Environment variable value
@@ -305,9 +328,9 @@ module.exports = {
 	isBurnClaimOwner,
 	isBurnClaimOpen,
 	getTransferStatus,
+	validateOwnershipToken,
 	parseEnvInt,
 	// Backward-compatible aliases used by existing Hour 1-3 code.
 	extractClientIp: getClientIp,
 	parseDeviceName: getDeviceName,
 };
-

@@ -21,6 +21,7 @@ const {
 	getTransferStatus,
 	getRequestFingerprint,
 	isBurnClaimOwner,
+	validateOwnershipToken,
 } = require("../utils/helpers");
 
 const router = express.Router();
@@ -29,28 +30,6 @@ const STATUS_CACHE_TTL_MS = 1200;
 const ACTIVITY_CACHE_TTL_MS = 1200;
 const statusCache = new Map();
 const activityCache = new Map();
-
-function validateOwnershipToken(transfer, req) {
-  const provided = (
-    req.headers['x-ownership-token'] ||
-    req.body?.ownershipToken ||
-    ''
-  ).trim();
-  const stored = String(transfer.ownershipToken || '').trim();
-  
-  // If transfer has no ownership token, allow the operation (old transfers)
-  if (!stored) return true;
-  
-  // If token is required but not provided, deny
-  if (!provided) return false;
-  
-  if (provided.length !== stored.length) return false;
-  try {
-    return crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(stored));
-  } catch {
-    return false;
-  }
-}
 
 function getCachedPayload(cache, code) {
 	const entry = cache.get(code);
@@ -218,6 +197,25 @@ router.get("/:code/status", validateCode, async (req, res, next) => {
 
 		setCachedPayload(statusCache, code, payload, STATUS_CACHE_TTL_MS);
 		return res.status(200).json(payload);
+	} catch (error) {
+		return next(error);
+	}
+});
+
+router.get("/:code/verify-ownership", validateCode, async (req, res, next) => {
+	try {
+		const { code } = req.params;
+		const transfer = await Transfer.findOne({ code }).lean();
+
+		if (!transfer) {
+			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
+		}
+
+		if (validateOwnershipToken(transfer, req)) {
+			return res.status(200).json({ authorized: true });
+		}
+
+		return res.status(403).json(buildErrorResponse(ERROR_CODES.UNAUTHORIZED, "Invalid ownership token"));
 	} catch (error) {
 		return next(error);
 	}

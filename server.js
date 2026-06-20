@@ -267,6 +267,20 @@ app.get("/api/ping", (req, res) => {
 	res.status(200).json({ pong: true, timestamp: Date.now() });
 });
 
+app.post("/api/client-error", (req, res) => {
+	if (res.headersSent) return;
+	const { message, stack, componentStack, url } = req.body || {};
+	logError("Client Side Error Reported", {
+		message,
+		stack,
+		componentStack,
+		url,
+		userAgent: req.headers["user-agent"],
+		ip: req.ip || req.headers["x-forwarded-for"]
+	});
+	res.status(204).end();
+});
+
 app.get("/api/metrics", (req, res) => {
 	if (res.headersSent) return;
 	try {
@@ -534,11 +548,15 @@ function startServer() {
 						return;
 					}
 					if (!res.ok) {
-						logWarn(`Self-ping returned ${res.status}`);
+						logWarn(`Self-ping returned ${res.status} — retrying in 30s`);
+						schedulePing(30_000);
+						return;
 					}
 				} catch (err) {
 					if (err?.name !== 'AbortError') {
 						logError('Self-ping failed', err);
+						schedulePing(30_000); // fast retry instead of waiting the full interval
+						return;
 					}
 				}
 				schedulePing(PING_INTERVAL_MS);

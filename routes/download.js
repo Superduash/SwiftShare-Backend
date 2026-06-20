@@ -16,6 +16,7 @@ const {
 	isBurnClaimOwner,
 	formatBytes,
 	isTransferExpired,
+	validateOwnershipToken,
 } = require("../utils/helpers");
 const { sanitizeString } = require("../middleware/inputValidator");
 const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
@@ -62,6 +63,10 @@ function getProvidedPassword(req) {
 
 async function getPasswordErrorResponse(req, transfer) {
 	if (!transfer.passwordProtected) {
+		return null;
+	}
+
+	if (validateOwnershipToken(transfer, req)) {
 		return null;
 	}
 

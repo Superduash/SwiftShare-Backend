@@ -1,9 +1,10 @@
-﻿const {
+const {
 	getTotalSize,
 	isBlockedExtension,
 	hasDangerousSignature,
 } = require("../utils/helpers");
 const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
+const { logWarn } = require("../utils/logger");
 
 const BLOCKED_DETECTED_EXTENSIONS = new Set([
 	".exe",
@@ -75,6 +76,10 @@ async function validateMimeIntegrity(files) {
 
 		const detectedExt = `.${String(detected.ext || "").toLowerCase()}`;
 		if (BLOCKED_DETECTED_EXTENSIONS.has(detectedExt)) {
+			logWarn("Upload validation failed: executable signature detected via mime check", {
+				originalname: file.originalname,
+				detectedExt,
+			});
 			return {
 				valid: false,
 				message: `Executable signature detected: ${detectedExt} files are not allowed`,
@@ -85,6 +90,11 @@ async function validateMimeIntegrity(files) {
 		const detectedMime = String(detected.mime || "").toLowerCase();
 
 		if (!isMimeCompatible(declaredMime, detectedMime)) {
+			logWarn("Upload validation failed: MIME mismatch", {
+				originalname: file.originalname,
+				declaredMime,
+				detectedMime,
+			});
 			return {
 				valid: false,
 				message: `MIME mismatch: declared ${declaredMime || "unspecified"} but detected ${detectedMime}`,
@@ -118,15 +128,18 @@ async function validateUpload(req, res, next) {
 		const files = req.files;
 
 		if (!Array.isArray(files) || files.length === 0) {
+			logWarn("Upload validation failed: No file uploaded");
 			return sendUploadError(res, ERROR_CODES.NO_FILE_UPLOADED);
 		}
 
 		if (files.length > getMaxFileCount()) {
+			logWarn("Upload validation failed: Too many files", { count: files.length, max: getMaxFileCount() });
 			return sendUploadError(res, ERROR_CODES.TOO_MANY_FILES);
 		}
 
 		const totalSize = getTotalSize(files);
 		if (totalSize > getMaxFileSizeBytes()) {
+			logWarn("Upload validation failed: File too large", { size: totalSize, max: getMaxFileSizeBytes() });
 			return sendUploadError(res, ERROR_CODES.FILE_TOO_LARGE);
 		}
 
@@ -135,6 +148,7 @@ async function validateUpload(req, res, next) {
 		if (hasBlockedFileType) {
 			const blockedFile = files.find((file) => isBlockedExtension(file.originalname));
 			const ext = require("path").extname(blockedFile?.originalname || "");
+			logWarn("Upload validation failed: Blocked extension", { originalname: blockedFile?.originalname, ext });
 			return res
 				.status(400)
 				.json(buildErrorResponse(ERROR_CODES.INVALID_FILE_TYPE, `Blocked file extension: ${ext} files are not allowed`));
@@ -142,6 +156,8 @@ async function validateUpload(req, res, next) {
 
 		const hasDangerousFileSignature = files.some((file) => hasDangerousSignature(file.buffer));
 		if (hasDangerousFileSignature) {
+			const flaggedFile = files.find((file) => hasDangerousSignature(file.buffer));
+			logWarn("Upload validation failed: Dangerous signature detected", { originalname: flaggedFile?.originalname });
 			return res
 				.status(400)
 				.json(buildErrorResponse(ERROR_CODES.INVALID_FILE_TYPE, "Executable file signatures are not allowed"));
@@ -158,12 +174,13 @@ async function validateUpload(req, res, next) {
 		
 		// Log warning if validation takes > 50ms for files < 10MB
 		if (duration > 50 && totalSize < 10 * 1024 * 1024) {
-			const { logWarn } = require("../utils/logger");
 			logWarn("Upload validation slow", `DURATION: ${duration.toFixed(2)}ms`, `SIZE: ${(totalSize / 1024 / 1024).toFixed(2)}MB`);
 		}
 
 		return next();
 	} catch (error) {
+		const { logError } = require("../utils/logger");
+		logError("Upload validation exception", error);
 		return res.status(500).json(buildErrorResponse(ERROR_CODES.SERVER_ERROR));
 	}
 }

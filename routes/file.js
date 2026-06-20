@@ -3,7 +3,7 @@ const express = require("express");
 const Transfer = require("../models/Transfer");
 const { rateLimitMetadata } = require("../middleware/rateLimiter");
 const { validateCode } = require("../middleware/validateCode");
-const { getClientIp, getDeviceName, isTransferExpired, getTransferStatus, isBurnClaimOwner, getRequestFingerprint } = require("../utils/helpers");
+const { getClientIp, getDeviceName, isTransferExpired, getTransferStatus, isBurnClaimOwner, getRequestFingerprint, validateOwnershipToken } = require("../utils/helpers");
 const { sanitizeString } = require("../middleware/inputValidator");
 const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
 const { getObjectFromR2 } = require("../services/fileManager");
@@ -133,11 +133,13 @@ router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => 
 				if (file.inlineContent) {
 					let allowedInline = true;
 					if (transfer.passwordProtected) {
-						const providedPassword = req.headers['x-transfer-password'];
-						if (!providedPassword) allowedInline = false;
-						else {
-							const bcrypt = require('bcryptjs');
-							allowedInline = Boolean(transfer.passwordHash && await bcrypt.compare(providedPassword, transfer.passwordHash));
+						if (!validateOwnershipToken(transfer, req)) {
+							const providedPassword = req.headers['x-transfer-password'];
+							if (!providedPassword) allowedInline = false;
+							else {
+								const bcrypt = require('bcryptjs');
+								allowedInline = Boolean(transfer.passwordHash && await bcrypt.compare(providedPassword, transfer.passwordHash));
+							}
 						}
 					}
 					if (allowedInline) {
@@ -149,11 +151,13 @@ router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => 
 				} else {
 					let allowed = true;
 					if (transfer.passwordProtected) {
-						const providedPassword = req.headers['x-transfer-password'];
-						if (!providedPassword) allowed = false;
-						else {
-							const bcrypt = require('bcryptjs');
-							allowed = Boolean(transfer.passwordHash && await bcrypt.compare(providedPassword, transfer.passwordHash));
+						if (!validateOwnershipToken(transfer, req)) {
+							const providedPassword = req.headers['x-transfer-password'];
+							if (!providedPassword) allowed = false;
+							else {
+								const bcrypt = require('bcryptjs');
+								allowed = Boolean(transfer.passwordHash && await bcrypt.compare(providedPassword, transfer.passwordHash));
+							}
 						}
 					}
 					if (allowed) {
@@ -238,18 +242,20 @@ router.get("/:code/text", validateCode, async (req, res, next) => {
 
 		// Check password if protected
 		if (transfer.passwordProtected) {
-			const providedPassword = req.headers['x-transfer-password'];
-			if (!providedPassword) {
-				return res.status(401).json(buildErrorResponse(ERROR_CODES.PASSWORD_REQUIRED));
-			}
+			if (!validateOwnershipToken(transfer, req)) {
+				const providedPassword = req.headers['x-transfer-password'];
+				if (!providedPassword) {
+					return res.status(401).json(buildErrorResponse(ERROR_CODES.PASSWORD_REQUIRED));
+				}
 
-			const bcrypt = require("bcryptjs");
-			const passwordMatches = Boolean(
-				transfer.passwordHash && await bcrypt.compare(providedPassword, transfer.passwordHash)
-			);
+				const bcrypt = require("bcryptjs");
+				const passwordMatches = Boolean(
+					transfer.passwordHash && await bcrypt.compare(providedPassword, transfer.passwordHash)
+				);
 
-			if (!passwordMatches) {
-				return res.status(401).json(buildErrorResponse(ERROR_CODES.INVALID_PASSWORD));
+				if (!passwordMatches) {
+					return res.status(401).json(buildErrorResponse(ERROR_CODES.INVALID_PASSWORD));
+				}
 			}
 		}
 
