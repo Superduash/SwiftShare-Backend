@@ -67,14 +67,30 @@ router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => 
 		}
 
 		if (transfer.isDeleted) {
+			// FIX: Return specific state for consumed burn transfers
 			if (transfer.burnAfterDownload && !transfer.cancelledAt) {
+				// Check if this user was the claimant
+				if (isBurnClaimOwner(transfer, req)) {
+					return res.status(200).json({
+						code: transfer.code,
+						status: "CONSUMED",
+						burnAfterDownload: true,
+						message: "This transfer was burned after download",
+					});
+				}
 				return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
 			}
 			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
 		}
 
+		// FIX: Return CLAIMED state with proper access control
 		if (isBurnLockedForRequester(transfer, req)) {
-			return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
+			return res.status(200).json({
+				code: transfer.code,
+				status: "CLAIMED",
+				burnAfterDownload: true,
+				message: "This transfer was claimed by another device",
+			});
 		}
 
 		if (isTransferExpired(transfer)) {
