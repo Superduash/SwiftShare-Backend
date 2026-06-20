@@ -324,9 +324,13 @@ router.post("/:code/extend", validateCode, async (req, res, next) => {
 
 		// Schedule new countdown AFTER save
 		scheduleTransferCountdown(code, expiresAt);
+		
+		const updatedTransfer = await Transfer.findOne({ code }, { expiresAt: 1 }).lean();
+		const finalExpiresAt = updatedTransfer ? updatedTransfer.expiresAt : expiresAt;
+
 		emitToRoom(code, "transfer-extended", { 
 			code, 
-			expiresAt, 
+			expiresAt: finalExpiresAt, 
 			extensionMinutes,
 			serverTime: Date.now() // Add server timestamp for sync
 		});
@@ -334,13 +338,13 @@ router.post("/:code/extend", validateCode, async (req, res, next) => {
 			"Transfer extended",
 			`CODE: ${code}`,
 			`EXTENSION_MINUTES: ${extensionMinutes}`,
-			`EXPIRES_AT: ${expiresAt.toISOString()}`,
+			`EXPIRES_AT: ${finalExpiresAt instanceof Date ? finalExpiresAt.toISOString() : String(finalExpiresAt)}`,
 		);
 
 		return res.status(200).json({
 			success: true,
 			code,
-			expiresAt,
+			expiresAt: finalExpiresAt,
 			extensionMinutes,
 			extendedOnce: true,
 		});

@@ -558,9 +558,8 @@ async function finalizeDownload(transfer, {
 	receiverDevice,
 	receiverIp,
 }) {
-	let updatedTransfer;
 	if (isBurnFlow) {
-		updatedTransfer = await Transfer.findOneAndUpdate(
+		await Transfer.updateOne(
 			{ _id: transfer._id },
 			{
 				$inc: { downloadCount: 1 },
@@ -595,10 +594,9 @@ async function finalizeDownload(transfer, {
 						},
 				},
 			},
-			{ new: true, projection: { code: 1, downloadCount: 1, viewCount: 1 } }
-		).lean();
+		);
 	} else {
-		updatedTransfer = await Transfer.findOneAndUpdate(
+		await Transfer.updateOne(
 			{ _id: transfer._id },
 			{
 				$inc: { downloadCount: 1 },
@@ -615,9 +613,12 @@ async function finalizeDownload(transfer, {
 					},
 				},
 			},
-			{ new: true, projection: { code: 1, downloadCount: 1, viewCount: 1 } }
-		).lean();
+		);
 	}
+
+	const updatedTransfer = await Transfer.findOne({ code: transfer.code })
+		.select("downloadCount viewCount")
+		.lean();
 
 	if (updatedTransfer) {
 		emitToRoom(transfer.code, "stats-updated", {
