@@ -49,8 +49,8 @@ function isBurnLockedForRequester(transfer, req) {
 		return false;
 	}
 
-	const senderIp = String(transfer?.senderIp || "").trim();
-	if (senderIp && getClientIp(req) === senderIp) {
+	// FIX: Use validateOwnershipToken instead of IP comparison - sender should always have access
+	if (validateOwnershipToken(transfer, req)) {
 		return false;
 	}
 

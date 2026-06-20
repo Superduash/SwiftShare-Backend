@@ -38,8 +38,8 @@ function sendUnavailableTransferResponse(req, res, transfer) {
 		return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
 	}
 
-	const senderIp = String(transfer?.senderIp || "").trim();
-	const isSenderRequest = senderIp && senderIp === getClientIp(req);
+	// FIX: Use validateOwnershipToken instead of IP comparison to determine if this is the sender
+	const isSenderRequest = validateOwnershipToken(transfer, req);
 
 	if (transfer.burnAfterDownload && (transfer.claimantToken || transfer.burnClaimOwner) && !isSenderRequest && !isBurnClaimOwner(transfer, req)) {
 		return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
@@ -558,74 +558,89 @@ async function finalizeDownload(transfer, {
 	receiverDevice,
 	receiverIp,
 }) {
-	if (isBurnFlow) {
-		await Transfer.updateOne(
-			{ _id: transfer._id },
-			{
-				$inc: { downloadCount: 1 },
-				$set: {
-					downloadDuration,
-					downloadSpeed,
-					burnLastActiveAt: new Date(),
+	const { logEvent: log, logError } = require("../utils/logger");
+	
+	try {
+		log("FINALIZE_DOWNLOAD_START", `CODE: ${transfer.code}`, `BURN_FLOW: ${isBurnFlow}`);
+		
+		let updateResult;
+		if (isBurnFlow) {
+			updateResult = await Transfer.updateOne(
+				{ _id: transfer._id },
+				{
+					$inc: { downloadCount: 1 },
+					$set: {
+						downloadDuration,
+						downloadSpeed,
+						burnLastActiveAt: new Date(),
+					},
+					$push: {
+						activity: claimedNow
+							? {
+								$each: [
+									{
+										event: "burn_claimed",
+										device: receiverDevice,
+										ip: receiverIp,
+										timestamp: new Date(),
+									},
+									{
+										event: "downloaded",
+										device: receiverDevice,
+										ip: receiverIp,
+										timestamp: new Date(),
+									},
+								],
+							}
+							: {
+								event: "downloaded",
+								device: receiverDevice,
+								ip: receiverIp,
+								timestamp: new Date(),
+							},
+					},
 				},
-				$push: {
-					activity: claimedNow
-						? {
-							$each: [
-								{
-									event: "burn_claimed",
-									device: receiverDevice,
-									ip: receiverIp,
-									timestamp: new Date(),
-								},
-								{
-									event: "downloaded",
-									device: receiverDevice,
-									ip: receiverIp,
-									timestamp: new Date(),
-								},
-							],
-						}
-						: {
+			);
+		} else {
+			updateResult = await Transfer.updateOne(
+				{ _id: transfer._id },
+				{
+					$inc: { downloadCount: 1 },
+					$set: {
+						downloadDuration,
+						downloadSpeed,
+					},
+					$push: {
+						activity: {
 							event: "downloaded",
 							device: receiverDevice,
 							ip: receiverIp,
 							timestamp: new Date(),
 						},
-				},
-			},
-		);
-	} else {
-		await Transfer.updateOne(
-			{ _id: transfer._id },
-			{
-				$inc: { downloadCount: 1 },
-				$set: {
-					downloadDuration,
-					downloadSpeed,
-				},
-				$push: {
-					activity: {
-						event: "downloaded",
-						device: receiverDevice,
-						ip: receiverIp,
-						timestamp: new Date(),
 					},
 				},
-			},
-		);
-	}
+			);
+		}
 
-	const updatedTransfer = await Transfer.findOne({ code: transfer.code })
-		.select("downloadCount viewCount")
-		.lean();
+		log("FINALIZE_DOWNLOAD_UPDATE_RESULT", `CODE: ${transfer.code}`, `MATCHED: ${updateResult.matchedCount}`, `MODIFIED: ${updateResult.modifiedCount}`);
 
-	if (updatedTransfer) {
-		emitToRoom(transfer.code, "stats-updated", {
-			code: transfer.code,
-			viewCount: Number(updatedTransfer.viewCount || 0),
-			downloadCount: Number(updatedTransfer.downloadCount || 0),
-		});
+		const updatedTransfer = await Transfer.findOne({ code: transfer.code })
+			.select("downloadCount viewCount")
+			.lean();
+
+		if (updatedTransfer) {
+			log("FINALIZE_DOWNLOAD_COUNTS", `CODE: ${transfer.code}`, `DOWNLOAD_COUNT: ${updatedTransfer.downloadCount}`, `VIEW_COUNT: ${updatedTransfer.viewCount}`);
+			emitToRoom(transfer.code, "stats-updated", {
+				code: transfer.code,
+				viewCount: Number(updatedTransfer.viewCount || 0),
+				downloadCount: Number(updatedTransfer.downloadCount || 0),
+			});
+		} else {
+			logError("FINALIZE_DOWNLOAD_NOT_FOUND", `Transfer not found after update: ${transfer.code}`);
+		}
+	} catch (error) {
+		logError("DOWNLOAD_INCREMENT_FAILED", error, `CODE: ${transfer.code}`);
+		throw error;
 	}
 }
 
@@ -669,8 +684,9 @@ router.get("/:code", rateLimitDownload, validateCode, async (req, res, next) => 
 			return res.status(passwordError.status).json(passwordError.body);
 		}
 
-		const senderIp = String(transfer?.senderIp || "").trim();
-		const isSenderRequest = senderIp && senderIp === receiverIp;
+		// FIX: Use validateOwnershipToken instead of IP comparison to determine if this is the sender
+		const isSenderRequest = validateOwnershipToken(transfer, req);
+		logEvent("DOWNLOAD_REQUEST", `CODE: ${code}`, `IS_SENDER: ${isSenderRequest}`, `IP: ${receiverIp}`);
 
 		if (!isSenderRequest) {
 			emitToRoom(code, "download-started", { receiverDevice });
@@ -713,6 +729,7 @@ router.get("/:code", rateLimitDownload, validateCode, async (req, res, next) => 
 		const downloadSpeed = Math.round(streamedBytes / (downloadDuration / 1000));
 
 		if (!isSenderRequest) {
+			logEvent("DOWNLOAD_INCREMENT_START", `CODE: ${code}`, `IS_SENDER: false`, `RECEIVER_IP: ${receiverIp}`);
 			await finalizeDownload(transfer, {
 				isBurnFlow,
 				claimedNow,
@@ -721,6 +738,7 @@ router.get("/:code", rateLimitDownload, validateCode, async (req, res, next) => 
 				receiverDevice,
 				receiverIp,
 			});
+			logEvent("DOWNLOAD_INCREMENT_SUCCESS", `CODE: ${code}`, `DOWNLOAD_COUNT_SHOULD_INCREMENT: true`);
 			recordDownload(Number(streamedBytes || 0));
 
 			const receipt = buildTransferReceipt({
@@ -737,6 +755,8 @@ router.get("/:code", rateLimitDownload, validateCode, async (req, res, next) => 
 			emitToRoom(code, "transfer-receipt", receipt);
 			emitToRoom(code, "activity-updated");
 			logEvent("Download completed", `CODE: ${code}`, `DEVICE: ${receiverDevice}`);
+		} else {
+			logEvent("Download completed (sender preview)", `CODE: ${code}`, `DEVICE: ${receiverDevice}`, `DOWNLOAD_COUNT_NOT_INCREMENTED: true`);
 		}
 		return null;
 	} catch (error) {
@@ -765,8 +785,9 @@ router.get("/:code/single/:index", rateLimitDownload, validateCode, async (req, 
 			return res.status(passwordError.status).json(passwordError.body);
 		}
 
-		const senderIp = String(transfer?.senderIp || "").trim();
-		const isSenderRequest = senderIp && senderIp === receiverIp;
+		// FIX: Use validateOwnershipToken instead of IP comparison to determine if this is the sender
+		const isSenderRequest = validateOwnershipToken(transfer, req);
+		logEvent("DOWNLOAD_SINGLE_REQUEST", `CODE: ${code}`, `IS_SENDER: ${isSenderRequest}`, `IP: ${receiverIp}`);
 
 		if (!isSenderRequest) {
 			emitToRoom(code, "download-started", { receiverDevice });
@@ -803,6 +824,7 @@ router.get("/:code/single/:index", rateLimitDownload, validateCode, async (req, 
 		const downloadSpeed = Math.round(streamedBytes / (downloadDuration / 1000));
 
 		if (!isSenderRequest) {
+			logEvent("DOWNLOAD_INCREMENT_START", `CODE: ${code}`, `IS_SENDER: false`, `MODE: single`, `RECEIVER_IP: ${receiverIp}`);
 			await finalizeDownload(transfer, {
 				isBurnFlow,
 				claimedNow,
@@ -811,6 +833,7 @@ router.get("/:code/single/:index", rateLimitDownload, validateCode, async (req, 
 				receiverDevice,
 				receiverIp,
 			});
+			logEvent("DOWNLOAD_INCREMENT_SUCCESS", `CODE: ${code}`, `DOWNLOAD_COUNT_SHOULD_INCREMENT: true`, `MODE: single`);
 			recordDownload(Number(streamedBytes || 0));
 
 			const receipt = buildTransferReceipt({
@@ -827,6 +850,8 @@ router.get("/:code/single/:index", rateLimitDownload, validateCode, async (req, 
 			emitToRoom(code, "transfer-receipt", receipt);
 			emitToRoom(code, "activity-updated");
 			logEvent("Download completed", `CODE: ${code}`, `DEVICE: ${receiverDevice}`, "MODE: single");
+		} else {
+			logEvent("Download completed (sender preview)", `CODE: ${code}`, `DEVICE: ${receiverDevice}`, `MODE: single`, `DOWNLOAD_COUNT_NOT_INCREMENTED: true`);
 		}
 		return null;
 	} catch (error) {
