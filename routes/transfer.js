@@ -203,7 +203,7 @@ router.get("/:code/status", validateCode, async (req, res, next) => {
 
 		const transfer = await Transfer.findOne(
 			{ code },
-			{ code: 1, isDeleted: 1, cancelledAt: 1, burnAfterDownload: 1, claimantToken: 1, burnClaimOwner: 1, expiresAt: 1, downloadCount: 1 }
+			{ code: 1, isDeleted: 1, cancelledAt: 1, burnAfterDownload: 1, claimantToken: 1, burnClaimOwner: 1, expiresAt: 1, downloadCount: 1, viewCount: 1 }
 		).lean();
 
 		if (!transfer) {
@@ -218,6 +218,7 @@ router.get("/:code/status", validateCode, async (req, res, next) => {
 			code: transfer.code,
 			status: getTransferStatus(transfer),
 			downloadCount: Number(transfer.downloadCount || 0),
+			viewCount: Number(transfer.viewCount || 0),
 			expiresAt: transfer.expiresAt,
 			secondsRemaining,
 			serverTime: Date.now(), // Add server time for sync

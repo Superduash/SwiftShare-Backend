@@ -105,11 +105,16 @@ router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => 
 			? Math.max(0, Math.ceil((new Date(transfer.expiresAt).getTime() - Date.now()) / 1000))
 			: 0;
 
+		let currentViewCount = Number(transfer.viewCount || 0);
+		let currentDownloadCount = Number(transfer.downloadCount || 0);
+
+		const isSender = validateOwnershipToken(transfer, req);
 		const viewerFingerprint = getRequestFingerprint(req);
-		if (shouldRecordView(code, viewerFingerprint)) {
-			await Transfer.updateOne(
+		if (!isSender && shouldRecordView(code, viewerFingerprint)) {
+			const updatedTransfer = await Transfer.findOneAndUpdate(
 				{ code },
 				{
+					$inc: { viewCount: 1 },
 					$push: {
 						activity: {
 							$each: [{
@@ -122,7 +127,18 @@ router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => 
 						},
 					},
 				},
-			);
+				{ new: true, projection: { code: 1, viewCount: 1, downloadCount: 1 } }
+			).lean();
+
+			if (updatedTransfer) {
+				currentViewCount = Number(updatedTransfer.viewCount || 0);
+				currentDownloadCount = Number(updatedTransfer.downloadCount || 0);
+				emitToRoom(code, "stats-updated", {
+					code: updatedTransfer.code,
+					viewCount: currentViewCount,
+					downloadCount: currentDownloadCount,
+				});
+			}
 
 			emitToRoom(code, "activity-updated", { code, event: "viewed" });
 		}
@@ -219,6 +235,8 @@ router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => 
 			burnAfterDownload: transfer.burnAfterDownload,
 			senderDeviceName: transfer.senderDeviceName,
 			text: textPayload,
+			viewCount: currentViewCount,
+			downloadCount: currentDownloadCount,
 		});
 	} catch (error) {
 		return next(error);

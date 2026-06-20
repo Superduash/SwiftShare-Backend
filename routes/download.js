@@ -558,8 +558,9 @@ async function finalizeDownload(transfer, {
 	receiverDevice,
 	receiverIp,
 }) {
+	let updatedTransfer;
 	if (isBurnFlow) {
-		await Transfer.updateOne(
+		updatedTransfer = await Transfer.findOneAndUpdate(
 			{ _id: transfer._id },
 			{
 				$inc: { downloadCount: 1 },
@@ -594,29 +595,37 @@ async function finalizeDownload(transfer, {
 						},
 				},
 			},
-		);
-
-		return;
-	}
-
-	await Transfer.updateOne(
-		{ _id: transfer._id },
-		{
-			$inc: { downloadCount: 1 },
-			$set: {
-				downloadDuration,
-				downloadSpeed,
-			},
-			$push: {
-				activity: {
-					event: "downloaded",
-					device: receiverDevice,
-					ip: receiverIp,
-					timestamp: new Date(),
+			{ new: true, projection: { code: 1, downloadCount: 1, viewCount: 1 } }
+		).lean();
+	} else {
+		updatedTransfer = await Transfer.findOneAndUpdate(
+			{ _id: transfer._id },
+			{
+				$inc: { downloadCount: 1 },
+				$set: {
+					downloadDuration,
+					downloadSpeed,
+				},
+				$push: {
+					activity: {
+						event: "downloaded",
+						device: receiverDevice,
+						ip: receiverIp,
+						timestamp: new Date(),
+					},
 				},
 			},
-		},
-	);
+			{ new: true, projection: { code: 1, downloadCount: 1, viewCount: 1 } }
+		).lean();
+	}
+
+	if (updatedTransfer) {
+		emitToRoom(transfer.code, "stats-updated", {
+			code: transfer.code,
+			viewCount: Number(updatedTransfer.viewCount || 0),
+			downloadCount: Number(updatedTransfer.downloadCount || 0),
+		});
+	}
 }
 
 function buildTransferReceipt({
