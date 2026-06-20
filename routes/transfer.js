@@ -234,21 +234,31 @@ router.get("/:code/status", validateCode, async (req, res, next) => {
 router.get("/:code/verify-ownership", validateCode, async (req, res, next) => {
 	try {
 		const { code } = req.params;
+		const providedToken = req.headers['x-ownership-token'] || req.body?.ownershipToken || '';
+		
+		logEvent("VERIFY_OWNERSHIP_REQUEST", `CODE: ${code}`, `TOKEN_PROVIDED: ${providedToken ? 'yes' : 'no'}`, `TOKEN_LENGTH: ${String(providedToken).length}`);
+		
 		const transfer = await Transfer.findOne(
 			{ code },
 			{ _id: 1, code: 1, ownershipToken: 1 }
 		).lean();
 
 		if (!transfer) {
+			logEvent("VERIFY_OWNERSHIP_ERROR", `CODE: ${code}`, `REASON: Transfer not found in DB`);
 			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
 		}
 
+		logEvent("VERIFY_OWNERSHIP_FOUND", `CODE: ${code}`, `STORED_TOKEN_EXISTS: ${transfer.ownershipToken ? 'yes' : 'no'}`);
+
 		if (validateOwnershipToken(transfer, req)) {
+			logEvent("VERIFY_OWNERSHIP_SUCCESS", `CODE: ${code}`);
 			return res.status(200).json({ authorized: true });
 		}
 
+		logEvent("VERIFY_OWNERSHIP_FAILED", `CODE: ${code}`, `REASON: Token mismatch`);
 		return res.status(403).json(buildErrorResponse(ERROR_CODES.UNAUTHORIZED, "Invalid ownership token"));
 	} catch (error) {
+		logError("VERIFY_OWNERSHIP_ERROR", error, `CODE: ${req.params?.code || ""}`);
 		return next(error);
 	}
 });
