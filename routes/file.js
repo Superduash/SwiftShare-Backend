@@ -235,7 +235,7 @@ router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => 
 
 		return res.status(200).json({
 			code: transfer.code,
-			status: getTransferStatus(transfer),
+			status: (transfer.burnAfterDownload && !validateOwnershipToken(transfer, req) && isBurnClaimOwner(transfer, req)) ? "ACTIVE" : getTransferStatus(transfer),
 			passwordProtected: Boolean(transfer.passwordProtected),
 			files: (transfer.files || []).map((file) => ({
 				name: file.originalName,
