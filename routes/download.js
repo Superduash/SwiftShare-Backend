@@ -26,12 +26,7 @@ const { recordDownload } = require("../utils/performance");
 
 const router = express.Router();
 
-// GET-only streaming routes (download, single-download, preview) can't receive
-// custom headers — <img src>, <video src>, and window.location.href navigations
-// never send them. This accepts the ownership token via query string ONLY for
-// these read-only routes, mirroring the existing pattern already used for
-// `password` and `claimantToken` on the same routes. Never use this for POST
-// extend/delete — those stay strictly header/body-only via validateOwnershipToken.
+// Allow ownership token via query string for streaming routes.
 function isOwnerViaQuery(transfer, req) {
 	if (validateOwnershipToken(transfer, req)) return true; // header/body path still wins first
 	
@@ -60,7 +55,6 @@ function sendUnavailableTransferResponse(req, res, transfer) {
 		return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
 	}
 
-	// FIX: Use query-aware check for streaming routes
 	const isSenderRequest = isOwnerViaQuery(transfer, req);
 
 	if (transfer.burnAfterDownload && (transfer.claimantToken || transfer.burnClaimOwner) && !isSenderRequest && !isBurnClaimOwner(transfer, req)) {
@@ -89,7 +83,6 @@ async function getPasswordErrorResponse(req, transfer) {
 		return null;
 	}
 
-	// FIX: Use query-aware check for streaming routes
 	if (isOwnerViaQuery(transfer, req)) {
 		return null;
 	}
@@ -300,7 +293,7 @@ function applyPreviewEmbedHeaders(req, res) {
 	res.setHeader("X-Frame-Options", "ALLOWALL");
 	res.setHeader("Content-Security-Policy", `frame-ancestors ${getPreviewFrameAncestors(req)};`);
 	res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
-	// Allow cross-origin requests from any origin (needed for <audio>/<video> crossOrigin="anonymous")
+	// Allow cross-origin preview requests.
 	res.setHeader("Access-Control-Allow-Origin", "*");
 	res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
 	res.setHeader("Access-Control-Allow-Headers", "Range, x-transfer-password");
@@ -374,8 +367,7 @@ function parseRangeHeader(rangeHeader, totalBytes) {
 	};
 }
 
-// Throttle download-progress emits identically to upload — see upload.js rationale.
-// Smoothed to 100ms (10fps) for fluid UI updates on fast connections.
+// Throttle progress events to prevent socket spam.
 const DOWNLOAD_PROGRESS_EMIT_INTERVAL_MS = 100;
 
 async function streamSingleFile(res, file, code) {
@@ -433,10 +425,7 @@ async function streamSingleFile(res, file, code) {
 		}
 	});
 
-	// If the client disconnects mid-download, destroy the upstream R2 stream so we
-	// don't leak the TCP connection to Cloudflare. Without this the socket would
-	// stay open until the OS-level idle timeout — minutes of wasted resources per
-	// abandoned download on Render's tight pool.
+	// Cleanup upstream R2 stream on client disconnect.
 	const onClientClose = () => {
 		try { stream.destroy(); } catch { /* already destroyed */ }
 	};
@@ -465,7 +454,7 @@ async function streamZip(res, code, files) {
 	let lastSpeedCalcAt = streamStartTime;
 	let lastSpeedCalcBytes = 0;
 
-	res.setHeader("x-no-compression", "true"); // Prevent CPU overhead on heavy zip streams
+	res.setHeader("x-no-compression", "true"); // Prevent compression overhead.
 
 	await streamZipFromR2({
 		code,
@@ -707,7 +696,6 @@ router.get("/:code", rateLimitDownload, validateCode, async (req, res, next) => 
 			return res.status(passwordError.status).json(passwordError.body);
 		}
 
-		// FIX: Use validateOwnershipToken instead of IP comparison to determine if this is the sender
 		const isSenderRequest = validateOwnershipToken(transfer, req);
 		logEvent("DOWNLOAD_REQUEST", `CODE: ${code}`, `IS_SENDER: ${isSenderRequest}`, `IP: ${receiverIp}`);
 
@@ -808,7 +796,6 @@ router.get("/:code/single/:index", rateLimitDownload, validateCode, async (req, 
 			return res.status(passwordError.status).json(passwordError.body);
 		}
 
-		// FIX: Use validateOwnershipToken instead of IP comparison to determine if this is the sender
 		const isSenderRequest = validateOwnershipToken(transfer, req);
 		logEvent("DOWNLOAD_SINGLE_REQUEST", `CODE: ${code}`, `IS_SENDER: ${isSenderRequest}`, `IP: ${receiverIp}`);
 
@@ -886,10 +873,7 @@ router.get("/:code/single/:index", rateLimitDownload, validateCode, async (req, 
 	}
 });
 
-// Respond to CORS preflight for the preview/stream endpoint immediately.
-// The global cors() middleware handles the Origin check, but media players need
-// Range in Access-Control-Allow-Headers — this makes it explicit and avoids
-// a DB round-trip on every preflight fired by browsers on cross-origin deployments.
+// Handle CORS preflight for media players to avoid DB queries.
 router.options("/:code/preview/:index", (req, res) => {
 	res.setHeader("Access-Control-Allow-Origin", "*");
 	res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
@@ -899,7 +883,7 @@ router.options("/:code/preview/:index", (req, res) => {
 	res.sendStatus(204);
 });
 
-// HEAD handler for media preview - browsers send HEAD before GET to verify MIME type
+// HEAD handler for media preview.
 router.head("/:code/preview/:index", validateCode, async (req, res, next) => {
 	try {
 		const { code, index } = req.params;
@@ -941,7 +925,7 @@ router.head("/:code/preview/:index", validateCode, async (req, res, next) => {
 		if (isMediaContentType) {
 			res.removeHeader("Content-Security-Policy");
 			res.removeHeader("X-Content-Type-Options");
-			res.removeHeader("Content-Encoding"); // Critical: Remove any encoding
+			res.removeHeader("Content-Encoding");
 			res.setHeader("Cache-Control", "public, max-age=3600, immutable");
 			res.setHeader("Timing-Allow-Origin", "*");
 		} else {
@@ -1021,7 +1005,7 @@ router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 		if (isMediaContentType) {
 			res.removeHeader("Content-Security-Policy");
 			res.removeHeader("X-Content-Type-Options");
-			res.removeHeader("Content-Encoding"); // Critical: Remove any encoding that might break media
+			res.removeHeader("Content-Encoding");
 			res.setHeader("Cache-Control", "public, max-age=3600, immutable");
 			res.setHeader("Timing-Allow-Origin", "*");
 			res.setHeader("Content-Encoding", "identity");

@@ -13,17 +13,14 @@ const { logError } = require("../utils/logger");
 const router = express.Router();
 
 router.use((req, res, next) => {
-	// File streams set their own cache headers; only apply to metadata routes
+	// Prevent metadata route caching.
 	if (req.method === 'GET' && (req.path === '/' || /^\/?[A-Za-z0-9]{6}\/?$/.test(req.path))) {
 		res.setHeader('Cache-Control', 'no-store');
 	}
 	next();
 });
 
-// Throttle "viewed" activity writes per (code,fingerprint). Without this, a polling
-// frontend (e.g. status refresh every few seconds) would push a viewed event on every
-// GET — bloating activity[] and killing write throughput. 30s is short enough to
-// capture distinct viewers, long enough to suppress polls.
+// Deduplicate views to avoid activity log bloat from polling.
 const VIEW_DEDUPE_WINDOW_MS = Number(process.env.VIEW_DEDUPE_WINDOW_MS) > 0
 	? Number(process.env.VIEW_DEDUPE_WINDOW_MS)
 	: 30_000;
@@ -35,7 +32,7 @@ function shouldRecordView(code, fingerprint) {
 	const expiresAt = recentViews.get(key);
 	if (expiresAt && expiresAt > now) return false;
 	recentViews.set(key, now + VIEW_DEDUPE_WINDOW_MS);
-	// Periodic prune to keep map bounded — runs whenever the map exceeds 5k entries.
+	// Periodic cleanup to cap map size.
 	if (recentViews.size > 5000) {
 		for (const [k, exp] of recentViews) {
 			if (exp <= now) recentViews.delete(k);
@@ -49,7 +46,7 @@ function isBurnLockedForRequester(transfer, req) {
 		return false;
 	}
 
-	// FIX: Use validateOwnershipToken instead of IP comparison - sender should always have access
+	// Senders bypass burn restrictions.
 	if (validateOwnershipToken(transfer, req)) {
 		return false;
 	}
@@ -67,9 +64,8 @@ router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => 
 		}
 
 		if (transfer.isDeleted) {
-			// FIX: Return specific state for consumed burn transfers
+			// Handle burned transfers.
 			if (transfer.burnAfterDownload && !transfer.cancelledAt) {
-				// Check if this user was the claimant
 				if (isBurnClaimOwner(transfer, req)) {
 					return res.status(200).json({
 						code: transfer.code,
@@ -83,18 +79,20 @@ router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => 
 			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
 		}
 
-		// FIX: Return CLAIMED state with proper access control
+		// Block access if another claimant is active.
 		if (isBurnLockedForRequester(transfer, req)) {
 			return res.status(200).json({
 				code: transfer.code,
 				status: "CLAIMED",
 				burnAfterDownload: true,
 				message: "This transfer was claimed by another device",
+				files: [],
+				totalSize: 0,
+				fileCount: 0,
 			});
 		}
 
 		if (isTransferExpired(transfer)) {
-			// Expired transfers return metadata as read-only with status
 			const expiredFiles = (transfer.files || []).map((file) => ({
 				name: file.originalName,
 				size: file.size,
@@ -159,17 +157,12 @@ router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => 
 			emitToRoom(code, "activity-updated", { code, event: "viewed" });
 		}
 
-		// If this is a single-file text share, attempt to include the text content
-		// directly in the metadata response to avoid an extra round-trip from the
-		// frontend. Only include when allowed (not deleted/expired) and when the
-		// requester either doesn't need a password or has supplied a valid one.
+		// Inline small text shares to save a round-trip.
 		let textPayload = null;
 		try {
 			if (transfer.files && transfer.files.length === 1 && transfer.files[0].originalName.endsWith('.txt')) {
 				const file = transfer.files[0];
-				// Prefer inline content stored in the DB (written at share time), but
-				// respect password protection: only include inline content if the
-				// transfer is not password-protected or the correct password is supplied.
+				// Decrypt inline content if password validation passes.
 				if (file.inlineContent) {
 					let allowedInline = true;
 					if (transfer.passwordProtected) {
@@ -211,7 +204,7 @@ router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => 
 									const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
 									total += buf.length;
 									chunks.push(buf);
-									// Safety cap: avoid returning huge text blocks in metadata
+									// Cap size of inlined text.
 									if (total > 256 * 1024) { // 256KB
 										break;
 									}
@@ -301,7 +294,7 @@ router.get("/:code/text", validateCode, async (req, res, next) => {
 			}
 		}
 
-		// Fetch text content from either inline DB field (preferred) or R2
+		// Retrieve text content.
 		const file = transfer.files[0];
 		if (file.inlineContent) {
 			return res.status(200).json({

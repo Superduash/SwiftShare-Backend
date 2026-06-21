@@ -43,7 +43,7 @@ const HEALTH_CHECK_TIMEOUT_MS = Number(process.env.HEALTH_CHECK_TIMEOUT_MS) > 0 
 
 let healthCache = { expiresAt: 0, payload: null };
 
-// ── CORS helpers ──────────────────────────────────────────────────────────────
+
 
 function normalizeConfiguredOrigin(origin) {
 	const trimmed = String(origin || "").trim();
@@ -114,8 +114,7 @@ function getAllowedFrontendOrigins() {
 
 const allowedFrontendOrigins = getAllowedFrontendOrigins();
 
-// Hosting platform suffixes — any subdomain on these is always allowed
-// because preview deploys and branch deploys share these TLDs.
+// subdomains of hosting platforms are always allowed.
 const ALWAYS_ALLOWED_PLATFORM_SUFFIXES = [
 	"netlify.app",
 	"onrender.com",
@@ -155,7 +154,7 @@ function corsOrigin(origin, callback) {
 	callback(null, false);
 }
 
-// ── Middleware stack ──────────────────────────────────────────────────────────
+
 
 app.set("trust proxy", 1);
 
@@ -170,7 +169,7 @@ app.use(compression({
 	},
 }));
 
-// Attach a unique request ID to every request for log correlation
+// Set request ID for trace correlation.
 app.use((req, res, next) => {
 	req.requestId = crypto.randomUUID();
 	res.setHeader("X-Request-ID", req.requestId);
@@ -180,8 +179,7 @@ app.use((req, res, next) => {
 app.use(cors({
 	origin: corsOrigin,
 	maxAge: 86400,
-	// Range must be in allowedHeaders so CORS preflight for media streaming succeeds
-	// on cross-origin deployments (e.g. Vercel frontend → Railway backend).
+	// Allow Range headers for media preflights.
 	allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Range', 'x-transfer-password', 'X-Ownership-Token', 'X-Claimant-Token'],
 	exposedHeaders: ['Content-Range', 'Content-Length', 'Accept-Ranges', 'X-Request-ID'],
 }));
@@ -229,7 +227,7 @@ app.use(morgan((tokens, req, res) => {
 
 app.use(express.json({ limit: "1mb" }));
 
-// Per-request timeout — upload/download routes get a longer window
+// Route timeout config.
 app.use((req, res, next) => {
 	const isUploadOrDownload = /^\/(api\/(upload|download))/i.test(req.path);
 	const defaultUploadTimeoutMs = process.env.RENDER ? 600000 : 600000;
@@ -258,11 +256,11 @@ app.use(sentryRequestHandler || ((req, res, next) => next()));
 
 app.use(createTimingMiddleware());
 
-// ── Routes ────────────────────────────────────────────────────────────────────
+
 
 app.get("/api/ping", (req, res) => {
 	if (res.headersSent) return;
-	// Always respond immediately - don't wait for MongoDB
+	// Always respond immediately.
 	res.status(200).json({ pong: true, timestamp: Date.now() });
 });
 
@@ -305,7 +303,7 @@ app.use("/api/nearby", nearbyRoutes);
 app.use("/api/stats", statsRoutes);
 app.use("/api/text", textRoutes);
 
-// ── Health check ──────────────────────────────────────────────────────────────
+
 
 function getMongoStatus() {
 	return mongoose.connection.readyState === 1 ? "connected" : "disconnected";
@@ -329,7 +327,6 @@ async function withTimeout(promise, timeoutMs, fallbackValue) {
 			}),
 		]);
 	} catch (error) {
-		// If promise rejects, return fallback instead of throwing
 		return fallbackValue;
 	} finally {
 		if (timerId) clearTimeout(timerId);
@@ -354,7 +351,7 @@ app.get("/api/health", async (req, res) => {
 		const isStale = !healthCache.payload || healthCache.expiresAt <= Date.now();
 
 		const runHealthCheck = async () => {
-			if (isHealthCheckRunning) return healthCache.payload; // Prevent stampede
+			if (isHealthCheckRunning) return healthCache.payload;
 			isHealthCheckRunning = true;
 			try {
 				const now = new Date();
@@ -385,8 +382,8 @@ app.get("/api/health", async (req, res) => {
 		};
 
 		if (healthCache.payload) {
-			if (isStale) runHealthCheck(); // Trigger background refresh
-			return res.json(healthCache.payload); // Instantly return stale data
+			if (isStale) runHealthCheck();
+			return res.json(healthCache.payload);
 		}
 
 		// First ever load: must wait
@@ -418,15 +415,13 @@ app.use((req, res) => {
 	res.status(404).json(resp);
 });
 
-// Only install Sentry's error handler when Sentry was actually initialized.
-// getClient() returns undefined if Sentry.init() was never called — the DSN check
-// alone isn't sufficient when express is required before instrument.js can fully init.
+// Use Sentry error handler if initialized.
 if (process.env.SENTRY_DSN && typeof Sentry.getClient === "function" && Sentry.getClient()) {
 	Sentry.setupExpressErrorHandler(app);
 }
 app.use(errorHandler);
 
-// ── Startup ───────────────────────────────────────────────────────────────────
+
 
 async function restoreActiveCountdowns() {
 	if (!isMongoReady()) {
@@ -447,7 +442,7 @@ async function restoreActiveCountdowns() {
 
 function connectMongoWithRetry() {
 	const isProduction = String(process.env.NODE_ENV || "").toLowerCase() === "production";
-	// Fast retries in dev (1s), slower in production (5s)
+	// Retries delay
 	const retryDelayMs = isProduction ? 5000 : 1000;
 	let hasConnected = false;
 	let hasAttempted = false;
@@ -519,7 +514,7 @@ function startServer() {
 		startCleanupJob();
 		printStartupStatus(port, host);
 
-		// Self-ping to prevent free tier cold starts
+		// Prevent free tier sleep.
 		const externalUrl = process.env.RENDER_EXTERNAL_URL;
 		if (externalUrl) {
 			const PING_INTERVAL_MS = 14 * 60 * 1000;
@@ -564,8 +559,7 @@ function startServer() {
 				schedulePing(PING_INTERVAL_MS);
 			}
 
-			// First ping fires 30s after start rather than 14 min — catches any missed
-			// initial warmup window on fresh deploys without hammering on boot.
+			// Warmup ping on startup.
 			schedulePing(30_000);
 			logSuccess(`Keep-alive active — pinging ${externalUrl}/api/ping every 14m`);
 		}
@@ -633,8 +627,7 @@ module.exports = {
 	isPlatformDeployOrigin 
 };
 
-// Keep Render free tier awake during active sessions (production only, inside server.listen already handles this)
-// Removed duplicate self-ping — handled inside startServer() → server.listen callback above
+
 
 process.on("unhandledRejection", (reason) => {
 	logError("Unhandled promise rejection", reason instanceof Error ? reason : new Error(String(reason)));
@@ -644,7 +637,7 @@ process.on("unhandledRejection", (reason) => {
 process.on("uncaughtException", (error) => {
 	logError("Uncaught exception", error);
 	try { Sentry.captureException(error); } catch { /* sentry optional */ }
-	// Only shut down for truly fatal errors — stream/busboy errors are non-fatal
+	// Ignore non-fatal stream errors.
 	const isStreamError = error?.code === "ERR_STREAM_DESTROYED"
 		|| error?.code === "ECONNRESET"
 		|| error?.code === "EPIPE"
