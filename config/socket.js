@@ -661,10 +661,13 @@ function initSocket(server) {
 				socket.data.claimantCode = normalizedCode;
 				socket.data.claimantToken = claimantToken;
 
+				logEvent("Claimant registered socket", `CODE: ${normalizedCode}`, `SOCKET: ${socket.id}`, `TOKEN: ${claimantToken}`);
+
 				// Cancel any existing grace period destruction timer
 				if (gracePeriodTimers.has(normalizedCode)) {
 					clearTimeout(gracePeriodTimers.get(normalizedCode));
 					gracePeriodTimers.delete(normalizedCode);
+					logEvent("Claimant socket reconnected, cancelled grace period", `CODE: ${normalizedCode}`, `TOKEN: ${claimantToken}`);
 				}
 
 				safeAck(ack, { ok: true, code: normalizedCode, socketId: socket.id });
@@ -758,6 +761,7 @@ function initSocket(server) {
 					}, 15000); // 15 seconds grace period
 					
 					gracePeriodTimers.set(cCode, timer);
+					logEvent("Claimant socket disconnected, started grace period", `CODE: ${cCode}`, `TOKEN: ${cToken}`);
 				}
 				
 				logEvent("Socket disconnected", `SOCKET: ${socket.id}`, `REASON: ${reason}`);

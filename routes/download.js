@@ -516,13 +516,15 @@ async function claimBurnDownload(transfer, req) {
 				burnAfterDownload: true,
 			},
 			{ $set: { burnLastActiveAt: now } },
-			{ new: true },
+			{ returnDocument: 'after' },
 		).lean();
 
+		logEvent("Burn download requested by existing claim owner", `CODE: ${transfer.code}`, `TOKEN: ${providedToken || "empty"}`);
 		return { transfer: ownedTransfer, claimedNow: false };
 	}
 
 	if (transfer.claimantToken || transfer.burnClaimOwner) {
+		logEvent("Burn claim request denied — already claimed by another owner", `CODE: ${transfer.code}`, `PROVIDED_TOKEN: ${providedToken || "empty"}`);
 		return { transfer: null, claimedNow: false };
 	}
 
@@ -545,7 +547,7 @@ async function claimBurnDownload(transfer, req) {
 				burnLastActiveAt: now,
 			},
 		},
-		{ new: true },
+		{ returnDocument: 'after' },
 	).lean();
 
 	if (claimedTransfer) {
@@ -560,7 +562,7 @@ async function claimBurnDownload(transfer, req) {
 			claimantToken: providedToken,
 		},
 		{ $set: { burnLastActiveAt: now } },
-		{ new: true },
+		{ returnDocument: 'after' },
 	).lean();
 
 	return { transfer: ownerTransfer, claimedNow: false };
@@ -717,6 +719,7 @@ router.get("/:code", rateLimitDownload, validateCode, async (req, res, next) => 
 			claimedNow = Boolean(burnClaim.claimedNow);
 			isBurnFlow = true;
 			if (claimedNow) {
+				logEvent("Burn session claimed", `CODE: ${code}`, `CLAIMANT_TOKEN: ${transfer.claimantToken}`, `FINGERPRINT: ${transfer.burnClaimOwner}`);
 				emitToRoom(code, "transfer-claimed", { code, status: "CLAIMED", claimantToken: transfer.claimantToken });
 			}
 		}
@@ -814,6 +817,7 @@ router.get("/:code/single/:index", rateLimitDownload, validateCode, async (req, 
 			isBurnFlow = true;
 
 			if (claimedNow) {
+				logEvent("Burn session claimed", `CODE: ${code}`, `CLAIMANT_TOKEN: ${transfer.claimantToken}`, `FINGERPRINT: ${transfer.burnClaimOwner}`);
 				emitToRoom(code, "transfer-claimed", { code, status: "CLAIMED", claimantToken: transfer.claimantToken });
 			}
 		}

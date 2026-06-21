@@ -39,7 +39,7 @@ function validateOwnershipToken(transfer, req) {
   if (provided.length !== stored.length) return false;
   try {
     return crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(stored));
-  } catch {
+  } catch (error) {
     return false;
   }
 }
@@ -59,7 +59,7 @@ function parseEnvInt(value, defaultValue, min = 0, max = Infinity) {
 			return defaultValue;
 		}
 		return Math.floor(parsed);
-	} catch {
+	} catch (error) {
 		return defaultValue;
 	}
 }
@@ -77,7 +77,7 @@ function getClientIp(req) {
 		}
 
 		return normalizeIp(req.socket?.remoteAddress || req.ip || "");
-	} catch {
+	} catch (error) {
 		return "127.0.0.1"; // Fallback for any parsing errors
 	}
 }
@@ -127,7 +127,7 @@ function getSubnet(ip) {
 
 		// Return first 3 octets for /24 subnet
 		return `${octets[0]}.${octets[1]}.${octets[2]}`;
-	} catch {
+	} catch (error) {
 		return ""; // Fallback for any parsing errors
 	}
 }
@@ -257,7 +257,7 @@ function getRequestFingerprint(req) {
 			.createHash("sha256")
 			.update(`${ip}|${userAgent}`)
 			.digest("hex");
-	} catch {
+	} catch (error) {
 		// Fallback fingerprint if hashing fails
 		return crypto.randomBytes(16).toString("hex");
 	}
@@ -275,7 +275,7 @@ function isBurnClaimOwner(transfer, req) {
 		providedToken = req;
 	}
 
-	if (transfer.claimantToken && providedToken) {
+	if (transfer.claimantToken) {
 		return transfer.claimantToken === providedToken;
 	}
 

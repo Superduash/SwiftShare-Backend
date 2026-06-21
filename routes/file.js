@@ -181,7 +181,7 @@ router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => 
 						},
 					},
 				},
-				{ new: true, projection: { code: 1, viewCount: 1, downloadCount: 1 } }
+				{ returnDocument: 'after', projection: { code: 1, viewCount: 1, downloadCount: 1 } }
 			).lean();
 
 			if (updatedTransfer) {
