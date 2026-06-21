@@ -41,7 +41,6 @@ function isOwnerViaQuery(transfer, req) {
 	
 	try {
 		const isOwner = crypto.timingSafeEqual(Buffer.from(queryToken), Buffer.from(stored));
-		logEvent("OWNER_VIA_QUERY", `CODE: ${transfer.code}`, `MATCH: ${isOwner}`);
 		return isOwner;
 	} catch {
 		return false;
