@@ -64,6 +64,15 @@ router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => 
 		}
 
 		if (transfer.isDeleted) {
+			if (validateOwnershipToken(transfer, req)) {
+				return res.status(200).json({
+					code: transfer.code,
+					status: transfer.cancelledAt ? "CANCELLED" : "DELETED",
+					burnAfterDownload: transfer.burnAfterDownload,
+					message: "This transfer was deleted or cancelled",
+				});
+			}
+
 			// Handle burned transfers.
 			if (transfer.burnAfterDownload && !transfer.cancelledAt) {
 				if (isBurnClaimOwner(transfer, req)) {
@@ -166,7 +175,7 @@ router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => 
 				if (file.inlineContent) {
 					let allowedInline = true;
 					if (transfer.passwordProtected) {
-						if (!validateOwnershipToken(transfer, req)) {
+						if (!validateOwnershipToken(transfer, req) && !isBurnClaimOwner(transfer, req)) {
 							const providedPassword = req.headers['x-transfer-password'];
 							if (!providedPassword) allowedInline = false;
 							else {
@@ -184,7 +193,7 @@ router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => 
 				} else {
 					let allowed = true;
 					if (transfer.passwordProtected) {
-						if (!validateOwnershipToken(transfer, req)) {
+						if (!validateOwnershipToken(transfer, req) && !isBurnClaimOwner(transfer, req)) {
 							const providedPassword = req.headers['x-transfer-password'];
 							if (!providedPassword) allowed = false;
 							else {
@@ -277,7 +286,7 @@ router.get("/:code/text", validateCode, async (req, res, next) => {
 
 		// Check password if protected
 		if (transfer.passwordProtected) {
-			if (!validateOwnershipToken(transfer, req)) {
+			if (!validateOwnershipToken(transfer, req) && !isBurnClaimOwner(transfer, req)) {
 				const providedPassword = req.headers['x-transfer-password'];
 				if (!providedPassword) {
 					return res.status(401).json(buildErrorResponse(ERROR_CODES.PASSWORD_REQUIRED));

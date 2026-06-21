@@ -87,6 +87,10 @@ async function getPasswordErrorResponse(req, transfer) {
 		return null;
 	}
 
+	if (isBurnClaimOwner(transfer, req)) {
+		return null;
+	}
+
 	if (Number(transfer.passwordAttempts || 0) >= 5) {
 		return {
 			status: 429,
