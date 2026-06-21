@@ -64,41 +64,72 @@ router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => 
 		}
 
 		if (transfer.isDeleted) {
-			if (validateOwnershipToken(transfer, req)) {
+			const isSender = validateOwnershipToken(transfer, req);
+			const isClaimant = transfer.burnAfterDownload && isBurnClaimOwner(transfer, req);
+
+			if (isSender || isClaimant) {
+				const responseStatus = isSender 
+					? (transfer.cancelledAt ? "CANCELLED" : "DELETED")
+					: "CONSUMED";
+				
+				let textPayload = null;
+				if (transfer.files && transfer.files.length === 1 && transfer.files[0].originalName.endsWith('.txt')) {
+					const file = transfer.files[0];
+					if (file.inlineContent) {
+						textPayload = {
+							content: String(file.inlineContent || ''),
+							title: file.originalName.replace(/\.txt$/i, ''),
+						};
+					} else {
+						try {
+							const response = await getObjectFromR2(file.storedKey);
+							const stream = response?.Body || response?.body;
+							if (stream) {
+								const chunks = [];
+								for await (const chunk of stream) {
+									const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+									chunks.push(buf);
+								}
+								textPayload = {
+									content: Buffer.concat(chunks).toString('utf-8'),
+									title: file.originalName.replace(/\.txt$/i, ''),
+								};
+							}
+						} catch {}
+					}
+				}
+
 				return res.status(200).json({
 					code: transfer.code,
-					status: transfer.cancelledAt ? "CANCELLED" : "DELETED",
+					status: responseStatus,
 					burnAfterDownload: transfer.burnAfterDownload,
-					message: "This transfer was deleted or cancelled",
+					message: isSender ? "This transfer was deleted or cancelled" : "This transfer was burned after download",
+					files: (transfer.files || []).map((file) => ({
+						name: file.originalName,
+						size: file.size,
+						type: file.mimeType,
+						icon: file.icon,
+					})),
+					totalSize: transfer.totalSize,
+					fileCount: transfer.fileCount,
+					expiresAt: transfer.expiresAt,
+					createdAt: transfer.createdAt,
+					senderDeviceName: transfer.senderDeviceName,
+					text: textPayload,
 				});
 			}
 
 			// Handle burned transfers.
 			if (transfer.burnAfterDownload && !transfer.cancelledAt) {
-				if (isBurnClaimOwner(transfer, req)) {
-					return res.status(200).json({
-						code: transfer.code,
-						status: "CONSUMED",
-						burnAfterDownload: true,
-						message: "This transfer was burned after download",
-					});
-				}
 				return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
 			}
 			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
 		}
 
-		// Block access if another claimant is active.
+		// Block access if another claimant is active — return an error so
+		// the frontend never receives any file metadata, filenames, or previews.
 		if (isBurnLockedForRequester(transfer, req)) {
-			return res.status(200).json({
-				code: transfer.code,
-				status: "CLAIMED",
-				burnAfterDownload: true,
-				message: "This transfer was claimed by another device",
-				files: [],
-				totalSize: 0,
-				fileCount: 0,
-			});
+			return res.status(423).json(buildErrorResponse(ERROR_CODES.BURN_TRANSFER_CLAIMED));
 		}
 
 		if (isTransferExpired(transfer)) {
@@ -272,7 +303,11 @@ router.get("/:code/text", validateCode, async (req, res, next) => {
 		}
 
 		if (transfer.isDeleted) {
-			return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
+			const isSender = validateOwnershipToken(transfer, req);
+			const isClaimant = transfer.burnAfterDownload && isBurnClaimOwner(transfer, req);
+			if (!isSender && !isClaimant) {
+				return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
+			}
 		}
 
 		if (isTransferExpired(transfer)) {

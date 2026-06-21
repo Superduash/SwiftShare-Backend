@@ -1,4 +1,4 @@
-﻿const rawMaxFileSizeMb = Number(process.env.MAX_FILE_SIZE_MB);
+const rawMaxFileSizeMb = Number(process.env.MAX_FILE_SIZE_MB);
 const rawMaxFileCount = Number(process.env.MAX_FILE_COUNT);
 
 const MAX_FILE_SIZE_MB = Number.isFinite(rawMaxFileSizeMb) && rawMaxFileSizeMb > 0
@@ -18,6 +18,7 @@ const ERROR_CODES = {
 	TRANSFER_NOT_FOUND: "TRANSFER_NOT_FOUND",
 	TRANSFER_EXPIRED: "TRANSFER_EXPIRED",
 	ALREADY_DOWNLOADED: "ALREADY_DOWNLOADED",
+	BURN_TRANSFER_CLAIMED: "BURN_TRANSFER_CLAIMED",
 	PASSWORD_REQUIRED: "PASSWORD_REQUIRED",
 	INVALID_PASSWORD: "INVALID_PASSWORD",
 	REQUEST_TIMEOUT: "REQUEST_TIMEOUT",
@@ -39,6 +40,7 @@ const ERROR_MESSAGES = {
 	[ERROR_CODES.TRANSFER_NOT_FOUND]: "Transfer not found",
 	[ERROR_CODES.TRANSFER_EXPIRED]: "Transfer has expired",
 	[ERROR_CODES.ALREADY_DOWNLOADED]: "Transfer already downloaded",
+	[ERROR_CODES.BURN_TRANSFER_CLAIMED]: "This burn transfer has already been claimed",
 	[ERROR_CODES.PASSWORD_REQUIRED]: "Password is required",
 	[ERROR_CODES.INVALID_PASSWORD]: "Invalid password",
 	[ERROR_CODES.REQUEST_TIMEOUT]: "Request timed out",
