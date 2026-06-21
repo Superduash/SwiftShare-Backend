@@ -634,7 +634,7 @@ function initSocket(server) {
 			try {
 				// We update it if it exists and matches, but we don't block if it hasn't been claimed yet.
 				// This allows the socket to register its intended token before the actual download claim occurs.
-				await Transfer.updateOne(
+				const result = await Transfer.updateOne(
 					{
 						code: normalizedCode,
 						$or: [
@@ -646,6 +646,17 @@ function initSocket(server) {
 					},
 					{ $set: { claimantSocketId: socket.id } },
 				);
+
+				// If it wasn't matched, it means either the transfer doesn't exist 
+				// or it's claimed by a different token.
+				if (result.matchedCount === 0) {
+					const exists = await Transfer.exists({ code: normalizedCode });
+					if (exists) {
+						// It exists but is claimed by someone else
+						safeAck(ack, { ok: false, error: "already_claimed" });
+						return;
+					}
+				}
 
 				socket.data.claimantCode = normalizedCode;
 				socket.data.claimantToken = claimantToken;
