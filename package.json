@@ -1,6 +1,6 @@
 {
   "name": "swiftshare-backend",
-  "version": "0.7.5",
+  "version": "0.7.6",
   "private": true,
   "main": "server.js",
   "engines": {
