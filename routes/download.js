@@ -701,8 +701,6 @@ router.get("/:code", rateLimitDownload, validateCode, async (req, res, next) => 
 		}
 
 		const isSenderRequest = validateOwnershipToken(transfer, req);
-		logEvent("DOWNLOAD_REQUEST", `CODE: ${code}`, `IS_SENDER: ${isSenderRequest}`, `IP: ${receiverIp}`);
-
 		if (!isSenderRequest) {
 			emitToRoom(code, "download-started", { receiverDevice });
 			logEvent("Download started", `CODE: ${code}`, `DEVICE: ${receiverDevice}`);
@@ -744,7 +742,6 @@ router.get("/:code", rateLimitDownload, validateCode, async (req, res, next) => 
 		const downloadSpeed = Math.round(streamedBytes / (downloadDuration / 1000));
 
 		if (!isSenderRequest) {
-			logEvent("DOWNLOAD_INCREMENT_START", `CODE: ${code}`, `IS_SENDER: false`, `RECEIVER_IP: ${receiverIp}`);
 			await finalizeDownload(transfer, {
 				isBurnFlow,
 				claimedNow,
@@ -753,7 +750,6 @@ router.get("/:code", rateLimitDownload, validateCode, async (req, res, next) => 
 				receiverDevice,
 				receiverIp,
 			});
-			logEvent("DOWNLOAD_INCREMENT_SUCCESS", `CODE: ${code}`, `DOWNLOAD_COUNT_SHOULD_INCREMENT: true`);
 			recordDownload(Number(streamedBytes || 0));
 
 			const receipt = buildTransferReceipt({
@@ -801,11 +797,9 @@ router.get("/:code/single/:index", rateLimitDownload, validateCode, async (req, 
 		}
 
 		const isSenderRequest = validateOwnershipToken(transfer, req);
-		logEvent("DOWNLOAD_SINGLE_REQUEST", `CODE: ${code}`, `IS_SENDER: ${isSenderRequest}`, `IP: ${receiverIp}`);
 
 		if (!isSenderRequest) {
 			emitToRoom(code, "download-started", { receiverDevice });
-			logEvent("Download started", `CODE: ${code}`, `DEVICE: ${receiverDevice}`, "MODE: single");
 		}
 
 		let isBurnFlow = false;
@@ -838,7 +832,6 @@ router.get("/:code/single/:index", rateLimitDownload, validateCode, async (req, 
 		const downloadSpeed = Math.round(streamedBytes / (downloadDuration / 1000));
 
 		if (!isSenderRequest) {
-			logEvent("DOWNLOAD_INCREMENT_START", `CODE: ${code}`, `IS_SENDER: false`, `MODE: single`, `RECEIVER_IP: ${receiverIp}`);
 			await finalizeDownload(transfer, {
 				isBurnFlow,
 				claimedNow,
@@ -847,7 +840,6 @@ router.get("/:code/single/:index", rateLimitDownload, validateCode, async (req, 
 				receiverDevice,
 				receiverIp,
 			});
-			logEvent("DOWNLOAD_INCREMENT_SUCCESS", `CODE: ${code}`, `DOWNLOAD_COUNT_SHOULD_INCREMENT: true`, `MODE: single`);
 			recordDownload(Number(streamedBytes || 0));
 
 			const receipt = buildTransferReceipt({

@@ -744,9 +744,9 @@ function initSocket(server) {
 					const timer = setTimeout(async () => {
 						gracePeriodTimers.delete(cCode);
 						
-						// Check if the transfer is still active and has the same claimant token/socket
+						// Check if the transfer is still active (the query already ensures claimantToken matches)
 						const transfer = await Transfer.findOne({ code: cCode, claimantToken: cToken }).lean();
-						if (transfer && !transfer.isDeleted && transfer.claimantSocketId === socket.id) {
+						if (transfer && !transfer.isDeleted) {
 							// Trigger burn
 							await Transfer.updateOne(
 								{ _id: transfer._id },

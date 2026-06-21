@@ -235,27 +235,19 @@ router.get("/:code/verify-ownership", validateCode, async (req, res, next) => {
 	try {
 		const { code } = req.params;
 		const providedToken = req.headers['x-ownership-token'] || req.body?.ownershipToken || '';
-		
-		logEvent("VERIFY_OWNERSHIP_REQUEST", `CODE: ${code}`, `TOKEN_PROVIDED: ${providedToken ? 'yes' : 'no'}`, `TOKEN_LENGTH: ${String(providedToken).length}`);
-		
 		const transfer = await Transfer.findOne(
 			{ code },
 			{ _id: 1, code: 1, ownershipToken: 1 }
 		).lean();
 
 		if (!transfer) {
-			logEvent("VERIFY_OWNERSHIP_ERROR", `CODE: ${code}`, `REASON: Transfer not found in DB`);
 			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
 		}
 
-		logEvent("VERIFY_OWNERSHIP_FOUND", `CODE: ${code}`, `STORED_TOKEN_EXISTS: ${transfer.ownershipToken ? 'yes' : 'no'}`);
-
 		if (validateOwnershipToken(transfer, req)) {
-			logEvent("VERIFY_OWNERSHIP_SUCCESS", `CODE: ${code}`);
 			return res.status(200).json({ authorized: true });
 		}
 
-		logEvent("VERIFY_OWNERSHIP_FAILED", `CODE: ${code}`, `REASON: Token mismatch`);
 		return res.status(403).json(buildErrorResponse(ERROR_CODES.UNAUTHORIZED, "Invalid ownership token"));
 	} catch (error) {
 		logError("VERIFY_OWNERSHIP_ERROR", error, `CODE: ${req.params?.code || ""}`);
@@ -267,21 +259,12 @@ router.post("/:code/extend", validateCode, async (req, res, next) => {
 	try {
 		const { code } = req.params;
 		const { minutes } = req.body; // Get minutes from request body
-		
-		logEvent("EXTEND_REQUEST", `CODE: ${code}`, `REQUESTED_MINUTES: ${minutes || 'default'}`);
-		
 		const transfer = await Transfer.findOne(
 			{ code },
 			{ _id: 1, code: 1, isDeleted: 1, expiresAt: 1, extendedOnce: 1, ownershipToken: 1 }
 		).lean();
 
 		if (!transfer) {
-			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
-		}
-
-		logEvent("OLD_EXPIRES_AT", `CODE: ${code}`, `CURRENT_EXPIRES_AT: ${transfer.expiresAt instanceof Date ? transfer.expiresAt.toISOString() : String(transfer.expiresAt)}`, `EXTENDED_ONCE: ${transfer.extendedOnce}`);
-
-		if (transfer.isDeleted) {
 			return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
 		}
 
@@ -307,8 +290,6 @@ router.post("/:code/extend", validateCode, async (req, res, next) => {
 			: Date.now();
 		const expiresAt = new Date(baseExpiryMs + extensionMinutes * MINUTE_MS);
 
-		logEvent("NEW_EXPIRES_AT", `CODE: ${code}`, `NEW_EXPIRES_AT: ${expiresAt.toISOString()}`, `EXTENSION_MINUTES: ${extensionMinutes}`, `BASE_EXPIRY_MS: ${baseExpiryMs}`);
-
 		// Clear old countdown BEFORE saving to prevent race condition
 		clearTransferCountdown(code);
 
@@ -332,17 +313,13 @@ router.post("/:code/extend", validateCode, async (req, res, next) => {
 			},
 		);
 		
-		logEvent("DB_UPDATE_RESULT", `CODE: ${code}`, `MATCHED: ${extendResult.matchedCount}`, `MODIFIED: ${extendResult.modifiedCount}`, `ACKNOWLEDGED: ${extendResult.acknowledged}`);
-		
 		if (extendResult.modifiedCount === 0) {
 			// Lost the race — restore countdown using prior expiry to avoid leaving the
 			// transfer without a timer.
 			scheduleTransferCountdown(code, transfer.expiresAt);
-			logEvent("DB_SAVE_FAILED", `CODE: ${code}`, `REASON: Race condition or already extended`);
 			return res.status(409).json(buildErrorResponse(ERROR_CODES.SERVER_ERROR, "Transfer can only be extended once"));
 		}
 		
-		logEvent("DB_SAVE_SUCCESS", `CODE: ${code}`, `EXPIRES_AT_SAVED: ${expiresAt.toISOString()}`);
 		invalidateTransferCache(code);
 
 		// Schedule new countdown AFTER save
@@ -351,8 +328,6 @@ router.post("/:code/extend", validateCode, async (req, res, next) => {
 		// Verify the save by reading back from DB
 		const updatedTransfer = await Transfer.findOne({ code }, { expiresAt: 1, extendedOnce: 1 }).lean();
 		const finalExpiresAt = updatedTransfer ? updatedTransfer.expiresAt : expiresAt;
-		
-		logEvent("DB_VERIFICATION", `CODE: ${code}`, `VERIFIED_EXPIRES_AT: ${finalExpiresAt instanceof Date ? finalExpiresAt.toISOString() : String(finalExpiresAt)}`, `VERIFIED_EXTENDED_ONCE: ${updatedTransfer?.extendedOnce}`);
 
 		emitToRoom(code, "transfer-extended", { 
 			code, 
