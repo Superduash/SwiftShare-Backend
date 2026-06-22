@@ -7,7 +7,7 @@ jspm_packages/
 .env.*
 !.env.example
 
-# Railway / Deployment manifests (must stay tracked)
+# Deployment manifests (must stay tracked)
 !railway.json
 !railway.toml
 !render.yaml
@@ -49,16 +49,26 @@ Desktop.ini
 *.swo
 *~
 
-# Project-local generated files
+# Generated export / scratch artifacts
 backend.txt
 frontend.txt
-export.py
 backendcode.txt
 frontendcode.txt
 swiftshare-fix-prompt.md
-exportback.py
-exportfront.py
+backend_plan.md
+polish.md
+swiftshare-code-export.txt
 *.local
+
+# Stray test / debug scripts (never commit these)
+test_*.js
+test_*.mjs
+.final-polish-check.js
+.subhour*
+.tmp-*
+
+# OCR / binary data files
+*.traineddata
 
 # Sentry / instrumentation locals
 .sentryclirc
@@ -81,7 +91,7 @@ yarn.lock.bak
 *.rar
 *.7z
 
-# AI Artifacts
+# AI Agent Context
 .kiro/
 .gemini/
 .ai/
