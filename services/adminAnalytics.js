@@ -44,11 +44,15 @@ async function withAdminCache(key, ttlMs, computeFn) {
 
 function parseTimeRange(rangeStr = '7d') {
 	const now = new Date();
+	const requestedRange = String(rangeStr).toLowerCase();
+	const range = ['24h', '7d', '30d', '90d', 'all'].includes(requestedRange)
+		? requestedRange
+		: '7d';
 	let currentStart = null;
 	let periodDurationMs = 0;
 	let bucket = 'day';
 
-	switch (rangeStr.toLowerCase()) {
+	switch (range) {
 		case '24h':
 			periodDurationMs = 24 * 60 * 60 * 1000;
 			currentStart = new Date(now.getTime() - periodDurationMs);
@@ -83,7 +87,7 @@ function parseTimeRange(rangeStr = '7d') {
 	const previousEnd = currentStart;
 
 	return {
-		range: rangeStr,
+		range,
 		currentStart,
 		currentEnd: now,
 		previousStart,
@@ -92,6 +96,30 @@ function parseTimeRange(rangeStr = '7d') {
 		bucket,
 		timezone: ADMIN_TIMEZONE,
 	};
+}
+
+function getTimezoneOffsetMs(date, timezone) {
+	const parts = new Intl.DateTimeFormat('en-US', {
+		timeZone: timezone,
+		year: 'numeric', month: '2-digit', day: '2-digit',
+		hour: '2-digit', minute: '2-digit', second: '2-digit',
+		hourCycle: 'h23',
+	}).formatToParts(date).reduce((result, part) => {
+		if (part.type !== 'literal') result[part.type] = part.value;
+		return result;
+	}, {});
+	const asUtc = Date.UTC(
+		Number(parts.year), Number(parts.month) - 1, Number(parts.day),
+		Number(parts.hour), Number(parts.minute), Number(parts.second)
+	);
+	return asUtc - date.getTime();
+}
+
+function getBucketStart(date, bucket, timezone) {
+	const offset = getTimezoneOffsetMs(date, timezone);
+	const localMs = date.getTime() + offset;
+	const stepMs = bucket === 'hour' ? 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
+	return new Date(Math.floor(localMs / stepMs) * stepMs - offset);
 }
 
 function calculateDelta(current, previous) {
@@ -338,7 +366,7 @@ async function getOverviewStats(rangeStr = '7d') {
 		} catch (err) {
 			logError('admin:analytics:overview', err);
 			return {
-				range: rangeStr,
+				range,
 				trackingSince: null,
 				dataThrough: new Date(),
 				kpis: {
@@ -400,7 +428,7 @@ async function getTimeseries(metric = 'pageviews', rangeStr = '7d') {
 					{
 						$group: {
 							_id: {
-								t: { $dateTrunc: { date: '$ts', unit: dateUnit, timezone } },
+									t: { $dateTrunc: { date: '$ts', unit: dateUnit, timezone } },
 								uid: { $cond: [{ $ne: ['$vid', ''] }, '$vid', '$dayHash'] },
 							},
 						},
@@ -468,22 +496,32 @@ async function getTimeseries(metric = 'pageviews', rangeStr = '7d') {
 					if (!d || !d._id) continue;
 					const dt = new Date(d._id);
 					if (!isNaN(dt.getTime())) {
-						resultMap.set(dt.toISOString(), d.v || 0);
+						const iso = getBucketStart(dt, bucket, timezone).toISOString();
+						resultMap.set(iso, (resultMap.get(iso) || 0) + (d.v || 0));
 					}
 				}
 			}
 
-			const result = [];
-			const startMs = currentStart && currentStart.getTime() > 0
-				? currentStart.getTime()
-				: Date.now() - (rangeStr === '24h' ? 86400000 : 7 * 86400000);
+			let startMs;
+			if (isAllTime) {
+				const firstDataTime = Array.isArray(data) && data.length > 0 && data[0]._id
+					? new Date(data[0]._id).getTime()
+					: null;
+				startMs = firstDataTime && !isNaN(firstDataTime)
+					? Math.min(firstDataTime, getBucketStart(new Date(Date.now() - 7 * 86400000), bucket, timezone).getTime())
+					: getBucketStart(new Date(Date.now() - 7 * 86400000), bucket, timezone).getTime();
+			} else {
+				startMs = currentStart && currentStart.getTime() > 0
+					? getBucketStart(currentStart, bucket, timezone).getTime()
+					: getBucketStart(new Date(Date.now() - (range === '24h' ? 86400000 : 7 * 86400000)), bucket, timezone).getTime();
+			}
+
 			const stepMs = bucket === 'hour' ? 3600000 : 86400000;
 			const endMs = currentEnd ? currentEnd.getTime() : Date.now();
+			const result = [];
 
 			for (let t = startMs; t <= endMs; t += stepMs) {
-				const d = new Date(t);
-				if (bucket === 'hour') d.setMinutes(0, 0, 0);
-				else d.setHours(0, 0, 0, 0);
+				const d = getBucketStart(new Date(t), bucket, timezone);
 
 				const iso = d.toISOString();
 				result.push({
@@ -494,16 +532,16 @@ async function getTimeseries(metric = 'pageviews', rangeStr = '7d') {
 
 			return {
 				metric,
-				range: rangeStr,
+				range,
 				bucket,
 				series: result,
 			};
 		} catch (err) {
 			logError('Timeseries aggregation failed, returning zero baseline', err);
-			const { bucket } = parseTimeRange(rangeStr);
+			const { bucket, range } = parseTimeRange(rangeStr);
 			return {
 				metric,
-				range: rangeStr,
+				range,
 				bucket,
 				series: [],
 			};
