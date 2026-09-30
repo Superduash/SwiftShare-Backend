@@ -38,7 +38,8 @@ const { getClientIp, getDeviceName } = require('../utils/helpers');
 const { getMongoStatus } = require('../config/db');
 const { isR2Configured } = require('../config/r2');
 const { logEvent, logError } = require('../utils/logger');
-const { getDetailedPerformanceStats } = require('../utils/performance');
+const { getPerformanceSnapshot } = require('../utils/performance');
+const PageView = require('../models/PageView');
 
 const router = express.Router();
 
@@ -412,7 +413,7 @@ router.post('/transfers/:code/expire', requireAdmin, async (req, res) => {
 
 router.get('/system', requireAdmin, async (req, res) => {
 	try {
-		const perf = typeof getDetailedPerformanceStats === 'function' ? getDetailedPerformanceStats() : {};
+		const perf = typeof getPerformanceSnapshot === 'function' ? getPerformanceSnapshot() : {};
 		const memoryUsage = process.memoryUsage();
 
 		res.status(200).json({
@@ -554,6 +555,50 @@ router.get('/export', requireAdmin, async (req, res) => {
 	} catch (error) {
 		logError('Admin export error', error);
 		res.status(500).json({ error: 'Failed to generate export' });
+	}
+});
+
+// ── Report Abuse ──────────────────────────────────────────────
+
+router.post('/report-abuse', async (req, res) => {
+	// Public endpoint — no auth required so users can report harmful content
+	res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+
+	const { code, reason } = req.body || {};
+
+	if (!reason || typeof reason !== 'string' || reason.trim().length < 5) {
+		return res.status(400).json({ error: 'A description of the abuse is required (min 5 characters).' });
+	}
+
+	const safeCode = typeof code === 'string' ? code.trim().toUpperCase().slice(0, 12) : '';
+	const safeReason = reason.trim().slice(0, 2000);
+	const ip = getClientIp(req) || 'unknown';
+	const ipMasked = maskIp(ip);
+	const ua = getDeviceName(req.get('user-agent') || '');
+
+	try {
+		await AdminAudit.create({
+			action: 'abuse_report',
+			username: 'anonymous',
+			ipMasked,
+			ua,
+			details: { code: safeCode || null, reason: safeReason },
+		});
+
+		// Notify admin socket in real-time
+		emitToAdminNamespace('abuse-report', {
+			code: safeCode || null,
+			reason: safeReason.slice(0, 200),
+			ipMasked,
+			timestamp: new Date(),
+		});
+
+		logEvent('Abuse report received', `CODE: ${safeCode || 'none'}`, `IP: ${ipMasked}`);
+
+		return res.status(200).json({ success: true, message: 'Report received for review.' });
+	} catch (error) {
+		logError('Abuse report error', error);
+		return res.status(500).json({ error: 'Failed to submit report. Please try again.' });
 	}
 });
 

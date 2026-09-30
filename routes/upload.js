@@ -95,12 +95,12 @@ const BLOCKED_DETECTED_EXTENSIONS = new Set([
 	".exe", ".bat", ".sh", ".cmd", ".msi", ".scr", ".com", ".vbs", ".ps1", ".jar",
 ]);
 
-let fileTypeModulePromise;
+let fileTypeModulePromise = import("file-type").catch(() => null);
 async function detectFileType(buffer) {
 	if (!Buffer.isBuffer(buffer) || buffer.length === 0) return null;
-	if (!fileTypeModulePromise) fileTypeModulePromise = import("file-type");
+	if (!fileTypeModulePromise) fileTypeModulePromise = import("file-type").catch(() => null);
 	const mod = await fileTypeModulePromise;
-	return mod.fileTypeFromBuffer(buffer);
+	return mod ? mod.fileTypeFromBuffer(buffer) : null;
 }
 
 function isMimeCompatible(declared, detected) {
@@ -109,8 +109,6 @@ function isMimeCompatible(declared, detected) {
 	if (!a || !b) return true;
 	if (a === b) return true;
 	if (a === "application/octet-stream") return true;
-	// Any image/* → any image/* is compatible: phone file managers frequently
-	// report image/jpeg for screenshots that are actually WebP, HEIC, or AVIF.
 	if (a.startsWith('image/') && b.startsWith('image/')) return true;
 	const fa = a.split("/")[0];
 	const fb = b.split("/")[0];
@@ -253,16 +251,27 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 
 			const safeName = sanitizeFilename(originalName);
 			const storedKey = `transfers/${code}/${safeName}`;
-			const passthrough = new PassThrough({ highWaterMark: 2 * 1024 * 1024 });
+			const passthrough = new PassThrough({ highWaterMark: 64 * 1024 }); // 64KB to prevent excessive buffering
 			let sniffParts = [];
 			let sniffLen = 0;
 			let bytes = 0;
 
+			const fileEntry = {
+				originalName,
+				safeName,
+				storedKey,
+				mimeType: declaredMime,
+				passthrough,
+				uploader: null,
+				validationPromise: null,
+				get size() { return bytes; },
+				get sniff() { return Buffer.concat(sniffParts, sniffLen); },
+			};
+			files.push(fileEntry);
+
 			const progressStream = new Transform({
-				// 256KB: large enough to reduce backpressure interruptions on mobile but
-				// small enough to avoid stalling the sniff detection on first chunk
-				readableHighWaterMark: 256 * 1024,
-				writableHighWaterMark: 256 * 1024,
+				readableHighWaterMark: 64 * 1024,
+				writableHighWaterMark: 64 * 1024,
 				transform(chunk, encoding, callback) {
 					if (aborted) {
 						callback();
@@ -283,10 +292,24 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 						const slice = chunk.length <= need ? chunk : chunk.subarray(0, need);
 						sniffParts.push(slice);
 						sniffLen += slice.length;
+
+						if (sniffLen >= SNIFF_BYTES && !fileEntry.validationPromise) {
+							fileEntry.validationPromise = validateSniffBuffer(fileEntry).catch((err) => {
+								abortAll(err);
+							});
+						}
 					}
 
 					maybeEmitProgress(false);
 					callback(null, chunk);
+				}
+			});
+
+			fileStream.on("end", () => {
+				if (!fileEntry.validationPromise) {
+					fileEntry.validationPromise = validateSniffBuffer(fileEntry).catch((err) => {
+						abortAll(err);
+					});
 				}
 			});
 
@@ -295,19 +318,12 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 
 			fileStream.pipe(progressStream).pipe(passthrough);
 
-			// Configure multipart upload to R2:
-			// - 5MB parts: S3 minimum, reduces retransmit cost if a part fails (reliability
-			//   gain, not raw throughput — tradeoff is more round-trips for large files)
-			// - queueSize 8: parallelises server→R2 part writes; the mobile→server leg is
-			//   always the bottleneck, so this only helps drain the server buffer faster.
-			//   Worth benchmarking at 4 if R2 socket errors appear under load.
-			// - leavePartsOnError:false so aborts clean up server-side parts
 			let uploader;
 			try {
 				uploader = new Upload({
 					client: r2Client,
-					queueSize: 8,
-					partSize: 5 * 1024 * 1024, // 5MB min — smaller parts = less retransmit on mobile packet loss
+					queueSize: 2, // Reduced from 8 to 2 to minimize memory buffering and make 'Saving to cloud' nearly instant
+					partSize: 5 * 1024 * 1024,
 					leavePartsOnError: false,
 					params: {
 						Bucket: r2Bucket,
@@ -316,31 +332,18 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 						ContentType: declaredMime,
 					},
 				});
+				fileEntry.uploader = uploader;
 			} catch (err) {
 				abortAll(err);
 				return;
 			}
 
-			const fileEntry = {
-				originalName,
-				safeName,
-				storedKey,
-				mimeType: declaredMime,
-				passthrough,
-				uploader,
-				get size() { return bytes; },
-				get sniff() { return Buffer.concat(sniffParts, sniffLen); },
-			};
-			files.push(fileEntry);
-
 			uploadPromises.push(
 				uploader.done().catch((err) => {
 					if (!aborted) {
 						abortAll(err);
-						throw err; // propagate to Promise.all() only when we're the first to abort
+						throw err;
 					}
-					// Already aborted: abortAll() has already rejected the parent promise.
-					// Swallowing here prevents unhandled rejection × N files.
 				}),
 			);
 		});
@@ -549,10 +552,9 @@ router.post("/", rateLimitUpload, sanitizeRequestBody, async (req, res) => {
 
 	logEvent("Upload received", `CODE: ${code}`, `FILES: ${files.length}`, formatSizeMB(totalBytes));
 
-	// Post-stream validation against sniff buffers. If any file fails, we have to delete
-	// what was uploaded to R2 (since streams completed successfully).
+	// Sniff validation (already running or resolved in background during streaming)
 	try {
-		await Promise.all(files.map(f => validateSniffBuffer(f)));
+		await Promise.all(files.map(f => f.validationPromise || validateSniffBuffer(f)));
 	} catch (validationErr) {
 		// Best-effort cleanup of completed objects.
 		try {

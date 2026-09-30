@@ -28,6 +28,13 @@ const ALLOWED_ROUTE_PATTERNS = [
 	'/about',
 	'/faq',
 	'/security',
+	'/send-files-without-signup',
+	'/share-files-with-qr-code',
+	'/self-destructing-file-sharing',
+	'/password-protected-file-transfer',
+	'/share-text-and-code-snippets',
+	'/airdrop-alternative',
+	'/report-abuse',
 ];
 
 // Session deduplication cache (sid + route within 30s)

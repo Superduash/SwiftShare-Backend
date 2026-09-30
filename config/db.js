@@ -1,11 +1,11 @@
-﻿const mongoose = require("mongoose");
+const mongoose = require("mongoose");
 const { logEvent, logError } = require("../utils/logger");
 
 // Dynamic pool sizing based on environment
 function getPoolConfig() {
 	const isProduction = String(process.env.NODE_ENV || "").toLowerCase() === "production";
 	const isRender = Boolean(process.env.RENDER);
-	
+
 	// Render free tier: 512MB RAM, 0.1 CPU - conservative pooling
 	if (isRender) {
 		return {
@@ -13,7 +13,7 @@ function getPoolConfig() {
 			minPoolSize: 1,
 		};
 	}
-	
+
 	// Production (non-Render): more aggressive pooling
 	if (isProduction) {
 		return {
@@ -21,7 +21,7 @@ function getPoolConfig() {
 			minPoolSize: 2,
 		};
 	}
-	
+
 	// Development: minimal pooling
 	return {
 		maxPoolSize: 5,
@@ -57,20 +57,20 @@ async function connectDB() {
 		heartbeatFrequencyMS: 10000,
 		retryWrites: true,
 	});
-	
+
 	// Connection event handlers for monitoring
 	mongoose.connection.on('connected', () => {
 		logEvent('MongoDB connected successfully');
 	});
-	
+
 	mongoose.connection.on('error', (err) => {
 		logError('MongoDB connection error', err);
 	});
-	
+
 	mongoose.connection.on('disconnected', () => {
 		logEvent('MongoDB disconnected');
 	});
-	
+
 	return mongoose.connection;
 }
 
@@ -79,8 +79,14 @@ function isMongoReady() {
 	return mongoose.connection.readyState === 1;
 }
 
+// Returns a status string for admin system health endpoint
+function getMongoStatus() {
+	return mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
+}
+
 module.exports = {
 	connectDB,
 	isMongoReady,
+	getMongoStatus,
 };
 

@@ -8,6 +8,7 @@ const { isMongoReady } = require("./db");
 let ioInstance;
 const countdownMap = new Map();
 const gracePeriodTimers = new Map();
+let adminSocketCount = 0;
 const isProduction = String(process.env.NODE_ENV || "").toLowerCase() === "production";
 const allowAllOrigins = String(process.env.CORS_ALLOW_ALL_ORIGINS || "").toLowerCase() === "true";
 
@@ -518,7 +519,6 @@ function initSocket(server) {
 
 	// Admin namespace with token authentication
 	const adminNamespace = ioInstance.of("/admin");
-	let adminSocketCount = 0;
 	let onlineCountTimer = null;
 
 	adminNamespace.use(async (socket, next) => {
@@ -924,7 +924,8 @@ async function broadcastNewTransferToSubnet(transferCode, senderIp, transferData
 
 function getSocketConnectedCount() {
 	try {
-		return ioInstance?.engine?.clientsCount || 0;
+		const total = ioInstance?.engine?.clientsCount || 0;
+		return Math.max(0, total - adminSocketCount);
 	} catch {
 		return 0;
 	}
