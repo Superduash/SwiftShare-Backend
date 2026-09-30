@@ -6,6 +6,7 @@ const bcrypt = require('bcryptjs');
 
 const AdminSession = require('../models/AdminSession');
 const AdminAudit = require('../models/AdminAudit');
+const { version: pkgVersion } = require('../package.json');
 const Transfer = require('../models/Transfer');
 const {
 	isAdminEnabled,
@@ -418,7 +419,7 @@ router.get('/system', requireAdmin, async (req, res) => {
 
 		res.status(200).json({
 			status: 'ok',
-			version: process.env.npm_package_version || '0.7.7',
+			version: pkgVersion || process.env.npm_package_version || '0.8.1',
 			uptime: process.uptime(),
 			timestamp: new Date().toISOString(),
 			services: {

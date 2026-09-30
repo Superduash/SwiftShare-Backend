@@ -144,13 +144,13 @@ async function getOverviewStats(rangeStr = '7d') {
 				PageView.aggregate([
 					{ $match: pvCurrentMatch },
 					{ $group: { _id: null, count: { $sum: 1 } } },
-				]).maxTimeMS(8000).catch(() => []),
+				]).option({ maxTimeMS: 8000 }).catch(() => []),
 
 				// Previous Pageviews
 				isAllTime ? Promise.resolve([]) : PageView.aggregate([
 					{ $match: pvPrevMatch },
 					{ $group: { _id: null, count: { $sum: 1 } } },
-				]).maxTimeMS(8000).catch(() => []),
+				]).option({ maxTimeMS: 8000 }).catch(() => []),
 
 				// Current Visitors (Distinct vid or dayHash)
 				PageView.aggregate([
@@ -161,7 +161,7 @@ async function getOverviewStats(rangeStr = '7d') {
 						},
 					},
 					{ $group: { _id: null, count: { $sum: 1 } } },
-				]).allowDiskUse(true).maxTimeMS(8000).catch(() => []),
+				]).allowDiskUse(true).option({ maxTimeMS: 8000 }).catch(() => []),
 
 				// Previous Visitors
 				isAllTime ? Promise.resolve([]) : PageView.aggregate([
@@ -172,7 +172,7 @@ async function getOverviewStats(rangeStr = '7d') {
 						},
 					},
 					{ $group: { _id: null, count: { $sum: 1 } } },
-				]).allowDiskUse(true).maxTimeMS(8000).catch(() => []),
+				]).allowDiskUse(true).option({ maxTimeMS: 8000 }).catch(() => []),
 
 				// Returning visitors (visitors with >1 session)
 				PageView.aggregate([
@@ -195,7 +195,7 @@ async function getOverviewStats(rangeStr = '7d') {
 							returning: { $sum: { $cond: ['$isReturning', 1, 0] } },
 						},
 					},
-				]).allowDiskUse(true).maxTimeMS(8000).catch(() => []),
+				]).allowDiskUse(true).option({ maxTimeMS: 8000 }).catch(() => []),
 
 				// Current Transfers Aggregate
 				Transfer.aggregate([
@@ -221,7 +221,7 @@ async function getOverviewStats(rangeStr = '7d') {
 							},
 						},
 					},
-				]).allowDiskUse(true).maxTimeMS(8000).catch(() => []),
+				]).allowDiskUse(true).option({ maxTimeMS: 8000 }).catch(() => []),
 
 				// Previous Transfers Aggregate
 				isAllTime ? Promise.resolve([]) : Transfer.aggregate([
@@ -235,7 +235,7 @@ async function getOverviewStats(rangeStr = '7d') {
 							totalDownloads: { $sum: { $ifNull: ['$downloadCount', 0] } },
 						},
 					},
-				]).allowDiskUse(true).maxTimeMS(8000).catch(() => []),
+				]).allowDiskUse(true).option({ maxTimeMS: 8000 }).catch(() => []),
 
 				// Active transfers right now
 				Transfer.countDocuments({
@@ -259,7 +259,7 @@ async function getOverviewStats(rangeStr = '7d') {
 						},
 					},
 					{ $group: { _id: null, avgSpeed: { $avg: '$speed' } } },
-				]).allowDiskUse(true).maxTimeMS(8000).catch(() => []),
+				]).allowDiskUse(true).option({ maxTimeMS: 8000 }).catch(() => []),
 
 				// Crawler Hits
 				PageView.countDocuments(
@@ -389,7 +389,7 @@ async function getTimeseries(metric = 'pageviews', rangeStr = '7d') {
 						},
 					},
 					{ $sort: { _id: 1 } },
-				]).allowDiskUse(true).maxTimeMS(8000).catch(() => []);
+				]).allowDiskUse(true).option({ maxTimeMS: 8000 }).catch(() => []);
 			} else if (metric === 'visitors') {
 				const match = isAllTime
 					? { isBot: false, ts: { $exists: true, $ne: null } }
@@ -412,7 +412,7 @@ async function getTimeseries(metric = 'pageviews', rangeStr = '7d') {
 						},
 					},
 					{ $sort: { _id: 1 } },
-				]).allowDiskUse(true).maxTimeMS(8000).catch(() => []);
+				]).allowDiskUse(true).option({ maxTimeMS: 8000 }).catch(() => []);
 			} else if (metric === 'transfers') {
 				const match = isAllTime
 					? { createdAt: { $exists: true, $ne: null } }
@@ -427,7 +427,7 @@ async function getTimeseries(metric = 'pageviews', rangeStr = '7d') {
 						},
 					},
 					{ $sort: { _id: 1 } },
-				]).allowDiskUse(true).maxTimeMS(8000).catch(() => []);
+				]).allowDiskUse(true).option({ maxTimeMS: 8000 }).catch(() => []);
 			} else if (metric === 'downloads') {
 				const match = isAllTime
 					? { 'activity.event': 'downloaded', 'activity.timestamp': { $exists: true, $ne: null } }
@@ -443,7 +443,7 @@ async function getTimeseries(metric = 'pageviews', rangeStr = '7d') {
 						},
 					},
 					{ $sort: { _id: 1 } },
-				]).allowDiskUse(true).maxTimeMS(8000).catch(() => []);
+				]).allowDiskUse(true).option({ maxTimeMS: 8000 }).catch(() => []);
 			} else if (metric === 'bytes') {
 				const match = isAllTime
 					? { createdAt: { $exists: true, $ne: null } }
@@ -458,7 +458,7 @@ async function getTimeseries(metric = 'pageviews', rangeStr = '7d') {
 						},
 					},
 					{ $sort: { _id: 1 } },
-				]).allowDiskUse(true).maxTimeMS(8000).catch(() => []);
+				]).allowDiskUse(true).option({ maxTimeMS: 8000 }).catch(() => []);
 			}
 
 			// Fill zero buckets in Node
@@ -537,7 +537,7 @@ async function getTrafficPages(rangeStr = '7d') {
 				},
 				{ $sort: { views: -1 } },
 				{ $limit: 50 },
-			]).allowDiskUse(true).maxTimeMS(8000).catch(() => []);
+			]).allowDiskUse(true).option({ maxTimeMS: 8000 }).catch(() => []);
 
 			return rows || [];
 		} catch (err) {
@@ -573,7 +573,7 @@ async function getTrafficSources(rangeStr = '7d') {
 					},
 					{ $sort: { views: -1 } },
 					{ $limit: 50 },
-				]).allowDiskUse(true).maxTimeMS(8000).catch(() => []),
+				]).allowDiskUse(true).option({ maxTimeMS: 8000 }).catch(() => []),
 
 				PageView.aggregate([
 					{
@@ -597,7 +597,7 @@ async function getTrafficSources(rangeStr = '7d') {
 					},
 					{ $sort: { views: -1 } },
 					{ $limit: 20 },
-				]).allowDiskUse(true).maxTimeMS(8000).catch(() => []),
+				]).allowDiskUse(true).option({ maxTimeMS: 8000 }).catch(() => []),
 			]);
 
 			// Group hosts into categories
@@ -670,7 +670,7 @@ async function getTrafficCountries(rangeStr = '7d') {
 				},
 				{ $sort: { visitors: -1 } },
 				{ $limit: 60 },
-			]).allowDiskUse(true).maxTimeMS(8000).catch(() => []);
+			]).allowDiskUse(true).option({ maxTimeMS: 8000 }).catch(() => []);
 		} catch (err) {
 			logError('admin:analytics:trafficCountries', err);
 			return [];
@@ -690,21 +690,21 @@ async function getTrafficDevices(rangeStr = '7d') {
 					{ $match: match },
 					{ $group: { _id: '$device', count: { $sum: 1 } } },
 					{ $sort: { count: -1 } },
-				]).maxTimeMS(8000).catch(() => []),
+				]).option({ maxTimeMS: 8000 }).catch(() => []),
 
 				PageView.aggregate([
 					{ $match: match },
 					{ $group: { _id: '$browser', count: { $sum: 1 } } },
 					{ $sort: { count: -1 } },
 					{ $limit: 10 },
-				]).maxTimeMS(8000).catch(() => []),
+				]).option({ maxTimeMS: 8000 }).catch(() => []),
 
 				PageView.aggregate([
 					{ $match: match },
 					{ $group: { _id: '$os', count: { $sum: 1 } } },
 					{ $sort: { count: -1 } },
 					{ $limit: 10 },
-				]).maxTimeMS(8000).catch(() => []),
+				]).option({ maxTimeMS: 8000 }).catch(() => []),
 			]);
 
 			return { devices: devices || [], browsers: browsers || [], os: osList || [] };
@@ -735,7 +735,7 @@ async function getTrafficHours(rangeStr = '7d') {
 						views: { $sum: 1 },
 					},
 				},
-			]).allowDiskUse(true).maxTimeMS(8000).catch(() => []);
+			]).allowDiskUse(true).option({ maxTimeMS: 8000 }).catch(() => []);
 
 			// Format as 7x24 grid (0..6 day, 0..23 hour)
 			const grid = Array.from({ length: 7 }, () => Array(24).fill(0));
@@ -783,7 +783,7 @@ async function getTrafficCrawlers(rangeStr = '7d') {
 				},
 				{ $sort: { hits: -1 } },
 				{ $limit: 20 },
-			]).maxTimeMS(8000).catch(() => []);
+			]).option({ maxTimeMS: 8000 }).catch(() => []);
 		} catch (err) {
 			logError('admin:analytics:trafficCrawlers', err);
 			return [];
@@ -809,7 +809,7 @@ async function getFunnel(rangeStr = '7d') {
 						},
 					},
 					{ $group: { _id: null, count: { $sum: 1 } } },
-				]).allowDiskUse(true).maxTimeMS(8000).catch(() => []),
+				]).allowDiskUse(true).option({ maxTimeMS: 8000 }).catch(() => []),
 
 				Transfer.aggregate([
 					{ $match: trMatch },
@@ -820,7 +820,7 @@ async function getFunnel(rangeStr = '7d') {
 							downloaded: { $sum: { $cond: [{ $gt: ['$downloadCount', 0] }, 1, 0] } },
 						},
 					},
-				]).allowDiskUse(true).maxTimeMS(8000).catch(() => []),
+				]).allowDiskUse(true).option({ maxTimeMS: 8000 }).catch(() => []),
 			]);
 
 			const visitors = visitorsAgg[0]?.count || 0;
@@ -883,7 +883,7 @@ async function getBreakdowns(rangeStr = '7d') {
 					},
 					{ $group: { _id: '$family', count: { $sum: 1 } } },
 					{ $sort: { count: -1 } },
-				]).allowDiskUse(true).maxTimeMS(8000).catch(() => []),
+				]).allowDiskUse(true).option({ maxTimeMS: 8000 }).catch(() => []),
 
 				// Size buckets (<1MB, 1-10MB, 10-50MB, 50-100MB, >100MB)
 				Transfer.aggregate([
@@ -904,7 +904,7 @@ async function getBreakdowns(rangeStr = '7d') {
 						},
 					},
 					{ $group: { _id: '$bucket', count: { $sum: 1 } } },
-				]).allowDiskUse(true).maxTimeMS(8000).catch(() => []),
+				]).allowDiskUse(true).option({ maxTimeMS: 8000 }).catch(() => []),
 
 				// Flags and file counts
 				Transfer.aggregate([
@@ -919,13 +919,13 @@ async function getBreakdowns(rangeStr = '7d') {
 							password: { $sum: { $cond: ['$passwordProtected', 1, 0] } },
 						},
 					},
-				]).allowDiskUse(true).maxTimeMS(8000).catch(() => []),
+				]).allowDiskUse(true).option({ maxTimeMS: 8000 }).catch(() => []),
 
 				// Kind (file vs text)
 				Transfer.aggregate([
 					{ $match: trMatch },
 					{ $group: { _id: '$kind', count: { $sum: 1 } } },
-				]).allowDiskUse(true).maxTimeMS(8000).catch(() => []),
+				]).allowDiskUse(true).option({ maxTimeMS: 8000 }).catch(() => []),
 			]);
 
 			return {
