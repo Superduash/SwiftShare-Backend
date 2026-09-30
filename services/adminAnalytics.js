@@ -112,7 +112,7 @@ function getTimezoneOffsetMs(date, timezone) {
 		Number(parts.year), Number(parts.month) - 1, Number(parts.day),
 		Number(parts.hour), Number(parts.minute), Number(parts.second)
 	);
-	return asUtc - date.getTime();
+	return asUtc - (date.getTime() - date.getMilliseconds());
 }
 
 function getBucketStart(date, bucket, timezone) {
@@ -531,6 +531,15 @@ async function getTimeseries(metric = 'pageviews', rangeStr = '7d') {
 					v: resultMap.get(iso) || 0,
 				});
 			}
+
+			// Preserve aggregate buckets even if a timezone/DST boundary causes the
+			// fixed-step filler to land on a different instant.
+			for (const [iso, value] of resultMap) {
+				if (!result.some((point) => point.t === iso)) {
+					result.push({ t: iso, v: value });
+				}
+			}
+			result.sort((a, b) => a.t.localeCompare(b.t));
 
 			return {
 				metric,
