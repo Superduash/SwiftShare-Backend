@@ -215,7 +215,7 @@ function ensureConsolidatedTimer() {
 				// Skip emit if value didn't change (only happens under sub-second tick drift),
 				// reducing socket chatter without affecting client UX.
 				if (entry.lastEmittedSeconds !== secondsRemaining) {
-					emitToRoom(normalizedCode, "countdown-tick", { secondsRemaining });
+					emitToRoom(normalizedCode, "countdown-tick", { secondsRemaining, serverTime: now });
 					entry.lastEmittedSeconds = secondsRemaining;
 				}
 
@@ -292,7 +292,7 @@ function scheduleTransferCountdown(code, expiresAt) {
 	}
 	const secondsRemaining = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
 	countdownMap.set(normalizedCode, { endsAt, lastEmittedSeconds: secondsRemaining });
-	emitToRoom(normalizedCode, "countdown-tick", { secondsRemaining });
+	emitToRoom(normalizedCode, "countdown-tick", { secondsRemaining, serverTime: Date.now() });
 	ensureConsolidatedTimer();
 }
 
@@ -638,7 +638,7 @@ function initSocket(server) {
 			const cachedEndsAt = getCountdownEndsAt(normalizedCode);
 			if (cachedEndsAt) {
 				const secondsRemaining = Math.max(0, Math.ceil((cachedEndsAt - Date.now()) / 1000));
-				socket.emit("countdown-tick", { secondsRemaining });
+				socket.emit("countdown-tick", { secondsRemaining, serverTime: Date.now() });
 				safeAck(ack, { ok: true, code: normalizedCode, secondsRemaining });
 				return;
 			}
@@ -660,7 +660,7 @@ function initSocket(server) {
 					Math.ceil((new Date(transfer.expiresAt).getTime() - Date.now()) / 1000),
 				);
 
-				socket.emit("countdown-tick", { secondsRemaining });
+				socket.emit("countdown-tick", { secondsRemaining, serverTime: Date.now() });
 				safeAck(ack, { ok: true, code: normalizedCode, secondsRemaining });
 			} catch (error) {
 				logError("Failed to rejoin room", error, `CODE: ${normalizedCode}`);

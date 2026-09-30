@@ -496,7 +496,9 @@ async function getTimeseries(metric = 'pageviews', rangeStr = '7d') {
 					if (!d || !d._id) continue;
 					const dt = new Date(d._id);
 					if (!isNaN(dt.getTime())) {
-						const iso = getBucketStart(dt, bucket, timezone).toISOString();
+						// Mongo already returns the timezone-aligned bucket start.
+						// Preserve that exact instant so Node cannot shift it across a day.
+						const iso = dt.toISOString();
 						resultMap.set(iso, (resultMap.get(iso) || 0) + (d.v || 0));
 					}
 				}
