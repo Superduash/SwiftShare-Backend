@@ -11,18 +11,17 @@
 require('dotenv').config({ quiet: true });
 const mongoose = require('mongoose');
 
-// Required indexes: [name, keySpec description]
-const REQUIRED_INDEXES = [
-  { name: 'code_1',        key: { code: 1 },        note: 'Primary lookup by transfer code' },
-  { name: 'expiresAt_1',   key: { expiresAt: 1 },   note: 'TTL safety net (expireAfterSeconds)' },
-  { name: 'createdAt_-1',  key: { createdAt: -1 },  note: 'Recency sort for stats/sender recents' },
+// Required indexes across collections
+const REQUIRED_TRANSFER_INDEXES = [
+  { name: 'code_1',                 note: 'Primary unique lookup by transfer code' },
+  { name: 'createdAt_-1',           note: 'Recency sort for stats/sender recents' },
   { name: 'cleanup_active',         note: 'isDeleted + expiresAt compound — cleanup sweep' },
   { name: 'nearby_active_by_subnet', note: 'isDeleted + expiresAt + senderIp + createdAt — nearby devices' },
   { name: 'cleanup_stale_burn',      note: 'burnAfterDownload + isDeleted + burnLastActiveAt — stale burn cleanup' },
   { name: 'nearby_sockets',          note: 'isDeleted + expiresAt + senderSocketId + createdAt — nearby sockets' },
-  { name: 'ttl_post_expiry_safety_net', note: 'expiresAt TTL index — auto-delete 24h after expiry' },
   { name: 'senderSocketId_1',        note: 'senderSocketId sparse — socket cleanup' },
-  { name: 'senderIp_1_createdAt_1',  note: 'senderIp + createdAt — stats distinct + IP lookups' },
+  { name: 'senderIp_1_createdAt_-1', note: 'senderIp + createdAt desc — stats distinct + IP lookups' },
+  { name: 'kind_1',                  note: 'file vs text transfer breakdown' },
 ];
 
 async function main() {
@@ -54,7 +53,7 @@ async function main() {
 
   console.log('\nVerifying required indexes…');
   let missing = 0;
-  for (const req of REQUIRED_INDEXES) {
+  for (const req of REQUIRED_TRANSFER_INDEXES) {
     const found = existingNames.has(req.name);
     const status = found ? '✅' : '❌ MISSING';
     console.log(`  ${status.padEnd(12)} ${req.name.padEnd(38)} ${req.note}`);

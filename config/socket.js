@@ -329,41 +329,60 @@ async function emitNearbyDevices(socket) {
 		}
 
 		const now = new Date();
-		
-		// Subnet-first query — get connected socket IDs from the subnet room first,
-		// then query only transfers matching those socket IDs.
 		const subnetRoom = `subnet:${subnet}`;
-		const socketsInSubnet = ioInstance
-			? new Set((await ioInstance.in(subnetRoom).fetchSockets()).map(s => s.id))
-			: new Set();
+		const sockets = ioInstance ? await ioInstance.in(subnetRoom).fetchSockets() : [];
+		const socketIdArray = Array.isArray(sockets) ? sockets.map((s) => s.id).filter(Boolean) : [];
 
-		if (socketsInSubnet.size === 0) {
-			socket.emit("nearby-devices", { devices: [] });
-			return;
-		}
-
-		// Query only transfers whose senderSocketId is in the subnet room
-		const socketIdArray = Array.from(socketsInSubnet);
-		const candidates = await Transfer.find({
+		const query = {
 			isDeleted: false,
 			expiresAt: { $gt: now },
-			senderSocketId: { $in: socketIdArray },
-		})
-			.select('code fileCount files totalSize ai.category senderDeviceName expiresAt senderSocketId')
+			passwordProtected: { $ne: true },
+			nearbyVisible: { $ne: false },
+		};
+
+		const escapedSubnet = subnet.replace(/\./g, "\\.");
+		const subnetOr = [
+			{ senderIp: { $regex: `^${escapedSubnet}\\.` } },
+			{ senderIp: clientIp },
+		];
+		if (socketIdArray.length > 0) {
+			subnetOr.push({ senderSocketId: { $in: socketIdArray } });
+		}
+		query.$or = subnetOr;
+
+		const candidates = await Transfer.find(query)
+			.select("code fileCount files totalSize ai.category senderDeviceName expiresAt senderSocketId passwordProtected nearbyVisible")
+			.sort({ createdAt: -1 })
+			.limit(30)
 			.lean();
 
-		// Map to device info and filter self
+		// Map to device info and filter self socket if socketId matches
 		const devices = candidates
-			.map((transfer) => ({
-				code: transfer.code,
-				fileCount: Number(transfer.fileCount || transfer.files?.length || 0),
-				totalSize: Number(transfer.totalSize || 0),
-				category: transfer.ai?.category || "Other",
-				deviceName: transfer.senderDeviceName || "Unknown Device",
-				expiresAt: transfer.expiresAt,
-				socketId: String(transfer.senderSocketId || ""),
-			}))
-			.filter((device) => device.socketId !== socket.id);
+			.map((transfer) => {
+				const primaryFile = transfer.files?.[0]?.originalName || "";
+				const title = transfer.files?.length > 1
+					? `${primaryFile || 'Files'} (+${transfer.files.length - 1} more)`
+					: (primaryFile || transfer.code);
+				return {
+					code: transfer.code,
+					filename: title,
+					title,
+					files: (transfer.files || []).map((f) => ({
+						name: f.originalName,
+						size: f.size,
+						type: f.mimeType,
+						icon: f.icon,
+					})),
+					fileCount: Number(transfer.fileCount || transfer.files?.length || 0),
+					totalSize: Number(transfer.totalSize || 0),
+					category: transfer.ai?.category || "Other",
+					deviceName: transfer.senderDeviceName || "Unknown Device",
+					expiresAt: transfer.expiresAt,
+					socketId: String(transfer.senderSocketId || ""),
+					nearbyVisible: transfer.nearbyVisible !== false,
+				};
+			})
+			.filter((device) => !device.socketId || device.socketId !== socket.id);
 
 		socket.emit("nearby-devices", { devices });
 	} catch (error) {
@@ -496,6 +515,58 @@ function initSocket(server) {
 			logError("Failed to clean up stale sockets", error);
 		}
 	}, 5 * 60 * 1000).unref(); // unref to not block process exit
+
+	// Admin namespace with token authentication
+	const adminNamespace = ioInstance.of("/admin");
+	let adminSocketCount = 0;
+	let onlineCountTimer = null;
+
+	adminNamespace.use(async (socket, next) => {
+		try {
+			const token = socket.handshake.auth?.token;
+			if (!token) {
+				return next(new Error("Authentication required"));
+			}
+			const { verifyAdminToken, isAdminEnabled } = require("../utils/adminAuth");
+			if (!isAdminEnabled()) {
+				return next(new Error("Admin panel disabled"));
+			}
+			const payload = verifyAdminToken(token);
+			if (!payload) {
+				return next(new Error("Invalid or expired admin token"));
+			}
+			const AdminSession = require("../models/AdminSession");
+			const session = await AdminSession.findOne({ jti: payload.jti }).lean();
+			if (!session) {
+				return next(new Error("Admin session revoked"));
+			}
+			socket.admin = { username: payload.username, jti: payload.jti };
+			next();
+		} catch (err) {
+			next(new Error("Authentication failed"));
+		}
+	});
+
+	adminNamespace.on("connection", (socket) => {
+		adminSocketCount++;
+		socket.emit("online-count", { count: getSocketConnectedCount() });
+
+		if (!onlineCountTimer) {
+			onlineCountTimer = setInterval(() => {
+				if (adminSocketCount > 0) {
+					adminNamespace.emit("online-count", { count: getSocketConnectedCount() });
+				} else {
+					clearInterval(onlineCountTimer);
+					onlineCountTimer = null;
+				}
+			}, 5000);
+			onlineCountTimer.unref?.();
+		}
+
+		socket.on("disconnect", () => {
+			adminSocketCount = Math.max(0, adminSocketCount - 1);
+		});
+	});
 
 	ioInstance.on("connection", (socket) => {
 		// Store client IP and subnet for this connection
@@ -677,7 +748,7 @@ function initSocket(server) {
 			}
 		});
 
-		socket.on("nearby-ping", async ({ code } = {}) => {
+		socket.on("nearby-ping", async ({ code, force } = {}) => {
 			const normalizedCode = normalizeCode(code);
 			if (normalizedCode) {
 				socket.join(roomName(normalizedCode));
@@ -690,10 +761,10 @@ function initSocket(server) {
 				code: normalizedCode || null,
 			});
 
-			// Throttle nearby-device re-queries so socket pings do not spam MongoDB.
+			// Short debounce so manual refreshes always respond promptly
 			const now = Date.now();
 			const lastQuery = socket.data.lastNearbyQuery || 0;
-			if (now - lastQuery < 8000) {
+			if (!force && now - lastQuery < 1500) {
 				return;
 			}
 			socket.data.lastNearbyQuery = now;
@@ -782,38 +853,90 @@ function getIo() {
 }
 
 // Broadcast to all sockets on same subnet that a new transfer is available
-async function broadcastNewTransferToSubnet(transferCode, senderIp) {
+async function broadcastNewTransferToSubnet(transferCode, senderIp, transferData) {
 	if (!ioInstance) return;
 	
 	const subnet = getSubnet(senderIp);
 	if (!subnet) return;
 	
 	try {
-		// Get the transfer details
-		const transfer = await Transfer.findOne({ code: transferCode })
-			.select('code fileCount files totalSize ai.category senderDeviceName expiresAt senderSocketId senderIp')
-			.lean();
+		let deviceInfo = null;
+		if (transferData && transferData.code) {
+			if (transferData.passwordProtected || transferData.nearbyVisible === false) return;
+			const primaryFile = transferData.files?.[0]?.name || transferData.files?.[0]?.originalName || "";
+			const title = transferData.files?.length > 1
+				? `${primaryFile || 'Files'} (+${transferData.files.length - 1} more)`
+				: (primaryFile || transferData.code);
+			deviceInfo = {
+				code: transferData.code,
+				filename: title,
+				title,
+				files: transferData.files || [],
+				fileCount: Number(transferData.files?.length || transferData.fileCount || 0),
+				totalSize: Number(transferData.totalSize || 0),
+				category: transferData.category || "Other",
+				deviceName: transferData.senderDeviceName || "Unknown Device",
+				expiresAt: transferData.expiresAt,
+				socketId: String(transferData.senderSocketId || ""),
+				nearbyVisible: true,
+			};
+		} else {
+			const transfer = await Transfer.findOne({ code: transferCode, isDeleted: false })
+				.select("code fileCount files totalSize ai.category senderDeviceName expiresAt senderSocketId senderIp passwordProtected nearbyVisible")
+				.lean();
+				
+			if (!transfer || transfer.passwordProtected || transfer.nearbyVisible === false) return;
 			
-		if (!transfer) return;
+			const primaryFile = transfer.files?.[0]?.originalName || "";
+			const title = transfer.files?.length > 1
+				? `${primaryFile || 'Files'} (+${transfer.files.length - 1} more)`
+				: (primaryFile || transfer.code);
+			deviceInfo = {
+				code: transfer.code,
+				filename: title,
+				title,
+				files: (transfer.files || []).map((f) => ({
+					name: f.originalName,
+					size: f.size,
+					type: f.mimeType,
+					icon: f.icon,
+				})),
+				fileCount: Number(transfer.fileCount || transfer.files?.length || 0),
+				totalSize: Number(transfer.totalSize || 0),
+				category: transfer.ai?.category || "Other",
+				deviceName: transfer.senderDeviceName || "Unknown Device",
+				expiresAt: transfer.expiresAt,
+				socketId: String(transfer.senderSocketId || ""),
+				nearbyVisible: true,
+			};
+		}
+
+		if (!deviceInfo) return;
 		
-		const deviceInfo = {
-			code: transfer.code,
-			fileCount: Number(transfer.fileCount || transfer.files?.length || 0),
-			totalSize: Number(transfer.totalSize || 0),
-			category: transfer.ai?.category || "Other",
-			deviceName: transfer.senderDeviceName || "Unknown Device",
-			expiresAt: transfer.expiresAt,
-			socketId: String(transfer.senderSocketId || ""),
-		};
-		
-		// FIXED: Emit ONLY to sockets in the same subnet room
-		// No client-side filtering needed anymore
 		const subnetRoom = `subnet:${subnet}`;
 		ioInstance.to(subnetRoom).emit("nearby-device-added", { device: deviceInfo });
 		
 		logEvent("Broadcast new transfer", `CODE: ${transferCode}`, `SUBNET: ${subnet}`, `ROOM: ${subnetRoom}`);
 	} catch (error) {
 		logError("Failed to broadcast new transfer", error, `CODE: ${transferCode}`);
+	}
+}
+
+function getSocketConnectedCount() {
+	try {
+		return ioInstance?.engine?.clientsCount || 0;
+	} catch {
+		return 0;
+	}
+}
+
+function emitToAdminNamespace(event, data) {
+	try {
+		if (ioInstance) {
+			ioInstance.of("/admin").emit(event, data);
+		}
+	} catch (err) {
+		// Non-blocking fail-safe
 	}
 }
 
@@ -825,5 +948,7 @@ module.exports = {
 	bindSocketToRoom,
 	getIo,
 	broadcastNewTransferToSubnet,
+	getSocketConnectedCount,
+	emitToAdminNamespace,
 };
 

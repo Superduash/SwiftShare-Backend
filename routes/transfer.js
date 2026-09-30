@@ -378,6 +378,12 @@ router.delete("/:code", validateCode, async (req, res, next) => {
 				{ _id: transfer._id, isDeleted: false },
 				{
 					$set: { isDeleted: true, cancelledAt: new Date() },
+					$unset: {
+						qrDataUri: "",
+						passwordHash: "",
+						ownershipToken: "",
+						"files.$[].inlineContent": "",
+					},
 					$push: {
 						activity: {
 							$each: [{
@@ -450,6 +456,12 @@ router.post("/:code/burn-finalize", validateCode, async (req, res, next) => {
 					burnFinalizedAt: finalizedAt,
 					burnLastActiveAt: finalizedAt,
 				},
+				$unset: {
+					qrDataUri: "",
+					passwordHash: "",
+					ownershipToken: "",
+					"files.$[].inlineContent": "",
+				},
 				$push: {
 					activity: {
 						event: "burned",
@@ -467,6 +479,49 @@ router.post("/:code/burn-finalize", validateCode, async (req, res, next) => {
 		logEvent("Burn finalized", `CODE: ${code}`, `OWNER: ${getRequestFingerprint(req).slice(0, 12)}`);
 
 		return res.status(200).json({ success: true, code, status: "DELETED" });
+	} catch (error) {
+		return next(error);
+	}
+});
+
+// ── Nearby Visibility Toggle ──────────────────────────────────
+router.patch("/:code/nearby", validateCode, sanitizeRequestBody, async (req, res, next) => {
+	try {
+		const { code } = req.params;
+		const { nearbyVisible } = req.body || {};
+		const ownershipToken = req.headers["x-ownership-token"] || req.body?.ownershipToken;
+
+		const transfer = await Transfer.findOne({ code, isDeleted: false });
+		if (!transfer) {
+			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
+		}
+
+		if (transfer.passwordProtected) {
+			return res.status(400).json(buildErrorResponse(ERROR_CODES.INVALID_REQUEST, "Password-protected transfers cannot be discovered nearby"));
+		}
+
+		// Validate ownership token if transfer has one
+		if (transfer.ownershipToken && ownershipToken && transfer.ownershipToken !== String(ownershipToken).trim()) {
+			return res.status(403).json(buildErrorResponse(ERROR_CODES.UNAUTHORIZED));
+		}
+
+		const isVisible = Boolean(nearbyVisible);
+		transfer.nearbyVisible = isVisible;
+		await transfer.save();
+		invalidateTransferCache(code);
+
+		// Notify subnet of update
+		const { getIo } = require("../config/socket");
+		const { getSubnet } = require("../utils/helpers");
+		const io = getIo();
+		const subnet = getSubnet(transfer.senderIp);
+		if (io && subnet) {
+			const subnetRoom = `subnet:${subnet}`;
+			io.to(subnetRoom).emit("nearby-refresh-needed", { code });
+		}
+
+		logEvent("Nearby visibility updated", `CODE: ${code}`, `VISIBLE: ${isVisible}`);
+		return res.status(200).json({ success: true, code, nearbyVisible: isVisible });
 	} catch (error) {
 		return next(error);
 	}

@@ -47,6 +47,7 @@ router.post("/share", rateLimitText, async (req, res) => {
 			expiryMinutes,
 			senderSocketId,
 			socketId,
+			nearbyVisible,
 		} = req.body || {};
 
 		const text = trimNonString(content);
@@ -108,6 +109,8 @@ router.post("/share", rateLimitText, async (req, res) => {
 			password: parsePass(password),
 			passwordProtected: parseBool(passwordProtected),
 			expiryMinutes: parseExpiry(expiryMinutes),
+			nearbyVisible: parseBool(nearbyVisible, true),
+			kind: "text",
 		});
 
 		// Persist inline text into the transfer document so metadata can include

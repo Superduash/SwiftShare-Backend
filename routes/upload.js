@@ -253,12 +253,16 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 
 			const safeName = sanitizeFilename(originalName);
 			const storedKey = `transfers/${code}/${safeName}`;
-			const passthrough = new PassThrough({ highWaterMark: 1024 * 1024 });
+			const passthrough = new PassThrough({ highWaterMark: 2 * 1024 * 1024 });
 			let sniffParts = [];
 			let sniffLen = 0;
 			let bytes = 0;
 
 			const progressStream = new Transform({
+				// 256KB: large enough to reduce backpressure interruptions on mobile but
+				// small enough to avoid stalling the sniff detection on first chunk
+				readableHighWaterMark: 256 * 1024,
+				writableHighWaterMark: 256 * 1024,
 				transform(chunk, encoding, callback) {
 					if (aborted) {
 						callback();
@@ -292,14 +296,18 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 			fileStream.pipe(progressStream).pipe(passthrough);
 
 			// Configure multipart upload to R2:
-			// - 8MB part size, 8 concurrent parts (64MB in-flight) for max throughput
+			// - 5MB parts: S3 minimum, reduces retransmit cost if a part fails (reliability
+			//   gain, not raw throughput — tradeoff is more round-trips for large files)
+			// - queueSize 8: parallelises server→R2 part writes; the mobile→server leg is
+			//   always the bottleneck, so this only helps drain the server buffer faster.
+			//   Worth benchmarking at 4 if R2 socket errors appear under load.
 			// - leavePartsOnError:false so aborts clean up server-side parts
 			let uploader;
 			try {
 				uploader = new Upload({
 					client: r2Client,
 					queueSize: 8,
-					partSize: 8 * 1024 * 1024,
+					partSize: 5 * 1024 * 1024, // 5MB min — smaller parts = less retransmit on mobile packet loss
 					leavePartsOnError: false,
 					params: {
 						Bucket: r2Bucket,
@@ -388,6 +396,8 @@ async function finalizeTransfer({
 	password,
 	passwordProtected,
 	expiryMinutes,
+	nearbyVisible,
+	kind = "file",
 }) {
 	const fileCount = files.length;
 	const effectiveExpiryMinutes = Number.isFinite(expiryMinutes) && expiryMinutes > 0
@@ -395,6 +405,9 @@ async function finalizeTransfer({
 		: getSessionExpiryMinutes();
 	const expiresAt = new Date(Date.now() + effectiveExpiryMinutes * 60 * 1000);
 	const shouldProtectWithPassword = Boolean(passwordProtected && password);
+	const effectiveNearbyVisible = shouldProtectWithPassword
+		? false
+		: (typeof nearbyVisible !== "undefined" ? Boolean(nearbyVisible) : true);
 	const uploadDurationMs = Math.max(Date.now() - uploadStartedAt, 1);
 	const uploadSpeed = Math.round(totalSize / (uploadDurationMs / 1000));
 	const shareBaseUrl = process.env.SHARE_BASE_URL;
@@ -414,7 +427,7 @@ async function finalizeTransfer({
 	// Hash password if needed — QR is rendered client-side by react-qr-code, no server generation needed
 	const [passwordHash] = await Promise.all([
 		shouldProtectWithPassword ? bcrypt.hash(password, 8) : Promise.resolve(null)
-		//                                              ^^^ rounds reduced from 10→8 (see Fix 7B)
+		//                                              ^^^ 8 rounds — runs after upload is complete, not on the critical path
 	]);
 	const qr = null; // Not generated server-side — frontend uses react-qr-code with shareLink directly
 
@@ -434,6 +447,7 @@ async function finalizeTransfer({
 		totalSize,
 		burnAfterDownload,
 		passwordProtected: shouldProtectWithPassword,
+		nearbyVisible: effectiveNearbyVisible,
 		ownershipToken,
 	};
 
@@ -441,7 +455,9 @@ async function finalizeTransfer({
 	// DB write happens async in the background; failure is logged but doesn't block the user.
 	emitToRoom(code, "upload-complete", responsePayload);
 	scheduleTransferCountdown(code, expiresAt);
-	broadcastNewTransferToSubnet(code, senderIp);
+	if (effectiveNearbyVisible) {
+		broadcastNewTransferToSubnet(code, senderIp, responsePayload);
+	}
 	recordUpload(Number(totalSize || 0));
 	logEvent("Upload complete", `CODE: ${code}`, formatSizeMB(totalSize));
 
@@ -452,9 +468,11 @@ async function finalizeTransfer({
 		totalSize,
 		fileCount,
 		isZipped: false,
+		kind: kind === "text" ? "text" : "file",
 		burnAfterDownload,
 		passwordProtected: shouldProtectWithPassword,
 		passwordHash,
+		nearbyVisible: effectiveNearbyVisible,
 		passwordAttempts: 0,
 		downloadCount: 0,
 		uploadSpeed,
@@ -553,6 +571,7 @@ router.post("/", rateLimitUpload, sanitizeRequestBody, async (req, res) => {
 		const passwordProtected = parseBooleanFlag(fields.passwordProtected);
 		const password = parsePassword(fields.password);
 		const expiryMinutes = parseExpiryMinutes(fields.expiryMinutes);
+		const nearbyVisible = parseBooleanFlag(fields.nearbyVisible, true);
 		
 		// Validate only if password protection is enabled (skip unnecessary validation)
 		if (passwordProtected && password && !isValidPassword(password)) {
@@ -581,6 +600,7 @@ router.post("/", rateLimitUpload, sanitizeRequestBody, async (req, res) => {
 			password,
 			passwordProtected,
 			expiryMinutes,
+			nearbyVisible,
 		});
 
 		// Release all file stream references immediately to free memory
@@ -604,7 +624,7 @@ router.post("/clipboard", rateLimitUpload, sanitizeRequestBody, async (req, res)
 		const {
 			imageBase64, base64,
 			burnAfterDownload, senderSocketId, socketId,
-			passwordProtected, password, expiryMinutes,
+			passwordProtected, password, expiryMinutes, nearbyVisible,
 		} = req.body || {};
 
 		const imagePayload = typeof imageBase64 === "string"
@@ -659,6 +679,7 @@ router.post("/clipboard", rateLimitUpload, sanitizeRequestBody, async (req, res)
 			password: parsePassword(password),
 			passwordProtected: parseBooleanFlag(passwordProtected),
 			expiryMinutes: parseExpiryMinutes(expiryMinutes),
+			nearbyVisible: parseBooleanFlag(nearbyVisible, true),
 		});
 
 		return res.status(200).json(response);

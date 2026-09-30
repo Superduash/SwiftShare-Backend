@@ -1,6 +1,6 @@
 {
   "name": "swiftshare-backend",
-  "version": "0.7.7",
+  "version": "0.7.8",
   "private": true,
   "main": "server.js",
   "engines": {
@@ -11,6 +11,7 @@
     "predev": "node scripts/ensure-port-free.js 3001",
     "dev": "nodemon --expose-gc server.js",
     "health-check": "node scripts/health-check.js",
+    "admin:hash": "node scripts/hash-admin-password.js",
     "test": "jest"
   },
   "description": "SwiftShare backend powers the temporary file transfer system — handling uploads, session codes, QR generation, real-time progress, and automatic file deletion.",

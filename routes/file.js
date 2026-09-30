@@ -283,6 +283,7 @@ router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => 
 			secondsRemaining,
 			burnAfterDownload: transfer.burnAfterDownload,
 			senderDeviceName: transfer.senderDeviceName,
+			nearbyVisible: transfer.nearbyVisible !== false,
 			text: textPayload,
 			viewCount: currentViewCount,
 			downloadCount: currentDownloadCount,

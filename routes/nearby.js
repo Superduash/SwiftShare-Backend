@@ -89,55 +89,67 @@ router.get("/", rateLimitMetadata, async (req, res, next) => {
 
 		const io = getIo();
 		const subnetRoom = `subnet:${subnet}`;
-		// Subnet-first: get connected socket IDs from the subnet room, then query only
-		// those transfers. Removes global limit dependency entirely.
-		// Always fetch fresh room members to avoid stale socket references
 		const sockets = await io?.in(subnetRoom).fetchSockets();
-		const socketsInSubnet = sockets && Array.isArray(sockets)
-			? new Set(sockets.map((s) => s?.id).filter(Boolean))
-			: new Set();
+		const socketIdArray = sockets && Array.isArray(sockets)
+			? sockets.map((s) => s?.id).filter(Boolean)
+			: [];
 
-		if (socketsInSubnet.size === 0) {
-			return res.status(200).json({ devices: [] });
+		const query = {
+			isDeleted: false,
+			expiresAt: { $gt: now },
+			passwordProtected: { $ne: true },
+			nearbyVisible: { $ne: false },
+		};
+
+		const escapedSubnet = subnet.replace(/\./g, "\\.");
+		const subnetOr = [
+			{ senderIp: { $regex: `^${escapedSubnet}\\.` } },
+			{ senderIp: clientIp },
+		];
+		if (socketIdArray.length > 0) {
+			subnetOr.push({ senderSocketId: { $in: socketIdArray } });
 		}
+		query.$or = subnetOr;
 
-		const socketIdArray = Array.from(socketsInSubnet);
-		const candidates = await Transfer.find(
-			{
-				isDeleted: false,
-				expiresAt: { $gt: now },
-				senderSocketId: { $in: socketIdArray },
-			},
-			{
-				code: 1,
-				fileCount: 1,
-				files: 1,
-				totalSize: 1,
-				"ai.category": 1,
-				senderDeviceName: 1,
-				expiresAt: 1,
-				senderSocketId: 1,
-			},
-		).lean();
+		const candidates = await Transfer.find(query)
+			.select("code fileCount files totalSize ai.category senderDeviceName expiresAt senderSocketId passwordProtected nearbyVisible")
+			.sort({ createdAt: -1 })
+			.limit(30)
+			.lean();
 
-		return res.status(200).json({
-			devices: candidates
-				.map((transfer) => ({
+		const devices = candidates
+			.map((transfer) => {
+				const primaryFile = transfer.files?.[0]?.originalName || "";
+				const title = transfer.files?.length > 1
+					? `${primaryFile || 'Files'} (+${transfer.files.length - 1} more)`
+					: (primaryFile || transfer.code);
+				return {
 					code: transfer.code,
+					filename: title,
+					title,
+					files: (transfer.files || []).map((f) => ({
+						name: f.originalName,
+						size: f.size,
+						type: f.mimeType,
+						icon: f.icon,
+					})),
 					fileCount: Number(transfer.fileCount || transfer.files?.length || 0),
 					totalSize: Number(transfer.totalSize || 0),
 					category: transfer.ai?.category || "Other",
 					deviceName: transfer.senderDeviceName || "Unknown Device",
 					expiresAt: transfer.expiresAt,
 					socketId: String(transfer.senderSocketId || ""),
-				}))
-				.filter((device) => {
-					if (!requesterSocketId) return true;
-					if (!device.socketId) return true;
-					return device.socketId !== requesterSocketId;
-				})
-				.slice(0, 20),
-		});
+					nearbyVisible: transfer.nearbyVisible !== false,
+				};
+			})
+			.filter((device) => {
+				if (!requesterSocketId) return true;
+				if (!device.socketId) return true;
+				return device.socketId !== requesterSocketId;
+			})
+			.slice(0, 20);
+
+		return res.status(200).json({ devices });
 	} catch (error) {
 		return next(error);
 	}

@@ -76,7 +76,15 @@ async function expireOne(transfer) {
 	try {
 		await Transfer.updateOne(
 			{ _id: transfer._id, isDeleted: false },
-			{ $set: { isDeleted: true } },
+			{
+				$set: { isDeleted: true },
+				$unset: {
+					qrDataUri: "",
+					passwordHash: "",
+					ownershipToken: "",
+					"files.$[].inlineContent": "",
+				},
+			},
 		);
 	} catch (err) {
 		logError("Cleanup mark-deleted failed", err, `CODE: ${transfer.code}`);
@@ -98,6 +106,12 @@ async function finalizeStaleBurn(transfer) {
 				$set: {
 					isDeleted: true,
 					burnFinalizedAt: finalizedAt,
+				},
+				$unset: {
+					qrDataUri: "",
+					passwordHash: "",
+					ownershipToken: "",
+					"files.$[].inlineContent": "",
 				},
 				$push: {
 					activity: {

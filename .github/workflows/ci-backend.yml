@@ -38,7 +38,14 @@ jobs:
           R2_BUCKET_NAME: test-bucket
           FRONTEND_URL: http://localhost:5173
           SHARE_BASE_URL: http://localhost:5173
-          TOKEN_SECRET: test-token-secret-min-32-chars-long
+          TOKEN_SECRET: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+          ADMIN_ENABLED: true
+          ADMIN_USERNAME: Superduash
+          ADMIN_PASSWORD_HASH: '$2b$12$eS/whaMJcypEep5pHS7lUeU5Xnql8QsJUGqMGocyFvtWMO5d6hWai'
+          ADMIN_JWT_SECRET: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+          ANALYTICS_HASH_SALT: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+          ADMIN_SESSION_TTL_MINUTES: 120
+          ADMIN_TIMEZONE: Asia/Kolkata
 
       - name: Audit dependencies
         run: npm audit --audit-level=high || true

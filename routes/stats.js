@@ -4,14 +4,14 @@ const Transfer = require("../models/Transfer");
 const { rateLimitStats } = require("../middleware/rateLimiter");
 const { logError } = require("../utils/logger");
 
-const SEEDED_STATS = {
-	totalTransfers: 847,
-	activeTransfers: 12,
-	totalFiles: 1932,
-	totalDataShared: 4839201923,
-	totalDownloads: 1243,
-	totalUsers: 312,
-	averageTransferSpeed: 640000,
+const EMPTY_STATS = {
+	totalTransfers: 0,
+	activeTransfers: 0,
+	totalFiles: 0,
+	totalDataShared: 0,
+	totalDownloads: 0,
+	totalUsers: 0,
+	averageTransferSpeed: 0,
 };
 
 const STATS_CACHE_TTL_MS = Number(process.env.STATS_CACHE_TTL_MS) > 0
@@ -32,8 +32,6 @@ async function computeStats() {
 	const now = new Date();
 
 	// estimatedDocumentCount uses collection metadata (O(1)) instead of a full scan.
-	// For a stats display, exact count isn't needed — within the past few seconds
-	// of writes is fine.
 	const [totalTransfers, activeTransfers, totals, uniqueUsers, speedStats] = await Promise.all([
 		Transfer.estimatedDocumentCount(),
 		Transfer.countDocuments({
@@ -50,8 +48,6 @@ async function computeStats() {
 				},
 			},
 		]).allowDiskUse(true),
-		// distinct on senderIp can be expensive; cap with a recency window so
-		// it stays bounded even as the collection grows.
 		Transfer.distinct("senderIp", { 
 			senderIp: { $ne: "" },
 			createdAt: { $gte: new Date(now - 30 * 24 * 60 * 60 * 1000) }
@@ -86,19 +82,15 @@ async function computeStats() {
 		totalDownloads: 0,
 	};
 
-	if (totalTransfers === 0) {
-		return SEEDED_STATS;
-	}
-
 	const averageTransferSpeed = Number(speedStats?.[0]?.averageTransferSpeed || 0);
 
 	return {
-		totalTransfers: totalTransfers + SEEDED_STATS.totalTransfers,
-		activeTransfers,
-		totalFiles: Number(aggregate.totalFiles || 0) + SEEDED_STATS.totalFiles,
-		totalDataShared: Number(aggregate.totalBytes || 0) + SEEDED_STATS.totalDataShared,
-		totalDownloads: Number(aggregate.totalDownloads || 0) + SEEDED_STATS.totalDownloads,
-		totalUsers: Number(uniqueUsers.length || 0) + SEEDED_STATS.totalUsers,
+		totalTransfers: Number(totalTransfers || 0),
+		activeTransfers: Number(activeTransfers || 0),
+		totalFiles: Number(aggregate.totalFiles || 0),
+		totalDataShared: Number(aggregate.totalBytes || 0),
+		totalDownloads: Number(aggregate.totalDownloads || 0),
+		totalUsers: Number(uniqueUsers.length || 0),
 		averageTransferSpeed,
 	};
 }
@@ -131,12 +123,10 @@ router.get("/", rateLimitStats, async (req, res, next) => {
 		return res.status(200).json(payload);
 	} catch (error) {
 		logError("Stats route failed", error);
-		// Stats are decorative — never let a failing aggregate take down the page.
-		// Return seeded values rather than 5xx so the public landing keeps rendering.
 		if (cache.payload) {
 			return res.status(200).json(cache.payload);
 		}
-		return res.status(200).json(SEEDED_STATS);
+		return res.status(200).json(EMPTY_STATS);
 	}
 });
 

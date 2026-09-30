@@ -58,6 +58,7 @@ swiftshare-fix-prompt.md
 backend_plan.md
 polish.md
 swiftshare-code-export.txt
+adminpanel.md
 *.local
 
 # Stray test / debug scripts (never commit these)

@@ -28,6 +28,8 @@ const transferRoutes = require("./routes/transfer");
 const nearbyRoutes = require("./routes/nearby");
 const statsRoutes = require("./routes/stats");
 const textRoutes = require("./routes/text");
+const adminRoutes = require("./routes/admin");
+const analyticsRoutes = require("./routes/analytics");
 const { startCleanupJob } = require("./services/cleanupService");
 const { errorHandler } = require("./middleware/errorHandler");
 const { ERROR_CODES, buildErrorResponse } = require("./utils/constants");
@@ -163,6 +165,8 @@ app.use(compression({
 	level: 6,
 	filter: (req, res) => {
 		if (req.headers["x-no-compression"]) return false;
+		// Uploads are multipart file data — already compressed, skip entirely
+		if (req.path === '/api/upload' && req.method === 'POST') return false;
 		const ct = String(res.getHeader("Content-Type") || "");
 		if (/^(application\/octet-stream|audio\/|video\/|image\/|application\/zip)/i.test(ct)) return false;
 		return compression.filter(req, res);
@@ -222,10 +226,21 @@ app.use(morgan((tokens, req, res) => {
 	const url = (req.originalUrl || "").split("?")[0];
 	return [tokens.method(req, res), url, tokens.status(req, res), tokens["response-time"](req, res), "ms"].join(" ");
 }, {
-	skip: (req, res) => (req.path === '/api/health' || req.path === '/api/ping') && res.statusCode === 200
+	skip: (req, res) => {
+		if ((req.path === '/api/health' || req.path === '/api/ping') && res.statusCode === 200) return true;
+		// Skip logging for streaming upload requests — completion is logged by the route handler
+		if (req.path === '/api/upload' && req.method === 'POST') return true;
+		return false;
+	}
 }));
 
-app.use(express.json({ limit: "1mb" }));
+app.use((req, res, next) => {
+	// Upload and download routes use streaming (Busboy) and don't need JSON
+	// body parsing. Skipping it avoids a stall where Express tries to parse
+	// a multipart body as JSON before Busboy can consume the stream.
+	if (/^\/api\/(upload|download)/i.test(req.path)) return next();
+	express.json({ limit: "1mb" })(req, res, next);
+});
 
 // Route timeout config.
 app.use((req, res, next) => {
@@ -302,6 +317,8 @@ app.use("/api/transfer", transferRoutes);
 app.use("/api/nearby", nearbyRoutes);
 app.use("/api/stats", statsRoutes);
 app.use("/api/text", textRoutes);
+app.use("/api/admin", adminRoutes);
+app.use("/api/analytics", analyticsRoutes);
 
 
 
@@ -415,8 +432,8 @@ app.use((req, res) => {
 	res.status(404).json(resp);
 });
 
-// Use Sentry error handler if initialized.
-if (process.env.SENTRY_DSN && typeof Sentry.getClient === "function" && Sentry.getClient()) {
+// Use Sentry error handler if initialized (skip in test mode to prevent test errors from sending alerts).
+if (process.env.SENTRY_DSN && process.env.NODE_ENV !== "test" && typeof Sentry.getClient === "function" && Sentry.getClient()) {
 	Sentry.setupExpressErrorHandler(app);
 }
 app.use(errorHandler);
@@ -511,6 +528,15 @@ function startServer() {
 	});
 
 	server.listen(port, host, () => {
+		// TCP socket tuning:
+		// - keepAlive: keep the socket warm between requests to avoid reconnect cost
+		// - noDelay (TCP_NODELAY): disables Nagle's algorithm, reducing latency for
+		//   small writes at the expense of slightly more packets. Primarily a latency
+		//   optimization, not a throughput guarantee. Node.js docs note the tradeoff.
+		server.on('connection', (socket) => {
+			socket.setKeepAlive(true, 65000)
+			socket.setNoDelay(true)
+		})
 		startCleanupJob();
 		printStartupStatus(port, host);
 

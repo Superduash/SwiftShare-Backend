@@ -26,7 +26,7 @@ const httpAgent = new http.Agent({ keepAlive: true, maxSockets, keepAliveMsecs: 
 
 const connectionTimeoutMs = Number(process.env.R2_CONNECTION_TIMEOUT_MS) > 0
 	? Number(process.env.R2_CONNECTION_TIMEOUT_MS)
-	: 8000;
+	: 15000; // 15s — slow mobile TLS handshakes can take 8-12s
 const socketTimeoutMs = Number(process.env.R2_SOCKET_TIMEOUT_MS) > 0
 	? Number(process.env.R2_SOCKET_TIMEOUT_MS)
 	: 600000;

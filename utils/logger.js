@@ -1,4 +1,4 @@
-﻿function getTimestamp() {
+function getTimestamp() {
 	const now = new Date();
 	const hh = String(now.getHours()).padStart(2, "0");
 	const mm = String(now.getMinutes()).padStart(2, "0");
@@ -67,8 +67,10 @@ function redactSensitiveData(data) {
 		return data.map(item => redactSensitiveData(item));
 	}
 
-	const redacted = {};
-	const sensitiveKeys = ["password", "token", "apikey", "secret", "authorization", "api_key", "apiKey"];
+	const sensitiveKeys = [
+		"password", "token", "apikey", "secret", "authorization", 
+		"api_key", "apikey", "hash", "jwt", "salt", "bearer"
+	];
 
 	for (const key in data) {
 		const lowerKey = key.toLowerCase();

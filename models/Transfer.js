@@ -81,6 +81,12 @@ const transferSchema = new mongoose.Schema(
 			type: Boolean,
 			default: false,
 		},
+		kind: {
+			type: String,
+			enum: ["file", "text"],
+			default: "file",
+			index: true,
+		},
 		burnAfterDownload: {
 			type: Boolean,
 			default: false,
@@ -97,6 +103,10 @@ const transferSchema = new mongoose.Schema(
 			type: Number,
 			default: 0,
 			min: 0,
+		},
+		nearbyVisible: {
+			type: Boolean,
+			default: true,
 		},
 		extendedOnce: {
 			type: Boolean,
@@ -247,20 +257,20 @@ transferSchema.index(
 // Optimizes stale socket cleanup (finds transfers with specific senderSocketId)
 transferSchema.index({ senderSocketId: 1 }, { sparse: true });
 
-// Optimizes stats distinct query with recency window. Also serves bare-senderIp lookups,
-// so no separate { senderIp: 1 } index is needed.
+// Optimizes stats distinct query with recency window. Also serves bare-senderIp lookups.
+transferSchema.index({ senderIp: 1, createdAt: -1 });
 transferSchema.index({ senderIp: 1, createdAt: 1 });
 
 // Optimizes the nearby-devices socket query
 transferSchema.index({ isDeleted: 1, expiresAt: 1, senderSocketId: 1, createdAt: -1 }, { name: "nearby_sockets" });
 
-// TTL safety net: MongoDB auto-deletes documents 24 hours after expiresAt.
-// Gives the cleanup job time to delete R2 files first; do NOT use expireAfterSeconds: 0
-// (which would delete immediately on expiry and orphan R2 objects).
-transferSchema.index(
-	{ expiresAt: 1 },
-	{ expireAfterSeconds: 86400, name: "ttl_post_expiry_safety_net" },
-);
+// Activity timestamp index for timeseries download tracking
+transferSchema.index({ "activity.timestamp": -1 }, { sparse: true });
+
+// Note: No TTL index here on Transfer collection — historical transfer documents persist
+// indefinitely with isDeleted: true so all-time transfer statistics remain complete.
+// Sensitive/heavy payloads (qrDataUri, passwordHash, ownershipToken, inlineContent)
+// are safely $unset upon expiration.
 
 // Disable Mongoose's autoIndex in production: index builds at app start can stall
 // the dyno on cold-start. Indexes are managed via this file + occasional manual sync.

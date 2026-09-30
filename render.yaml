@@ -68,3 +68,18 @@ services:
         value: "6"
       - key: QR_BRANDED
         value: "true"
+      # Admin Panel & Analytics Configuration
+      - key: ADMIN_ENABLED
+        value: "true"
+      - key: ADMIN_USERNAME
+        sync: false
+      - key: ADMIN_PASSWORD_HASH
+        sync: false
+      - key: ADMIN_JWT_SECRET
+        sync: false
+      - key: ANALYTICS_HASH_SALT
+        sync: false
+      - key: ADMIN_SESSION_TTL_MINUTES
+        value: "120"
+      - key: ADMIN_TIMEZONE
+        value: "Asia/Kolkata"
