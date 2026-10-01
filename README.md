@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v0.8.1-f97316?style=flat-square"/>
+  <img src="https://img.shields.io/badge/version-v0.8.2-f97316?style=flat-square"/>
   <img src="https://img.shields.io/badge/Node.js_22-339933?style=flat-square&logo=node.js&logoColor=white"/>
   <img src="https://img.shields.io/badge/Express_5-black?style=flat-square&logo=express"/>
   <img src="https://img.shields.io/badge/MongoDB-47A248?style=flat-square&logo=mongodb&logoColor=white"/>
