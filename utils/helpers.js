@@ -64,24 +64,6 @@ function parseEnvInt(value, defaultValue, min = 0, max = Infinity) {
 	}
 }
 
-function getClientIp(req) {
-	try {
-		const forwarded = req.headers["x-forwarded-for"];
-
-		if (typeof forwarded === "string" && forwarded.length > 0) {
-			return normalizeIp(forwarded.split(",")[0].trim());
-		}
-
-		if (Array.isArray(forwarded) && forwarded.length > 0) {
-			return normalizeIp(String(forwarded[0]).trim());
-		}
-
-		return normalizeIp(req.socket?.remoteAddress || req.ip || "");
-	} catch (error) {
-		return "127.0.0.1"; // Fallback for any parsing errors
-	}
-}
-
 function normalizeIp(ip) {
 	const raw = String(ip || "").trim();
 	
@@ -98,37 +80,75 @@ function normalizeIp(ip) {
 	return raw;
 }
 
+function getClientIp(req) {
+	try {
+		// Priority 1: Cloudflare CF-Connecting-IP
+		const cfIp = req.headers?.["cf-connecting-ip"];
+		if (typeof cfIp === "string" && cfIp.trim()) {
+			return normalizeIp(cfIp.trim());
+		}
+
+		// Priority 2: X-Real-IP
+		const realIp = req.headers?.["x-real-ip"];
+		if (typeof realIp === "string" && realIp.trim()) {
+			return normalizeIp(realIp.trim());
+		}
+
+		// Priority 3: X-Forwarded-For
+		const forwarded = req.headers?.["x-forwarded-for"];
+		if (typeof forwarded === "string" && forwarded.length > 0) {
+			return normalizeIp(forwarded.split(",")[0].trim());
+		}
+
+		if (Array.isArray(forwarded) && forwarded.length > 0) {
+			return normalizeIp(String(forwarded[0]).trim());
+		}
+
+		// Priority 4: Socket remoteAddress / Express req.ip
+		return normalizeIp(req.socket?.remoteAddress || req.ip || "");
+	} catch (error) {
+		return "127.0.0.1"; // Fallback for any parsing errors
+	}
+}
+
 function getSubnet(ip) {
 	try {
 		const normalized = normalizeIp(ip);
+		if (!normalized) return "";
 		
-		// Handle IPv6 addresses - return empty (not supported for nearby devices)
+		// Handle IPv6 addresses - extract /64 subnet prefix (first 4 segments) for hotspot / carrier Wi-Fi
 		if (normalized.includes(":")) {
-			return "";
+			const parts = normalized.split(":").filter(Boolean);
+			if (parts.length >= 4) {
+				return parts.slice(0, 4).join(":").toLowerCase();
+			} else if (parts.length >= 2) {
+				return parts.join(":").toLowerCase();
+			}
+			return normalized.toLowerCase();
 		}
 		
-		// Handle IPv4
-		if (!normalized.includes(".")) {
-			return "";
-		}
-
-		const octets = normalized.split(".");
-		if (octets.length !== 4) {
-			return "";
-		}
-		
-		// Validate each octet is a number 0-255
-		for (const octet of octets) {
-			const num = Number(octet);
-			if (!Number.isFinite(num) || num < 0 || num > 255) {
-				return "";
+		// Handle IPv4 (/24 subnet - first 3 octets)
+		if (normalized.includes(".")) {
+			const octets = normalized.split(".");
+			if (octets.length === 4) {
+				const num0 = Number(octets[0]);
+				const num1 = Number(octets[1]);
+				const num2 = Number(octets[2]);
+				const num3 = Number(octets[3]);
+				if (
+					Number.isFinite(num0) && num0 >= 0 && num0 <= 255 &&
+					Number.isFinite(num1) && num1 >= 0 && num1 <= 255 &&
+					Number.isFinite(num2) && num2 >= 0 && num2 <= 255 &&
+					Number.isFinite(num3) && num3 >= 0 && num3 <= 255
+				) {
+					return `${octets[0]}.${octets[1]}.${octets[2]}`;
+				}
 			}
 		}
 
-		// Return first 3 octets for /24 subnet
-		return `${octets[0]}.${octets[1]}.${octets[2]}`;
+		return normalized;
 	} catch (error) {
-		return ""; // Fallback for any parsing errors
+		return "";
 	}
 }
 

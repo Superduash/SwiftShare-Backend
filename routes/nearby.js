@@ -101,9 +101,10 @@ router.get("/", rateLimitMetadata, async (req, res, next) => {
 			nearbyVisible: { $ne: false },
 		};
 
-		const escapedSubnet = subnet.replace(/\./g, "\\.");
+		const escapedSubnet = subnet.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		const subnetRegex = subnet.includes(":") ? `^${escapedSubnet}` : `^${escapedSubnet}\\.`;
 		const subnetOr = [
-			{ senderIp: { $regex: `^${escapedSubnet}\\.` } },
+			{ senderIp: { $regex: subnetRegex } },
 			{ senderIp: clientIp },
 		];
 		if (socketIdArray.length > 0) {

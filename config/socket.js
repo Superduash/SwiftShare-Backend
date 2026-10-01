@@ -297,10 +297,10 @@ function scheduleTransferCountdown(code, expiresAt) {
 }
 
 function getSocketIp(socket) {
-	// Priority 1: x-forwarded-for (most reliable for proxied connections)
-	const forwardedFor = socket?.handshake?.headers?.["x-forwarded-for"];
-	if (typeof forwardedFor === "string" && forwardedFor.trim()) {
-		return forwardedFor.split(",")[0].trim();
+	// Priority 1: Cloudflare CF-Connecting-IP
+	const cfIp = socket?.handshake?.headers?.["cf-connecting-ip"];
+	if (typeof cfIp === "string" && cfIp.trim()) {
+		return cfIp.trim();
 	}
 
 	// Priority 2: x-real-ip
@@ -309,7 +309,13 @@ function getSocketIp(socket) {
 		return realIp.trim();
 	}
 
-	// Priority 3: socket address
+	// Priority 3: x-forwarded-for (most reliable for proxied connections)
+	const forwardedFor = socket?.handshake?.headers?.["x-forwarded-for"];
+	if (typeof forwardedFor === "string" && forwardedFor.trim()) {
+		return forwardedFor.split(",")[0].trim();
+	}
+
+	// Priority 4: socket address
 	return String(socket?.handshake?.address || "").trim();
 }
 
@@ -320,8 +326,8 @@ async function emitNearbyDevices(socket) {
 			return;
 		}
 
-		const subnet = socket.data.subnet;
-		const clientIp = socket.data.clientIp;
+		const subnet = socket.data?.subnet;
+		const clientIp = socket.data?.clientIp;
 
 		// If no valid subnet, return empty list
 		if (!subnet) {
@@ -341,9 +347,10 @@ async function emitNearbyDevices(socket) {
 			nearbyVisible: { $ne: false },
 		};
 
-		const escapedSubnet = subnet.replace(/\./g, "\\.");
+		const escapedSubnet = subnet.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		const subnetRegex = subnet.includes(":") ? `^${escapedSubnet}` : `^${escapedSubnet}\\.`;
 		const subnetOr = [
-			{ senderIp: { $regex: `^${escapedSubnet}\\.` } },
+			{ senderIp: { $regex: subnetRegex } },
 			{ senderIp: clientIp },
 		];
 		if (socketIdArray.length > 0) {
