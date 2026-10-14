@@ -77,7 +77,11 @@ async function expireOne(transfer) {
 		await Transfer.updateOne(
 			{ _id: transfer._id, isDeleted: false },
 			{
-				$set: { isDeleted: true },
+				$set: {
+					isDeleted: true,
+					deletionReason: "expired",
+					expiredAt: new Date(),
+				},
 				$unset: {
 					qrDataUri: "",
 					passwordHash: "",
@@ -106,6 +110,7 @@ async function finalizeStaleBurn(transfer) {
 				$set: {
 					isDeleted: true,
 					burnFinalizedAt: finalizedAt,
+					deletionReason: "burn",
 				},
 				$unset: {
 					qrDataUri: "",

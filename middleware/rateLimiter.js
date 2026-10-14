@@ -103,6 +103,72 @@ function clearAdminLoginFailures(ip) {
 	adminLockoutMap.delete(ip);
 }
 
+// Code lookup attempt & lockout map (prevents enumeration / brute-forcing of 6-digit codes)
+const codeLookupLockoutMap = new Map();
+const MAX_FAILED_LOOKUPS = 5;
+const LOOKUP_LOCKOUT_MS = 5 * 60 * 1000; // 5 minutes lockout
+const LOOKUP_WINDOW_MS = 5 * 60 * 1000; // 5 minutes failure tracking window
+
+function checkCodeLookupLockout(ip) {
+	const now = Date.now();
+	const entry = codeLookupLockoutMap.get(ip);
+	if (!entry) return { locked: false };
+
+	if (entry.lockedUntil && now < entry.lockedUntil) {
+		const retryAfter = Math.ceil((entry.lockedUntil - now) / 1000);
+		return { locked: true, retryAfter };
+	}
+
+	if (entry.firstAttempt && now - entry.firstAttempt > LOOKUP_WINDOW_MS) {
+		codeLookupLockoutMap.delete(ip);
+		return { locked: false };
+	}
+
+	return { locked: false };
+}
+
+function recordCodeLookupFailure(ip) {
+	const now = Date.now();
+	let entry = codeLookupLockoutMap.get(ip);
+	if (!entry || now - entry.firstAttempt > LOOKUP_WINDOW_MS) {
+		entry = { failures: 1, firstAttempt: now, lockedUntil: null };
+	} else {
+		entry.failures += 1;
+	}
+
+	if (entry.failures >= MAX_FAILED_LOOKUPS) {
+		entry.lockedUntil = now + LOOKUP_LOCKOUT_MS;
+	}
+
+	codeLookupLockoutMap.set(ip, entry);
+	return entry.lockedUntil ? Math.ceil((entry.lockedUntil - now) / 1000) : null;
+}
+
+function clearCodeLookupFailures(ip) {
+	codeLookupLockoutMap.delete(ip);
+}
+
+function rateLimitCodeLookup(req, res, next) {
+	try {
+		const ip = getClientIp(req) || "unknown";
+		const lockout = checkCodeLookupLockout(ip);
+		if (lockout.locked) {
+			res.setHeader("Retry-After", String(lockout.retryAfter));
+			return res.status(429).json({
+				success: false,
+				error: {
+					code: ERROR_CODES.RATE_LIMIT_EXCEEDED,
+					message: "Too many failed attempts. Please try again in a few minutes.",
+				},
+				retryAfter: lockout.retryAfter,
+			});
+		}
+		next();
+	} catch (err) {
+		next();
+	}
+}
+
 function ipBasedRateLimit(ip, maxRequests = IP_RATE_LIMIT_MAX_REQUESTS, windowMs = IP_RATE_LIMIT_WINDOW_MS) {
 	const now = Date.now();
 	const entry = ipRateLimitMap.get(ip);
@@ -296,5 +362,9 @@ module.exports = {
 	recordAdminLoginFailure,
 	clearAdminLoginFailures,
 	checkAdminLoginLockout,
+	rateLimitCodeLookup,
+	recordCodeLookupFailure,
+	clearCodeLookupFailures,
+	checkCodeLookupLockout,
 };
 

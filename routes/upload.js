@@ -521,7 +521,8 @@ router.post("/", rateLimitUpload, sanitizeRequestBody, async (req, res) => {
 		return res.status(400).json(buildErrorResponse(ERROR_CODES.INVALID_FILE_TYPE, "Expected multipart/form-data"));
 	}
 
-	const code = await generateUniqueCode();
+	const secureMode = String(req.query.secureMode || req.headers['x-secure-mode'] || '').toLowerCase() === 'true';
+	const code = await generateUniqueCode({ secureMode });
 	const maxFileCount = getMaxFileCount();
 	const maxTotalBytes = getMaxFileSizeBytes();
 	const uploadStartedAt = Date.now();
@@ -657,7 +658,8 @@ router.post("/clipboard", rateLimitUpload, sanitizeRequestBody, async (req, res)
 
 		const extension = mimeType.split("/")[1]?.split("+")[0] || "png";
 		const filename = `clipboard-${Date.now()}.${extension}`;
-		const code = await generateUniqueCode();
+		const secureMode = Boolean(req.body.secureMode) || String(req.query.secureMode || '').toLowerCase() === 'true';
+		const code = await generateUniqueCode({ secureMode });
 		const safeName = sanitizeFilename(filename);
 		const storedKey = `transfers/${code}/${safeName}`;
 		const senderId = typeof senderSocketId === "string" && senderSocketId

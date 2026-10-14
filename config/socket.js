@@ -359,7 +359,7 @@ async function emitNearbyDevices(socket) {
 		query.$or = subnetOr;
 
 		const candidates = await Transfer.find(query)
-			.select("code fileCount files totalSize ai.category senderDeviceName expiresAt senderSocketId passwordProtected nearbyVisible")
+			.select("code fileCount files totalSize ai.category senderDeviceName expiresAt createdAt senderSocketId passwordProtected nearbyVisible")
 			.sort({ createdAt: -1 })
 			.limit(30)
 			.lean();
@@ -386,6 +386,7 @@ async function emitNearbyDevices(socket) {
 					category: transfer.ai?.category || "Other",
 					deviceName: transfer.senderDeviceName || "Unknown Device",
 					expiresAt: transfer.expiresAt,
+					createdAt: transfer.createdAt,
 					socketId: String(transfer.senderSocketId || ""),
 					nearbyVisible: transfer.nearbyVisible !== false,
 				};

@@ -7,7 +7,7 @@ const Transfer = require("../models/Transfer");
 const { getObjectFromR2, getObjectHeadFromR2, deleteFilesFromR2 } = require("../services/fileManager");
 const { emitToRoom } = require("../config/socket");
 const { streamZipFromR2 } = require("../services/zipService");
-const { rateLimitDownload } = require("../middleware/rateLimiter");
+const { rateLimitDownload, rateLimitCodeLookup, recordCodeLookupFailure } = require("../middleware/rateLimiter");
 const { validateCode } = require("../middleware/validateCode");
 const {
 	sanitizeFilename,
@@ -25,6 +25,14 @@ const { logEvent, logError, logWarn } = require("../utils/logger");
 const { recordDownload } = require("../utils/performance");
 
 const router = express.Router();
+
+async function findTransferByCode(code) {
+	let transfer = await Transfer.findOne({ code, isDeleted: false }).lean();
+	if (!transfer) {
+		transfer = await Transfer.findOne({ code }).sort({ createdAt: -1 }).lean();
+	}
+	return transfer;
+}
 
 // Allow ownership token via query string for streaming routes.
 function isOwnerViaQuery(transfer, req) {
@@ -44,20 +52,24 @@ function isOwnerViaQuery(transfer, req) {
 
 function sendUnavailableTransferResponse(req, res, transfer) {
 	if (!transfer) {
+		recordCodeLookupFailure(getClientIp(req));
 		return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
 	}
 
 	if (isTransferExpired(transfer)) {
+		recordCodeLookupFailure(getClientIp(req));
 		return res.status(410).json(buildErrorResponse(ERROR_CODES.TRANSFER_EXPIRED));
 	}
 
 	if (transfer.isDeleted) {
+		recordCodeLookupFailure(getClientIp(req));
 		return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
 	}
 
 	const isSenderRequest = isOwnerViaQuery(transfer, req);
 
 	if (transfer.burnAfterDownload && (transfer.claimantToken || transfer.burnClaimOwner) && !isSenderRequest && !isBurnClaimOwner(transfer, req)) {
+		recordCodeLookupFailure(getClientIp(req));
 		return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
 	}
 
@@ -575,23 +587,29 @@ async function finalizeDownload(transfer, {
 	downloadSpeed,
 	receiverDevice,
 	receiverIp,
+	sessionId,
 }) {
 	const { logEvent: log, logError } = require("../utils/logger");
 	
 	try {
-		log("FINALIZE_DOWNLOAD_START", `CODE: ${transfer.code}`, `BURN_FLOW: ${isBurnFlow}`);
+		log("FINALIZE_DOWNLOAD_START", `CODE: ${transfer.code}`, `BURN_FLOW: ${isBurnFlow}`, `SESSION: ${sessionId || "none"}`);
 		
+		const alreadyCounted = Boolean(sessionId && Array.isArray(transfer.downloadSessions) && transfer.downloadSessions.includes(sessionId));
+		const incUpdate = alreadyCounted ? {} : { downloadCount: 1 };
+		const sessionUpdate = (sessionId && !alreadyCounted) ? { $addToSet: { downloadSessions: sessionId } } : {};
+
 		let updateResult;
 		if (isBurnFlow) {
 			updateResult = await Transfer.updateOne(
 				{ _id: transfer._id },
 				{
-					$inc: { downloadCount: 1 },
+					...(Object.keys(incUpdate).length > 0 ? { $inc: incUpdate } : {}),
 					$set: {
 						downloadDuration,
 						downloadSpeed,
 						burnLastActiveAt: new Date(),
 					},
+					...sessionUpdate,
 					$push: {
 						activity: claimedNow
 							? {
@@ -623,11 +641,12 @@ async function finalizeDownload(transfer, {
 			updateResult = await Transfer.updateOne(
 				{ _id: transfer._id },
 				{
-					$inc: { downloadCount: 1 },
+					...(Object.keys(incUpdate).length > 0 ? { $inc: incUpdate } : {}),
 					$set: {
 						downloadDuration,
 						downloadSpeed,
 					},
+					...sessionUpdate,
 					$push: {
 						activity: {
 							event: "downloaded",
@@ -685,10 +704,10 @@ function buildTransferReceipt({
 	};
 }
 
-router.get("/:code", rateLimitDownload, validateCode, async (req, res, next) => {
+router.get("/:code", rateLimitCodeLookup, rateLimitDownload, validateCode, async (req, res, next) => {
 	try {
 		const { code } = req.params;
-		let transfer = await Transfer.findOne({ code }).lean();
+		let transfer = await findTransferByCode(code);
 		const receiverDevice = getDeviceName(req.get("user-agent") || "");
 		const receiverIp = getClientIp(req);
 
@@ -744,6 +763,8 @@ router.get("/:code", rateLimitDownload, validateCode, async (req, res, next) => 
 		const downloadDuration = Math.max(Date.now() - streamStart, 1);
 		const downloadSpeed = Math.round(streamedBytes / (downloadDuration / 1000));
 
+		const downloadSessionId = sanitizeString(String(req.query?.downloadSessionId || req.query?.sessionId || req.get("x-download-session") || "").trim(), 64);
+
 		if (!isSenderRequest) {
 			await finalizeDownload(transfer, {
 				isBurnFlow,
@@ -752,6 +773,7 @@ router.get("/:code", rateLimitDownload, validateCode, async (req, res, next) => 
 				downloadSpeed,
 				receiverDevice,
 				receiverIp,
+				sessionId: downloadSessionId,
 			});
 			recordDownload(Number(streamedBytes || 0));
 
@@ -782,10 +804,10 @@ router.get("/:code", rateLimitDownload, validateCode, async (req, res, next) => 
 	}
 });
 
-router.get("/:code/single/:index", rateLimitDownload, validateCode, async (req, res, next) => {
+router.get("/:code/single/:index", rateLimitCodeLookup, rateLimitDownload, validateCode, async (req, res, next) => {
 	try {
 		const { code, index } = req.params;
-		let transfer = await Transfer.findOne({ code }).lean();
+		let transfer = await findTransferByCode(code);
 		const receiverDevice = getDeviceName(req.get("user-agent") || "");
 		const receiverIp = getClientIp(req);
 
@@ -835,6 +857,8 @@ router.get("/:code/single/:index", rateLimitDownload, validateCode, async (req, 
 		const downloadDuration = Math.max(Date.now() - streamStart, 1);
 		const downloadSpeed = Math.round(streamedBytes / (downloadDuration / 1000));
 
+		const downloadSessionId = sanitizeString(String(req.query?.downloadSessionId || req.query?.sessionId || req.get("x-download-session") || "").trim(), 64);
+
 		if (!isSenderRequest) {
 			await finalizeDownload(transfer, {
 				isBurnFlow,
@@ -843,6 +867,7 @@ router.get("/:code/single/:index", rateLimitDownload, validateCode, async (req, 
 				downloadSpeed,
 				receiverDevice,
 				receiverIp,
+				sessionId: downloadSessionId,
 			});
 			recordDownload(Number(streamedBytes || 0));
 
@@ -887,7 +912,7 @@ router.options("/:code/preview/:index", (req, res) => {
 router.head("/:code/preview/:index", validateCode, async (req, res, next) => {
 	try {
 		const { code, index } = req.params;
-		const transfer = await Transfer.findOne({ code }).lean();
+		const transfer = await findTransferByCode(code);
 
 		const unavailableResponse = sendUnavailableTransferResponse(req, res, transfer);
 		if (unavailableResponse) {
@@ -943,7 +968,7 @@ router.head("/:code/preview/:index", validateCode, async (req, res, next) => {
 router.get("/:code/preview/:index", validateCode, async (req, res, next) => {
 	try {
 		const { code, index } = req.params;
-		const transfer = await Transfer.findOne({ code }).lean();
+		const transfer = await findTransferByCode(code);
 
 		const unavailableResponse = sendUnavailableTransferResponse(req, res, transfer);
 		if (unavailableResponse) {

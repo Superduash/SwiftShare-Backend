@@ -9,6 +9,7 @@ const MAX_FILE_COUNT = Number.isInteger(rawMaxFileCount) && rawMaxFileCount > 0
 	: 10;
 const SESSION_EXPIRY_MINUTES = Number(process.env.SESSION_EXPIRY_MINUTES) || 10;
 const CODE_LENGTH = Number(process.env.CODE_LENGTH) || 6;
+const CODE_CHARSET = process.env.CODE_CHARSET || "digits";
 
 const ERROR_CODES = {
 	FILE_TOO_LARGE: "FILE_TOO_LARGE",
@@ -37,8 +38,8 @@ const ERROR_MESSAGES = {
 	[ERROR_CODES.TOO_MANY_FILES]: `Too many files. Maximum ${MAX_FILE_COUNT} files allowed`,
 	[ERROR_CODES.INVALID_FILE_TYPE]: "File type is not allowed",
 	[ERROR_CODES.NO_FILE_UPLOADED]: "No file uploaded",
-	[ERROR_CODES.TRANSFER_NOT_FOUND]: "Transfer not found",
-	[ERROR_CODES.TRANSFER_EXPIRED]: "Transfer has expired",
+	[ERROR_CODES.TRANSFER_NOT_FOUND]: "Transfer code invalid or expired",
+	[ERROR_CODES.TRANSFER_EXPIRED]: "Transfer code invalid or expired",
 	[ERROR_CODES.ALREADY_DOWNLOADED]: "Transfer already downloaded",
 	[ERROR_CODES.BURN_TRANSFER_CLAIMED]: "This burn transfer has already been claimed",
 	[ERROR_CODES.PASSWORD_REQUIRED]: "Password is required",
@@ -51,7 +52,8 @@ const ERROR_MESSAGES = {
 	[ERROR_CODES.SERVER_ERROR]: "Internal server error",
 };
 
-const CODE_REGEX = new RegExp(`^[A-Z2-9]{${CODE_LENGTH}}$`);
+// Accepts new 6-digit numeric codes, legacy 6-char alphanumeric, and 8-10 char secure mode codes
+const CODE_REGEX = /^(?:\d{6}|[A-Za-z0-9]{6,10})$/;
 
 function buildErrorResponse(code, message) {
 	return {
@@ -68,6 +70,7 @@ module.exports = {
 	MAX_FILE_COUNT,
 	SESSION_EXPIRY_MINUTES,
 	CODE_LENGTH,
+	CODE_CHARSET,
 	ERROR_CODES,
 	ERROR_MESSAGES,
 	CODE_REGEX,

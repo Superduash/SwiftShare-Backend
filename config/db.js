@@ -61,6 +61,10 @@ async function connectDB() {
 	// Connection event handlers for monitoring
 	mongoose.connection.on('connected', () => {
 		logEvent('MongoDB connected successfully');
+		// Guard against legacy TTL index that deleted historical transfers from MongoDB
+		try {
+			mongoose.connection.db?.collection('transfers')?.dropIndex('expiresAt_1').catch(() => {});
+		} catch (_) {}
 	});
 
 	mongoose.connection.on('error', (err) => {

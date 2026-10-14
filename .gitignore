@@ -96,5 +96,14 @@ yarn.lock.bak
 .kiro/
 .gemini/
 .ai/
+.agents/
+.antigravity/
+scratch/
 scratchpad_*
 media_*
+
+# SSL / Certificates / Secrets
+*.pem
+*.key
+*.cert
+*.crt

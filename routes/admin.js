@@ -6,8 +6,16 @@ const bcrypt = require('bcryptjs');
 
 const AdminSession = require('../models/AdminSession');
 const AdminAudit = require('../models/AdminAudit');
+const AdminSettings = require('../models/AdminSettings');
 const { version: pkgVersion } = require('../package.json');
 const Transfer = require('../models/Transfer');
+const {
+	generateSecret,
+	verifyTOTP,
+	getOtpAuthUrl,
+	generateQrCodeDataUri,
+	generateBackupCodes,
+} = require('../utils/totp');
 const {
 	isAdminEnabled,
 	signAdminToken,
@@ -67,7 +75,7 @@ router.post('/login', rateLimitAdminLogin, async (req, res) => {
 	res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
 	res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
 
-	const { username, password } = req.body || {};
+	const { username, password, totpCode } = req.body || {};
 	const ip = getClientIp(req) || 'unknown';
 	const ipMasked = maskIp(ip);
 	const ua = getDeviceName(req.get('user-agent') || '');
@@ -116,6 +124,70 @@ router.post('/login', rateLimitAdminLogin, async (req, res) => {
 		return res.status(401).json({ error: 'Invalid credentials' });
 	}
 
+	// 2FA Verification if enabled
+	const adminSettings = await AdminSettings.findOne({ key: 'global' }).lean();
+	if (adminSettings && adminSettings.twoFactorEnabled) {
+		const cleanTotp = String(totpCode || '').trim();
+		if (!cleanTotp) {
+			return res.status(200).json({
+				require2FA: true,
+				message: 'Two-factor authentication code required',
+			});
+		}
+
+		let isTotpValid = verifyTOTP(cleanTotp, adminSettings.twoFactorSecret);
+		let usedBackupCodeIndex = -1;
+
+		// Check backup recovery codes if TOTP fails
+		if (!isTotpValid && Array.isArray(adminSettings.backupCodes) && adminSettings.backupCodes.length > 0) {
+			const inputHash = crypto.createHash('sha256').update(cleanTotp.toUpperCase().replace(/\s/g, '')).digest('hex');
+			for (let i = 0; i < adminSettings.backupCodes.length; i++) {
+				const bc = adminSettings.backupCodes[i];
+				if (!bc.used && timingSafeStringEqual(bc.codeHash, inputHash)) {
+					isTotpValid = true;
+					usedBackupCodeIndex = i;
+					break;
+				}
+			}
+		}
+
+		if (!isTotpValid) {
+			const retryAfter = recordAdminLoginFailure(ip);
+			await AdminAudit.create({
+				action: 'login_failed',
+				username: configuredUsername,
+				ipMasked,
+				ua,
+				details: { reason: 'invalid_2fa_code' },
+			}).catch(() => {});
+
+			emitToAdminNamespace('admin-login-failed', { ipMasked, timestamp: new Date() });
+
+			if (retryAfter) {
+				res.setHeader('Retry-After', String(retryAfter));
+				return res.status(429).json({
+					error: 'Too many failed login attempts. Account temporarily locked.',
+					retryAfter,
+				});
+			}
+
+			return res.status(401).json({ error: 'Invalid 2FA code or backup recovery code' });
+		}
+
+		if (usedBackupCodeIndex !== -1) {
+			await AdminSettings.updateOne(
+				{ key: 'global' },
+				{
+					$set: {
+						[`backupCodes.${usedBackupCodeIndex}.used`]: true,
+						[`backupCodes.${usedBackupCodeIndex}.usedAt`]: new Date(),
+					},
+				}
+			);
+			logEvent('Admin signed in with backup recovery code', `USER: ${configuredUsername}`);
+		}
+	}
+
 	// Login Successful: Clear failure tracker
 	clearAdminLoginFailures(ip);
 
@@ -157,6 +229,158 @@ router.post('/login', rateLimitAdminLogin, async (req, res) => {
 		username: configuredUsername,
 		expiresAt: new Date(expSec * 1000).toISOString(),
 	});
+});
+
+// ── 2FA Authentication Endpoints ───────────────────────────────
+
+/**
+ * GET /api/admin/2fa/status
+ */
+router.get('/2fa/status', requireAdmin, async (req, res) => {
+	try {
+		const settings = await AdminSettings.findOne({ key: 'global' }).lean();
+		const remainingBackupCodes = (settings?.backupCodes || []).filter((bc) => !bc.used).length;
+		return res.status(200).json({
+			enabled: Boolean(settings?.twoFactorEnabled),
+			confirmedAt: settings?.twoFactorConfirmedAt || null,
+			backupCodesRemaining: remainingBackupCodes,
+		});
+	} catch (error) {
+		logError('Get 2FA status error', error);
+		return res.status(500).json({ error: 'Failed to retrieve 2FA status' });
+	}
+});
+
+/**
+ * POST /api/admin/2fa/setup
+ */
+router.post('/2fa/setup', requireAdmin, async (req, res) => {
+	try {
+		const secret = generateSecret(20);
+		const label = req.admin.username || 'Admin';
+		const otpAuthUrl = getOtpAuthUrl(secret, label, 'SwiftShare');
+		const qrCodeDataUrl = await generateQrCodeDataUri(otpAuthUrl);
+		const backupCodes = generateBackupCodes(8);
+
+		const hashedCodes = backupCodes.map((code) => ({
+			codeHash: crypto.createHash('sha256').update(code.toUpperCase().replace(/\s/g, '')).digest('hex'),
+			used: false,
+		}));
+
+		await AdminSettings.findOneAndUpdate(
+			{ key: 'global' },
+			{
+				$set: {
+					pendingTwoFactorSecret: secret,
+					pendingBackupCodes: hashedCodes,
+				},
+			},
+			{ upsert: true, new: true }
+		);
+
+		return res.status(200).json({
+			secret,
+			otpAuthUrl,
+			qrCodeDataUrl,
+			backupCodes,
+		});
+	} catch (error) {
+		logError('2FA setup error', error);
+		return res.status(500).json({ error: 'Failed to generate 2FA setup details' });
+	}
+});
+
+/**
+ * POST /api/admin/2fa/verify
+ */
+router.post('/2fa/verify', requireAdmin, async (req, res) => {
+	try {
+		const { token } = req.body || {};
+		const cleanToken = String(token || '').trim();
+
+		const settings = await AdminSettings.findOne({ key: 'global' });
+		if (!settings || !settings.pendingTwoFactorSecret) {
+			return res.status(400).json({ error: 'No 2FA setup in progress. Please start setup again.' });
+		}
+
+		const isValid = verifyTOTP(cleanToken, settings.pendingTwoFactorSecret);
+		if (!isValid) {
+			return res.status(400).json({ error: 'Invalid 6-digit verification code. Please check your authenticator app.' });
+		}
+
+		settings.twoFactorEnabled = true;
+		settings.twoFactorSecret = settings.pendingTwoFactorSecret;
+		settings.pendingTwoFactorSecret = '';
+		if (settings.pendingBackupCodes && settings.pendingBackupCodes.length > 0) {
+			settings.backupCodes = settings.pendingBackupCodes;
+			settings.pendingBackupCodes = [];
+		}
+		settings.twoFactorConfirmedAt = new Date();
+		await settings.save();
+
+		await AdminAudit.create({
+			action: '2fa_enabled',
+			username: req.admin.username,
+			ipMasked: maskIp(getClientIp(req)),
+			ua: getDeviceName(req.get('user-agent') || ''),
+		}).catch(() => {});
+
+		logEvent('Admin 2FA enabled', `USER: ${req.admin.username}`);
+
+		return res.status(200).json({
+			success: true,
+			message: 'Two-factor authentication has been successfully activated!',
+		});
+	} catch (error) {
+		logError('2FA verify error', error);
+		return res.status(500).json({ error: 'Failed to verify 2FA code' });
+	}
+});
+
+/**
+ * POST /api/admin/2fa/disable
+ */
+router.post('/2fa/disable', requireAdmin, async (req, res) => {
+	try {
+		const { password, token } = req.body || {};
+		const configuredHash = process.env.ADMIN_PASSWORD_HASH || DUMMY_BCRYPT_HASH;
+		const isPassValid = password ? await bcrypt.compare(password, configuredHash) : false;
+
+		const settings = await AdminSettings.findOne({ key: 'global' });
+		const isTokenValid = (token && settings?.twoFactorSecret)
+			? verifyTOTP(String(token).trim(), settings.twoFactorSecret)
+			: false;
+
+		if (!isPassValid && !isTokenValid) {
+			return res.status(401).json({ error: 'Current admin password or valid 2FA code is required to disable 2FA.' });
+		}
+
+		if (settings) {
+			settings.twoFactorEnabled = false;
+			settings.twoFactorSecret = '';
+			settings.pendingTwoFactorSecret = '';
+			settings.backupCodes = [];
+			settings.twoFactorConfirmedAt = null;
+			await settings.save();
+		}
+
+		await AdminAudit.create({
+			action: '2fa_disabled',
+			username: req.admin.username,
+			ipMasked: maskIp(getClientIp(req)),
+			ua: getDeviceName(req.get('user-agent') || ''),
+		}).catch(() => {});
+
+		logEvent('Admin 2FA disabled', `USER: ${req.admin.username}`);
+
+		return res.status(200).json({
+			success: true,
+			message: 'Two-factor authentication has been disabled.',
+		});
+	} catch (error) {
+		logError('2FA disable error', error);
+		return res.status(500).json({ error: 'Failed to disable 2FA' });
+	}
 });
 
 /**
@@ -371,7 +595,11 @@ router.post('/transfers/:code/expire', requireAdmin, async (req, res) => {
 		await Transfer.updateOne(
 			{ _id: transfer._id },
 			{
-				$set: { isDeleted: true },
+				$set: {
+					isDeleted: true,
+					deletionReason: 'expired',
+					expiredAt,
+				},
 				$unset: {
 					qrDataUri: '',
 					passwordHash: '',
@@ -485,6 +713,8 @@ router.get('/export', requireAdmin, async (req, res) => {
 				burnAfterDownload: 1,
 				claimantToken: 1,
 				expiresAt: 1,
+				expiredAt: 1,
+				deletionReason: 1,
 				kind: 1,
 				fileCount: 1,
 				totalSize: 1,
@@ -498,9 +728,9 @@ router.get('/export', requireAdmin, async (req, res) => {
 			for await (const t of cursor) {
 				let status = 'ACTIVE';
 				if (t.isDeleted && t.cancelledAt) status = 'CANCELLED';
-				else if (t.isDeleted) status = 'DELETED';
+				else if (t.deletionReason === 'expired' || t.expiredAt || (t.expiresAt && new Date(t.expiresAt).getTime() < Date.now())) status = 'EXPIRED';
 				else if (t.burnAfterDownload && t.claimantToken) status = 'CLAIMED';
-				else if (t.expiresAt && new Date(t.expiresAt).getTime() < Date.now()) status = 'EXPIRED';
+				else if (t.isDeleted) status = 'DELETED';
 
 				const row = [
 					t.code,

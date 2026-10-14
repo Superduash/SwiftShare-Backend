@@ -377,7 +377,7 @@ router.delete("/:code", validateCode, async (req, res, next) => {
 			const cancelResult = await Transfer.updateOne(
 				{ _id: transfer._id, isDeleted: false },
 				{
-					$set: { isDeleted: true, cancelledAt: new Date() },
+					$set: { isDeleted: true, cancelledAt: new Date(), deletionReason: "manual" },
 					$unset: {
 						qrDataUri: "",
 						passwordHash: "",

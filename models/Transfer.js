@@ -60,7 +60,6 @@ const transferSchema = new mongoose.Schema(
 		code: {
 			type: String,
 			required: true,
-			unique: true,
 			index: true,
 		},
 		files: {
@@ -116,6 +115,10 @@ const transferSchema = new mongoose.Schema(
 			type: Number,
 			default: 0,
 			min: 0,
+		},
+		downloadSessions: {
+			type: [String],
+			default: [],
 		},
 		viewCount: {
 			type: Number,
@@ -200,6 +203,15 @@ const transferSchema = new mongoose.Schema(
 			// @deprecated: Server-side QR generation was removed. Frontend renders QR
 			// from shareLink using react-qr-code. Field retained for schema backward-compat.
 		},
+		deletionReason: {
+			type: String,
+			enum: ["", "expired", "manual", "burn"],
+			default: "",
+		},
+		expiredAt: {
+			type: Date,
+			default: null,
+		},
 		activity: {
 			type: [transferActivitySchema],
 			default: [],
@@ -215,6 +227,14 @@ const transferSchema = new mongoose.Schema(
 transferSchema.virtual("status").get(function () {
 	if (this.isDeleted && this.cancelledAt) {
 		return "CANCELLED";
+	}
+
+	if (this.isDeleted && this.deletionReason === "burn") {
+		return "CLAIMED";
+	}
+
+	if (this.isDeleted && this.deletionReason === "expired") {
+		return "EXPIRED";
 	}
 
 	if (this.isDeleted) {
@@ -266,6 +286,10 @@ transferSchema.index({ isDeleted: 1, expiresAt: 1, senderSocketId: 1, createdAt:
 
 // Activity timestamp index for timeseries download tracking
 transferSchema.index({ "activity.timestamp": -1 }, { sparse: true });
+
+// Active code uniqueness: active transfers cannot share a code, but expired ones can be recycled
+transferSchema.index({ code: 1 }, { unique: true, partialFilterExpression: { isDeleted: false }, name: "active_code_unique" });
+transferSchema.index({ code: 1, createdAt: -1 }, { name: "code_lookup_idx" });
 
 // Note: No TTL index here on Transfer collection — historical transfer documents persist
 // indefinitely with isDeleted: true so all-time transfer statistics remain complete.

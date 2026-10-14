@@ -1010,17 +1010,24 @@ async function listTransfers({ page = 1, limit = 25, status, burn, password, sea
 			filter.isDeleted = false;
 			filter.expiresAt = { $gt: now };
 		} else if (s === 'EXPIRED') {
-			filter.isDeleted = false;
-			filter.expiresAt = { $lte: now };
+			filter.$or = [
+				{ deletionReason: 'expired' },
+				{ expiredAt: { $ne: null } },
+				{ isDeleted: false, expiresAt: { $lte: now } },
+			];
 		} else if (s === 'DELETED') {
 			filter.isDeleted = true;
 			filter.cancelledAt = null;
+			filter.deletionReason = { $nin: ['expired', 'burn'] };
 		} else if (s === 'CANCELLED') {
 			filter.isDeleted = true;
 			filter.cancelledAt = { $ne: null };
 		} else if (s === 'CLAIMED') {
-			filter.burnAfterDownload = true;
-			filter.claimantToken = { $ne: '' };
+			filter.$or = [
+				{ deletionReason: 'burn' },
+				{ burnFinalizedAt: { $ne: null } },
+				{ burnAfterDownload: true, claimantToken: { $ne: '' } },
+			];
 		}
 	}
 
@@ -1060,8 +1067,11 @@ async function listTransfers({ page = 1, limit = 25, status, burn, password, sea
 			uploadSpeed: 1,
 			downloadSpeed: 1,
 			expiresAt: 1,
+			expiredAt: 1,
 			isDeleted: 1,
+			deletionReason: 1,
 			cancelledAt: 1,
+			burnFinalizedAt: 1,
 			senderIp: 1,
 			senderDeviceName: 1,
 			createdAt: 1,
@@ -1076,9 +1086,9 @@ async function listTransfers({ page = 1, limit = 25, status, burn, password, sea
 	const sanitizedItems = items.map((t) => {
 		let computedStatus = 'ACTIVE';
 		if (t.isDeleted && t.cancelledAt) computedStatus = 'CANCELLED';
+		else if (t.deletionReason === 'expired' || t.expiredAt || (t.expiresAt && new Date(t.expiresAt).getTime() < Date.now())) computedStatus = 'EXPIRED';
+		else if (t.deletionReason === 'burn' || t.burnFinalizedAt || (t.burnAfterDownload && t.claimantToken)) computedStatus = 'CLAIMED';
 		else if (t.isDeleted) computedStatus = 'DELETED';
-		else if (t.burnAfterDownload && t.claimantToken) computedStatus = 'CLAIMED';
-		else if (t.expiresAt && new Date(t.expiresAt).getTime() < Date.now()) computedStatus = 'EXPIRED';
 
 		return {
 			code: t.code,
@@ -1133,7 +1143,9 @@ async function getTransferDetails(code) {
 			uploadDuration: 1,
 			downloadDuration: 1,
 			expiresAt: 1,
+			expiredAt: 1,
 			isDeleted: 1,
+			deletionReason: 1,
 			cancelledAt: 1,
 			burnClaimedAt: 1,
 			burnFinalizedAt: 1,
@@ -1148,9 +1160,9 @@ async function getTransferDetails(code) {
 
 	let computedStatus = 'ACTIVE';
 	if (transfer.isDeleted && transfer.cancelledAt) computedStatus = 'CANCELLED';
+	else if (transfer.deletionReason === 'expired' || transfer.expiredAt || (transfer.expiresAt && new Date(transfer.expiresAt).getTime() < Date.now())) computedStatus = 'EXPIRED';
+	else if (transfer.deletionReason === 'burn' || transfer.burnFinalizedAt || (transfer.burnAfterDownload && transfer.claimantToken)) computedStatus = 'CLAIMED';
 	else if (transfer.isDeleted) computedStatus = 'DELETED';
-	else if (transfer.burnAfterDownload && transfer.claimantToken) computedStatus = 'CLAIMED';
-	else if (transfer.expiresAt && new Date(transfer.expiresAt).getTime() < Date.now()) computedStatus = 'EXPIRED';
 
 	return {
 		code: transfer.code,

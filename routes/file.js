@@ -1,7 +1,7 @@
 const express = require("express");
 
 const Transfer = require("../models/Transfer");
-const { rateLimitMetadata } = require("../middleware/rateLimiter");
+const { rateLimitMetadata, rateLimitCodeLookup, recordCodeLookupFailure, clearCodeLookupFailures } = require("../middleware/rateLimiter");
 const { validateCode } = require("../middleware/validateCode");
 const { getClientIp, getDeviceName, isTransferExpired, getTransferStatus, isBurnClaimOwner, getRequestFingerprint, validateOwnershipToken } = require("../utils/helpers");
 const { sanitizeString } = require("../middleware/inputValidator");
@@ -14,7 +14,7 @@ const router = express.Router();
 
 router.use((req, res, next) => {
 	// Prevent metadata route caching.
-	if (req.method === 'GET' && (req.path === '/' || /^\/?[A-Za-z0-9]{6}\/?$/.test(req.path))) {
+	if (req.method === 'GET' && (req.path === '/' || /^\/?[A-Za-z0-9]{6,10}\/?$/.test(req.path))) {
 		res.setHeader('Cache-Control', 'no-store');
 	}
 	next();
@@ -54,12 +54,17 @@ function isBurnLockedForRequester(transfer, req) {
 	return !isBurnClaimOwner(transfer, req);
 }
 
-router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => {
+router.get("/:code", rateLimitCodeLookup, rateLimitMetadata, validateCode, async (req, res, next) => {
 	try {
 		const { code } = req.params;
-		const transfer = await Transfer.findOne({ code }).lean();
+		const clientIp = getClientIp(req);
+		let transfer = await Transfer.findOne({ code, isDeleted: false }).lean();
+		if (!transfer) {
+			transfer = await Transfer.findOne({ code }).sort({ createdAt: -1 }).lean();
+		}
 
 		if (!transfer) {
+			recordCodeLookupFailure(clientIp);
 			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
 		}
 
@@ -119,6 +124,7 @@ router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => 
 				});
 			}
 
+			recordCodeLookupFailure(clientIp);
 			// Handle burned transfers.
 			if (transfer.burnAfterDownload && !transfer.cancelledAt) {
 				return res.status(410).json(buildErrorResponse(ERROR_CODES.ALREADY_DOWNLOADED));
@@ -133,6 +139,10 @@ router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => 
 		}
 
 		if (isTransferExpired(transfer)) {
+			const isSender = validateOwnershipToken(transfer, req);
+			if (!isSender) {
+				recordCodeLookupFailure(clientIp);
+			}
 			const expiredFiles = (transfer.files || []).map((file) => ({
 				name: file.originalName,
 				size: file.size,
@@ -153,6 +163,9 @@ router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => 
 			});
 		}
 
+		// Active, valid transfer found
+		clearCodeLookupFailures(clientIp);
+
 		const receiverDevice = getDeviceName(req.get("user-agent") || "");
 		const receiverIp = getClientIp(req);
 		const secondsRemaining = transfer.expiresAt
@@ -166,7 +179,7 @@ router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => 
 		const viewerFingerprint = getRequestFingerprint(req);
 		if (!isSender && shouldRecordView(code, viewerFingerprint)) {
 			const updatedTransfer = await Transfer.findOneAndUpdate(
-				{ code },
+				{ _id: transfer._id },
 				{
 					$inc: { viewCount: 1 },
 					$push: {
@@ -294,12 +307,17 @@ router.get("/:code", rateLimitMetadata, validateCode, async (req, res, next) => 
 });
 
 // Get text content for text shares
-router.get("/:code/text", validateCode, async (req, res, next) => {
+router.get("/:code/text", rateLimitCodeLookup, validateCode, async (req, res, next) => {
 	try {
 		const { code } = req.params;
-		const transfer = await Transfer.findOne({ code }).lean();
+		const clientIp = getClientIp(req);
+		let transfer = await Transfer.findOne({ code, isDeleted: false }).lean();
+		if (!transfer) {
+			transfer = await Transfer.findOne({ code }).sort({ createdAt: -1 }).lean();
+		}
 
 		if (!transfer) {
+			recordCodeLookupFailure(clientIp);
 			return res.status(404).json(buildErrorResponse(ERROR_CODES.TRANSFER_NOT_FOUND));
 		}
 
