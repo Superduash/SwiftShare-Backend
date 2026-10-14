@@ -77,8 +77,7 @@ router.post("/share", rateLimitText, async (req, res) => {
 		// and the AI analyzer's text path can extract meaning from it directly.
 		const filename = /\.txt$/i.test(safeTitle) ? safeTitle : `${safeTitle}.txt`;
 
-		const secureMode = Boolean(req.body.secureMode) || String(req.query.secureMode || '').toLowerCase() === 'true';
-		const code = await generateUniqueCode({ secureMode });
+		const code = await generateUniqueCode();
 		const storedKey = `transfers/${code}/${sanitizeFilename(filename)}`;
 		const senderId = trimNonString(senderSocketId) || trimNonString(socketId) || "";
 		if (senderId) bindSocketToRoom(code, senderId);

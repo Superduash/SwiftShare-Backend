@@ -52,7 +52,8 @@ const ERROR_MESSAGES = {
 	[ERROR_CODES.SERVER_ERROR]: "Internal server error",
 };
 
-// Accepts new 6-digit numeric codes, legacy 6-char alphanumeric, and 8-10 char secure mode codes
+// Standard 6-digit numeric codes. Also retains backward-compatibility for
+// active in-flight legacy 6-char alphanumeric or 8-10 char transfers until they expire.
 const CODE_REGEX = /^(?:\d{6}|[A-Za-z0-9]{6,10})$/;
 
 function buildErrorResponse(code, message) {

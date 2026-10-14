@@ -1,6 +1,5 @@
 const {
 	generateNumericCode,
-	generateAlphanumericCode,
 	generateUniqueCode,
 } = require("../services/codeGenerator");
 const { CODE_REGEX } = require("../utils/constants");
@@ -11,7 +10,7 @@ const {
 } = require("../middleware/rateLimiter");
 const Transfer = require("../models/Transfer");
 
-describe("Share Code Generation — Numeric & Alphanumeric", () => {
+describe("Share Code Generation — Standard 6-Digit Numeric", () => {
 	it("generates 6-digit numeric codes with proper zero-padding", () => {
 		for (let i = 0; i < 50; i++) {
 			const code = generateNumericCode(6);
@@ -20,13 +19,21 @@ describe("Share Code Generation — Numeric & Alphanumeric", () => {
 		}
 	});
 
-	it("generates 8-character secure mode alphanumeric codes without ambiguous characters", () => {
-		const ambiguousChars = /[O0I1l]/;
-		for (let i = 0; i < 50; i++) {
-			const code = generateAlphanumericCode(8);
-			expect(code).toMatch(/^[A-Za-z0-9]{8}$/);
-			expect(code.length).toBe(8);
-			expect(ambiguousChars.test(code)).toBe(false);
+	it("always generates strictly 6-digit numeric codes without alternative modes", async () => {
+		const originalFindOne = Transfer.findOne;
+		Transfer.findOne = jest.fn().mockImplementation(() => ({
+			lean: jest.fn().mockResolvedValue(null),
+		}));
+
+		try {
+			for (let i = 0; i < 20; i++) {
+				const code = await generateUniqueCode();
+				expect(code).toMatch(/^\d{6}$/);
+				expect(Number(code)).toBeGreaterThanOrEqual(0);
+				expect(Number(code)).toBeLessThanOrEqual(999999);
+			}
+		} finally {
+			Transfer.findOne = originalFindOne;
 		}
 	});
 
@@ -72,7 +79,7 @@ describe("Share Code Generation — Numeric & Alphanumeric", () => {
 	});
 });
 
-describe("Share Code Validation — New 6-digit & Legacy/Secure formats", () => {
+describe("Share Code Validation — Standard 6-digit & Backward Compatibility", () => {
 	it("validates 6-digit numeric codes", () => {
 		expect(CODE_REGEX.test("000000")).toBe(true);
 		expect(CODE_REGEX.test("012345")).toBe(true);
@@ -80,13 +87,13 @@ describe("Share Code Validation — New 6-digit & Legacy/Secure formats", () => 
 		expect(CODE_REGEX.test("482910")).toBe(true);
 	});
 
-	it("accepts legacy 6-char alphanumeric codes", () => {
+	it("accepts legacy 6-char alphanumeric codes for backward compatibility", () => {
 		expect(CODE_REGEX.test("ABCDEF")).toBe(true);
 		expect(CODE_REGEX.test("A1B2C3")).toBe(true);
 		expect(CODE_REGEX.test("xyz789")).toBe(true);
 	});
 
-	it("accepts 8-character secure mode codes", () => {
+	it("accepts active in-flight 8-character codes for backward compatibility", () => {
 		expect(CODE_REGEX.test("ABCDEF23")).toBe(true);
 		expect(CODE_REGEX.test("98765432")).toBe(true);
 	});
