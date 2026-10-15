@@ -322,7 +322,7 @@ function parseStreamingMultipart(req, { code, maxFileCount, maxTotalBytes }) {
 			try {
 				uploader = new Upload({
 					client: r2Client,
-					queueSize: 2, // Reduced from 8 to 2 to minimize memory buffering and make 'Saving to cloud' nearly instant
+					queueSize: 4, // 4-way parallel part upload to R2 eliminates backlog and makes cloud finalization instant
 					partSize: 5 * 1024 * 1024,
 					leavePartsOnError: false,
 					params: {
