@@ -1,7 +1,7 @@
 const { Server } = require("socket.io");
 const mongoose = require("mongoose");
 const Transfer = require("../models/Transfer");
-const { getSubnet } = require("../utils/helpers");
+const { getSubnet, normalizeIp } = require("../utils/helpers");
 const { logEvent, logError } = require("../utils/logger");
 const { isMongoReady } = require("./db");
 
@@ -297,26 +297,28 @@ function scheduleTransferCountdown(code, expiresAt) {
 }
 
 function getSocketIp(socket) {
+	let rawIp = "";
 	// Priority 1: Cloudflare CF-Connecting-IP
 	const cfIp = socket?.handshake?.headers?.["cf-connecting-ip"];
 	if (typeof cfIp === "string" && cfIp.trim()) {
-		return cfIp.trim();
+		rawIp = cfIp.trim();
+	} else {
+		// Priority 2: x-real-ip
+		const realIp = socket?.handshake?.headers?.["x-real-ip"];
+		if (typeof realIp === "string" && realIp.trim()) {
+			rawIp = realIp.trim();
+		} else {
+			// Priority 3: x-forwarded-for (most reliable for proxied connections)
+			const forwardedFor = socket?.handshake?.headers?.["x-forwarded-for"];
+			if (typeof forwardedFor === "string" && forwardedFor.trim()) {
+				rawIp = forwardedFor.split(",")[0].trim();
+			} else {
+				// Priority 4: socket address
+				rawIp = String(socket?.handshake?.address || "").trim();
+			}
+		}
 	}
-
-	// Priority 2: x-real-ip
-	const realIp = socket?.handshake?.headers?.["x-real-ip"];
-	if (typeof realIp === "string" && realIp.trim()) {
-		return realIp.trim();
-	}
-
-	// Priority 3: x-forwarded-for (most reliable for proxied connections)
-	const forwardedFor = socket?.handshake?.headers?.["x-forwarded-for"];
-	if (typeof forwardedFor === "string" && forwardedFor.trim()) {
-		return forwardedFor.split(",")[0].trim();
-	}
-
-	// Priority 4: socket address
-	return String(socket?.handshake?.address || "").trim();
+	return normalizeIp(rawIp);
 }
 
 async function emitNearbyDevices(socket) {
