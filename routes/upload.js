@@ -109,6 +109,10 @@ function isMimeCompatible(declared, detected) {
 	if (!a || !b) return true;
 	if (a === b) return true;
 	if (a === "application/octet-stream") return true;
+	// text/* declared by browser is unreliable — browsers often guess wrong for
+	// code files, markdown, scripts, etc. Never reject a text/* declared file based
+	// on content sniffing (the content is opaque user data, not an executable).
+	if (a.startsWith('text/')) return true;
 	if (a.startsWith('image/') && b.startsWith('image/')) return true;
 	const fa = a.split("/")[0];
 	const fb = b.split("/")[0];
