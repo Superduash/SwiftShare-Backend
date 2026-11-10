@@ -7,6 +7,13 @@ function errorHandler(err, req, res, next) {
 		return next(err);
 	}
 
+	// Always ensure CORS headers are present on all error responses
+	const origin = req.headers.origin;
+	if (origin && !res.getHeader("Access-Control-Allow-Origin")) {
+		res.setHeader("Access-Control-Allow-Origin", origin);
+		res.setHeader("Vary", "Origin");
+	}
+
 	// Extract error details with safe fallbacks
 	const status = Number(err?.status) || 500;
 	const errorCode = err?.errorCode || ERROR_CODES.SERVER_ERROR;

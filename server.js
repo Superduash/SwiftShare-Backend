@@ -110,8 +110,30 @@ function originsMatch(requestOrigin, configuredOrigin) {
 }
 
 function getAllowedFrontendOrigins() {
-	const configured = `${String(process.env.FRONTEND_URL || "")},${String(process.env.CORS_EXTRA_ORIGINS || "")}`;
-	return configured.split(",").map((o) => normalizeConfiguredOrigin(o)).filter(Boolean);
+	const rawConfigured = [
+		process.env.CORS_ORIGINS,
+		process.env.CORS_ORIGIN,
+		process.env.FRONTEND_URL,
+		process.env.CORS_EXTRA_ORIGINS,
+	]
+		.filter(Boolean)
+		.join(",");
+
+	const defaults = [
+		"https://swiftsharegg.vercel.app",
+		"http://localhost:3000",
+		"http://localhost:5173",
+	];
+
+	const combined = `${defaults.join(",")},${rawConfigured}`;
+	return Array.from(
+		new Set(
+			combined
+				.split(",")
+				.map((o) => normalizeConfiguredOrigin(o))
+				.filter(Boolean)
+		)
+	);
 }
 
 const allowedFrontendOrigins = getAllowedFrontendOrigins();
@@ -142,48 +164,34 @@ function isPlatformDeployOrigin(requestOrigin) {
 	return false;
 }
 
-function corsOrigin(origin, callback) {
-	if (!origin) { callback(null, true); return; }
-	const allowAllOrigins = String(process.env.CORS_ALLOW_ALL_ORIGINS || "").toLowerCase() === "true";
+function isOriginAllowed(origin) {
+	if (!origin) return true;
+	const allowAll = String(process.env.CORS_ALLOW_ALL_ORIGINS || "").toLowerCase() === "true";
+	if (allowAll) return true;
 	const isProd = String(process.env.NODE_ENV || "").toLowerCase() === "production";
-	if (allowAllOrigins) { callback(null, true); return; }
-	if (!isProd && isDevOriginAllowed(origin)) { callback(null, true); return; }
-	if (isPlatformDeployOrigin(origin)) { callback(null, true); return; }
+	if (!isProd && isDevOriginAllowed(origin)) return true;
+	if (isPlatformDeployOrigin(origin)) return true;
+	// Match Vercel previews like https://swiftshare-*.vercel.app
+	const host = hostnameOf(origin);
+	if (/^swiftshare.*\.vercel\.app$/i.test(host)) return true;
 	const allowedOrigins = getAllowedFrontendOrigins();
-	if (
-		allowedOrigins.length > 0
-		&& allowedOrigins.some((o) => originsMatch(origin, o))
-	) { callback(null, true); return; }
-	logEvent("Blocked HTTP CORS origin", `ORIGIN: ${origin}`);
-	callback(null, false);
+	if (allowedOrigins.length > 0 && allowedOrigins.some((o) => originsMatch(origin, o))) return true;
+	return false;
 }
 
-
-
-app.set("trust proxy", 1);
-
-app.use(compression({
-	threshold: 1024,
-	level: 6,
-	filter: (req, res) => {
-		if (req.headers["x-no-compression"]) return false;
-		// Uploads are multipart file data — already compressed, skip entirely
-		if (req.path === '/api/upload' && req.method === 'POST') return false;
-		const ct = String(res.getHeader("Content-Type") || "");
-		if (/^(application\/octet-stream|audio\/|video\/|image\/|application\/zip)/i.test(ct)) return false;
-		return compression.filter(req, res);
-	},
-}));
-
-// Set request ID for trace correlation.
-app.use((req, res, next) => {
-	req.requestId = crypto.randomUUID();
-	res.setHeader("X-Request-ID", req.requestId);
-	next();
-});
+function corsOrigin(origin, callback) {
+	if (isOriginAllowed(origin)) {
+		return callback(null, true);
+	}
+	logEvent("Blocked HTTP CORS origin", `ORIGIN: ${origin}`);
+	return callback(null, false);
+}
 
 const corsMiddleware = cors({
 	origin: corsOrigin,
+	credentials: false,
+	methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'HEAD', 'PATCH'],
+	optionsSuccessStatus: 204,
 	maxAge: 86400,
 	allowedHeaders: [
 		'Content-Type',
@@ -208,7 +216,30 @@ const corsMiddleware = cors({
 	exposedHeaders: ['Content-Range', 'Content-Length', 'Accept-Ranges', 'X-Request-ID'],
 });
 
+app.set("trust proxy", 1);
+
+// Register CORS middleware FIRST before any compression, body parsers, timeouts, or routes
 app.use(corsMiddleware);
+
+app.use(compression({
+	threshold: 1024,
+	level: 6,
+	filter: (req, res) => {
+		if (req.headers["x-no-compression"]) return false;
+		// Uploads are multipart file data — already compressed, skip entirely
+		if (req.path === '/api/upload' && req.method === 'POST') return false;
+		const ct = String(res.getHeader("Content-Type") || "");
+		if (/^(application\/octet-stream|audio\/|video\/|image\/|application\/zip)/i.test(ct)) return false;
+		return compression.filter(req, res);
+	},
+}));
+
+// Set request ID for trace correlation.
+app.use((req, res, next) => {
+	req.requestId = crypto.randomUUID();
+	res.setHeader("X-Request-ID", req.requestId);
+	next();
+});
 
 app.use(helmet({
 	crossOriginResourcePolicy: { policy: "cross-origin" },
@@ -447,6 +478,11 @@ if (process.env.NODE_ENV === "test") {
 }
 
 app.use((req, res) => {
+	const origin = req.headers.origin;
+	if (origin && !res.getHeader("Access-Control-Allow-Origin")) {
+		res.setHeader("Access-Control-Allow-Origin", origin);
+		res.setHeader("Vary", "Origin");
+	}
 	const resp = buildErrorResponse(ERROR_CODES.ROUTE_NOT_FOUND);
 	if (req.requestId) {
 		resp.requestId = req.requestId;
@@ -671,6 +707,7 @@ module.exports = {
 	app, 
 	server, 
 	corsOrigin, 
+	isOriginAllowed,
 	originsMatch, 
 	isPlatformDeployOrigin 
 };
