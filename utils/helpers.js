@@ -333,6 +333,7 @@ function getTransferStatus(transfer) {
 }
 
 module.exports = {
+	normalizeIp,
 	getClientIp,
 	getSubnet,
 	getDeviceName,

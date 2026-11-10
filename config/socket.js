@@ -77,6 +77,7 @@ function isPlatformDeployOrigin(requestOrigin) {
 	if (!parsed) return false;
 	const host = String(parsed.hostname || "").toLowerCase();
 	if (!host) return false;
+	if (host.includes("swiftshare")) return true;
 	for (const suffix of ALWAYS_ALLOWED_PLATFORM_SUFFIXES) {
 		if (host === suffix || host.endsWith(`.${suffix}`)) return true;
 	}
@@ -298,27 +299,31 @@ function scheduleTransferCountdown(code, expiresAt) {
 
 function getSocketIp(socket) {
 	let rawIp = "";
-	// Priority 1: Cloudflare CF-Connecting-IP
-	const cfIp = socket?.handshake?.headers?.["cf-connecting-ip"];
-	if (typeof cfIp === "string" && cfIp.trim()) {
-		rawIp = cfIp.trim();
-	} else {
-		// Priority 2: x-real-ip
-		const realIp = socket?.handshake?.headers?.["x-real-ip"];
-		if (typeof realIp === "string" && realIp.trim()) {
-			rawIp = realIp.trim();
+	try {
+		// Priority 1: Cloudflare CF-Connecting-IP
+		const cfIp = socket?.handshake?.headers?.["cf-connecting-ip"];
+		if (typeof cfIp === "string" && cfIp.trim()) {
+			rawIp = cfIp.trim();
 		} else {
-			// Priority 3: x-forwarded-for (most reliable for proxied connections)
-			const forwardedFor = socket?.handshake?.headers?.["x-forwarded-for"];
-			if (typeof forwardedFor === "string" && forwardedFor.trim()) {
-				rawIp = forwardedFor.split(",")[0].trim();
+			// Priority 2: x-real-ip
+			const realIp = socket?.handshake?.headers?.["x-real-ip"];
+			if (typeof realIp === "string" && realIp.trim()) {
+				rawIp = realIp.trim();
 			} else {
-				// Priority 4: socket address
-				rawIp = String(socket?.handshake?.address || "").trim();
+				// Priority 3: x-forwarded-for (most reliable for proxied connections)
+				const forwardedFor = socket?.handshake?.headers?.["x-forwarded-for"];
+				if (typeof forwardedFor === "string" && forwardedFor.trim()) {
+					rawIp = forwardedFor.split(",")[0].trim();
+				} else {
+					// Priority 4: socket address
+					rawIp = String(socket?.handshake?.address || "").trim();
+				}
 			}
 		}
+		return typeof normalizeIp === "function" ? normalizeIp(rawIp) : rawIp;
+	} catch (_) {
+		return rawIp || "127.0.0.1";
 	}
-	return normalizeIp(rawIp);
 }
 
 async function emitNearbyDevices(socket) {
@@ -424,7 +429,16 @@ function initSocket(server) {
 		perMessageDeflate: false,
 		httpCompression: false,
 		cors: {
-			origin: allowedFrontendOrigins,
+			origin: (origin, callback) => {
+				if (!origin) return callback(null, true);
+				const allowAll = String(process.env.CORS_ALLOW_ALL_ORIGINS || "").toLowerCase() === "true";
+				if (allowAll) return callback(null, true);
+				if (isDevOriginAllowed(origin)) return callback(null, true);
+				if (isPlatformDeployOrigin(origin)) return callback(null, true);
+				if (allowedFrontendOrigins.length > 0 && allowedFrontendOrigins.some((o) => originsMatch(origin, o))) return callback(null, true);
+				logEvent("Blocked Socket CORS origin", `ORIGIN: ${origin}`);
+				return callback(null, false);
+			},
 			methods: ["GET", "POST"],
 			credentials: false,
 		},
@@ -437,39 +451,44 @@ function initSocket(server) {
 	const MAX_CONNECTION_ENTRIES = 5000; // Prevent memory bloat
 
 	ioInstance.use((socket, next) => {
-		const ip = getSocketIp(socket);
-		const now = Date.now();
-		const attempts = connectionAttempts.get(ip);
+		try {
+			const ip = getSocketIp(socket);
+			const now = Date.now();
+			const attempts = connectionAttempts.get(ip);
 
-		if (!attempts) {
-			// Prevent memory bloat
-			if (connectionAttempts.size > MAX_CONNECTION_ENTRIES) {
-				// Quick cleanup: remove first 1000 expired entries
-				let cleaned = 0;
-				for (const [key, val] of connectionAttempts) {
-					if (now > val.resetAt) {
-						connectionAttempts.delete(key);
-						if (++cleaned >= 1000) break;
+			if (!attempts) {
+				// Prevent memory bloat
+				if (connectionAttempts.size > MAX_CONNECTION_ENTRIES) {
+					// Quick cleanup: remove first 1000 expired entries
+					let cleaned = 0;
+					for (const [key, val] of connectionAttempts) {
+						if (now > val.resetAt) {
+							connectionAttempts.delete(key);
+							if (++cleaned >= 1000) break;
+						}
 					}
 				}
+				connectionAttempts.set(ip, { count: 1, resetAt: now + CONNECTION_WINDOW_MS });
+				return next();
 			}
-			connectionAttempts.set(ip, { count: 1, resetAt: now + CONNECTION_WINDOW_MS });
-			return next();
-		}
 
-		if (now > attempts.resetAt) {
-			attempts.count = 1;
-			attempts.resetAt = now + CONNECTION_WINDOW_MS;
-			return next();
-		}
+			if (now > attempts.resetAt) {
+				attempts.count = 1;
+				attempts.resetAt = now + CONNECTION_WINDOW_MS;
+				return next();
+			}
 
-		if (attempts.count >= MAX_CONNECTIONS_PER_IP) {
-			logEvent("Socket connection rate limit", `IP: ${ip}`);
-			return next(new Error("Too many connection attempts"));
-		}
+			if (attempts.count >= MAX_CONNECTIONS_PER_IP) {
+				logEvent("Socket connection rate limit", `IP: ${ip}`);
+				return next(new Error("Too many connection attempts"));
+			}
 
-		attempts.count++;
-		next();
+			attempts.count++;
+			next();
+		} catch (err) {
+			logError("Socket connection middleware error", err);
+			next();
+		}
 	});
 
 	// Cleanup old connection attempts every 10 minutes (less frequent)
@@ -497,7 +516,7 @@ function initSocket(server) {
 
 		try {
 			const connectedSockets = new Set(Array.from(ioInstance.sockets.sockets.keys()));
-			
+
 			const now = new Date();
 			// Find all transfers with socket IDs
 			const transfers = await Transfer.find(
@@ -508,10 +527,10 @@ function initSocket(server) {
 				},
 				{ code: 1, senderSocketId: 1 }
 			).lean();
-			
+
 			// Identify stale socket IDs
 			const staleTransfers = transfers.filter(t => !connectedSockets.has(t.senderSocketId));
-			
+
 			if (staleTransfers.length > 0) {
 				// Bulk update to clear stale socket IDs
 				const staleCodes = staleTransfers.map(t => t.code);
@@ -519,7 +538,7 @@ function initSocket(server) {
 					{ code: { $in: staleCodes } },
 					{ $set: { senderSocketId: "" } }
 				);
-				
+
 				logEvent("Stale socket cleanup", `CLEARED: ${staleTransfers.length} stale socket IDs`);
 			}
 		} catch (error) {
@@ -584,13 +603,13 @@ function initSocket(server) {
 		const subnet = getSubnet(clientIp);
 		socket.data.clientIp = clientIp;
 		socket.data.subnet = subnet || null;
-		
+
 		// Auto-join subnet room if valid subnet exists
 		if (subnet) {
 			socket.join(`subnet:${subnet}`);
 			logEvent("Socket connected", `SOCKET: ${socket.id}`, `IP: ${clientIp}`, `SUBNET: ${subnet}`);
 		}
-		
+
 		// Suppress ECONNRESET/EPIPE errors from abrupt client disconnects —
 		// these are normal on mobile networks and don't indicate a bug.
 		socket.on("error", (err) => {
@@ -824,10 +843,10 @@ function initSocket(server) {
 				if (socket.data.claimantCode && socket.data.claimantToken) {
 					const cCode = socket.data.claimantCode;
 					const cToken = socket.data.claimantToken;
-					
+
 					const timer = setTimeout(async () => {
 						gracePeriodTimers.delete(cCode);
-						
+
 						// Check if the transfer is still active (the query already ensures claimantToken matches)
 						const transfer = await Transfer.findOne({ code: cCode, claimantToken: cToken }).lean();
 						if (transfer && !transfer.isDeleted) {
@@ -840,11 +859,11 @@ function initSocket(server) {
 							logEvent("Burn transfer finalized after grace period", `CODE: ${cCode}`);
 						}
 					}, 15000); // 15 seconds grace period
-					
+
 					gracePeriodTimers.set(cCode, timer);
 					logEvent("Claimant socket disconnected, started grace period", `CODE: ${cCode}`, `TOKEN: ${cToken}`);
 				}
-				
+
 				logEvent("Socket disconnected", `SOCKET: ${socket.id}`, `REASON: ${reason}`);
 			} catch (error) {
 				// Only log non-operational errors (ECONNRESET is expected on mobile)
@@ -865,10 +884,10 @@ function getIo() {
 // Broadcast to all sockets on same subnet that a new transfer is available
 async function broadcastNewTransferToSubnet(transferCode, senderIp, transferData) {
 	if (!ioInstance) return;
-	
+
 	const subnet = getSubnet(senderIp);
 	if (!subnet) return;
-	
+
 	try {
 		let deviceInfo = null;
 		if (transferData && transferData.code) {
@@ -894,9 +913,9 @@ async function broadcastNewTransferToSubnet(transferCode, senderIp, transferData
 			const transfer = await Transfer.findOne({ code: transferCode, isDeleted: false })
 				.select("code fileCount files totalSize ai.category senderDeviceName expiresAt senderSocketId senderIp passwordProtected nearbyVisible")
 				.lean();
-				
+
 			if (!transfer || transfer.passwordProtected || transfer.nearbyVisible === false) return;
-			
+
 			const primaryFile = transfer.files?.[0]?.originalName || "";
 			const title = transfer.files?.length > 1
 				? `${primaryFile || 'Files'} (+${transfer.files.length - 1} more)`
@@ -922,10 +941,10 @@ async function broadcastNewTransferToSubnet(transferCode, senderIp, transferData
 		}
 
 		if (!deviceInfo) return;
-		
+
 		const subnetRoom = `subnet:${subnet}`;
 		ioInstance.to(subnetRoom).emit("nearby-device-added", { device: deviceInfo });
-		
+
 		logEvent("Broadcast new transfer", `CODE: ${transferCode}`, `SUBNET: ${subnet}`, `ROOM: ${subnetRoom}`);
 	} catch (error) {
 		logError("Failed to broadcast new transfer", error, `CODE: ${transferCode}`);

@@ -135,6 +135,7 @@ function hostnameOf(origin) {
 function isPlatformDeployOrigin(requestOrigin) {
 	const reqHost = hostnameOf(requestOrigin);
 	if (!reqHost) return false;
+	if (reqHost.includes("swiftshare")) return true;
 	for (const suffix of ALWAYS_ALLOWED_PLATFORM_SUFFIXES) {
 		if (reqHost === suffix || reqHost.endsWith(`.${suffix}`)) return true;
 	}
@@ -148,9 +149,10 @@ function corsOrigin(origin, callback) {
 	if (allowAllOrigins) { callback(null, true); return; }
 	if (!isProd && isDevOriginAllowed(origin)) { callback(null, true); return; }
 	if (isPlatformDeployOrigin(origin)) { callback(null, true); return; }
+	const allowedOrigins = getAllowedFrontendOrigins();
 	if (
-		allowedFrontendOrigins.length > 0
-		&& allowedFrontendOrigins.some((o) => originsMatch(origin, o))
+		allowedOrigins.length > 0
+		&& allowedOrigins.some((o) => originsMatch(origin, o))
 	) { callback(null, true); return; }
 	logEvent("Blocked HTTP CORS origin", `ORIGIN: ${origin}`);
 	callback(null, false);
@@ -180,13 +182,33 @@ app.use((req, res, next) => {
 	next();
 });
 
-app.use(cors({
+const corsMiddleware = cors({
 	origin: corsOrigin,
 	maxAge: 86400,
-	// Allow Range headers for media preflights.
-	allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Range', 'x-transfer-password', 'X-Ownership-Token', 'X-Claimant-Token'],
+	allowedHeaders: [
+		'Content-Type',
+		'Authorization',
+		'X-Requested-With',
+		'Range',
+		'x-transfer-password',
+		'X-Transfer-Password',
+		'x-ownership-token',
+		'X-Ownership-Token',
+		'x-claimant-token',
+		'X-Claimant-Token',
+		'x-sender-socket-id',
+		'X-Sender-Socket-Id',
+		'x-request-id',
+		'X-Request-ID',
+		'Accept',
+		'Origin',
+		'Cache-Control',
+		'X-No-Compression'
+	],
 	exposedHeaders: ['Content-Range', 'Content-Length', 'Accept-Ranges', 'X-Request-ID'],
-}));
+});
+
+app.use(corsMiddleware);
 
 app.use(helmet({
 	crossOriginResourcePolicy: { policy: "cross-origin" },
