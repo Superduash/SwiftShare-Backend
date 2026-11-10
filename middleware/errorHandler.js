@@ -1,4 +1,4 @@
-﻿const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
+const { ERROR_CODES, buildErrorResponse } = require("../utils/constants");
 const { logError } = require("../utils/logger");
 
 function errorHandler(err, req, res, next) {
