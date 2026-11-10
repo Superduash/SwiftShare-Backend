@@ -4,6 +4,8 @@ const Busboy = require("busboy");
 const bcrypt = require("bcryptjs");
 const { PassThrough, Transform } = require("stream");
 const { Upload } = require("@aws-sdk/lib-storage");
+const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
+const { PutObjectCommand, HeadObjectCommand } = require("@aws-sdk/client-s3");
 
 const Transfer = require("../models/Transfer");
 const { r2Client, r2Bucket, isR2Configured } = require("../config/r2");
@@ -505,6 +507,194 @@ async function finalizeTransfer({
 
 	return responsePayload;
 }
+
+const jsonBodyParser = express.json({ limit: "1mb" });
+
+// ── Direct R2 Upload: POST /api/upload/init ─────────────────
+// Generates presigned PUT URLs so browser uploads file bytes directly to R2.
+// File bytes never touch Render's edge, completely bypassing edge WAF inspection.
+router.post("/init", jsonBodyParser, rateLimitUpload, async (req, res) => {
+	if (!isR2Configured) {
+		logError("R2 NOT CONFIGURED", null);
+		return res.status(503).json(buildErrorResponse(ERROR_CODES.SERVER_ERROR, "Storage is not configured"));
+	}
+
+	const maxFileCount = getMaxFileCount();
+	const maxTotalBytes = getMaxFileSizeBytes();
+
+	// Accept either { files: [...] } or single { filename, size, contentType }
+	const incomingFiles = Array.isArray(req.body?.files)
+		? req.body.files
+		: (req.body?.filename ? [{
+			filename: req.body.filename,
+			size: req.body.size,
+			contentType: req.body.contentType,
+		}] : []);
+
+	if (!incomingFiles.length) {
+		return res.status(400).json(buildErrorResponse(ERROR_CODES.INVALID_REQUEST, "No files specified"));
+	}
+
+	if (incomingFiles.length > maxFileCount) {
+		return res.status(400).json(buildErrorResponse(ERROR_CODES.TOO_MANY_FILES, `Maximum ${maxFileCount} files allowed`));
+	}
+
+	let totalSize = 0;
+	for (const f of incomingFiles) {
+		const s = Number(f.size || 0);
+		if (!Number.isFinite(s) || s <= 0) {
+			return res.status(400).json(buildErrorResponse(ERROR_CODES.INVALID_REQUEST, `Invalid size for file: ${f.filename || 'unknown'}`));
+		}
+		totalSize += s;
+	}
+
+	if (totalSize > maxTotalBytes) {
+		return res.status(400).json(buildErrorResponse(ERROR_CODES.FILE_TOO_LARGE, `Total upload size exceeds ${formatSizeMB(maxTotalBytes)} limit`));
+	}
+
+	const code = await generateUniqueCode();
+	const presignedFiles = [];
+
+	for (const f of incomingFiles) {
+		const originalName = sanitizeFilename(f.filename || "file");
+		const rawMime = typeof f.contentType === "string" && f.contentType.trim() ? f.contentType.trim() : "application/octet-stream";
+		// Random object key — never use original filename in R2 key
+		const randomId = crypto.randomUUID();
+		const key = `transfers/${code}/${randomId}`;
+
+		const command = new PutObjectCommand({
+			Bucket: r2Bucket,
+			Key: key,
+			ContentType: rawMime,
+		});
+
+		// 15-minute expiry for presigned PUT URL
+		const uploadUrl = await getSignedUrl(r2Client, command, { expiresIn: 900 });
+
+		presignedFiles.push({
+			uploadUrl,
+			key,
+			filename: originalName,
+			contentType: rawMime,
+			size: Number(f.size || 0),
+			headers: {
+				"Content-Type": rawMime,
+			},
+		});
+	}
+
+	return res.status(200).json({
+		success: true,
+		code,
+		files: presignedFiles,
+		uploadUrl: presignedFiles[0].uploadUrl,
+		key: presignedFiles[0].key,
+		headers: presignedFiles[0].headers,
+	});
+});
+
+// ── Direct R2 Upload: POST /api/upload/complete ─────────────
+// Verifies objects in R2 via HeadObject and finalizes transfer session
+router.post("/complete", jsonBodyParser, rateLimitUpload, async (req, res) => {
+	if (!isR2Configured) {
+		logError("R2 NOT CONFIGURED", null);
+		return res.status(503).json(buildErrorResponse(ERROR_CODES.SERVER_ERROR, "Storage is not configured"));
+	}
+
+	const {
+		code,
+		burnAfterDownload: rawBurn,
+		passwordProtected: rawPasswordProtected,
+		password: rawPassword,
+		expiryMinutes: rawExpiry,
+		nearbyVisible: rawNearby,
+		socketId,
+		senderSocketId: rawSenderSocketId,
+	} = req.body || {};
+
+	// Accept either { files: [...] } or single { key, filename, size, contentType }
+	const incomingFiles = Array.isArray(req.body?.files)
+		? req.body.files
+		: (req.body?.key ? [{
+			key: req.body.key,
+			filename: req.body.filename,
+			size: req.body.size,
+			contentType: req.body.contentType,
+		}] : []);
+
+	if (!incomingFiles.length) {
+		return res.status(400).json(buildErrorResponse(ERROR_CODES.INVALID_REQUEST, "No files specified"));
+	}
+
+	const transferCode = (typeof code === "string" && /^[0-9]{6}$/.test(code))
+		? code
+		: (incomingFiles[0].key.split("/")[1] || (await generateUniqueCode()));
+
+	const effectiveSocketId = (typeof rawSenderSocketId === "string" && rawSenderSocketId)
+		? rawSenderSocketId
+		: (typeof socketId === "string" ? socketId : "");
+	if (effectiveSocketId) bindSocketToRoom(transferCode, effectiveSocketId);
+	req._senderSocketId = effectiveSocketId;
+
+	// Verify all objects in R2 via HeadObjectCommand
+	const verifiedFiles = [];
+	let totalBytes = 0;
+
+	for (const f of incomingFiles) {
+		if (!f.key || typeof f.key !== "string") {
+			return res.status(400).json(buildErrorResponse(ERROR_CODES.INVALID_REQUEST, "Missing object key"));
+		}
+
+		let head;
+		try {
+			head = await r2Client.send(new HeadObjectCommand({
+				Bucket: r2Bucket,
+				Key: f.key,
+			}));
+		} catch (headErr) {
+			logError("R2 HeadObject failed on complete", headErr, `KEY: ${f.key}`);
+			return res.status(400).json(buildErrorResponse(ERROR_CODES.INVALID_REQUEST, `File not found in storage: ${f.filename || f.key}`));
+		}
+
+		const actualSize = Number(head.ContentLength || f.size || 0);
+		totalBytes += actualSize;
+		verifiedFiles.push({
+			originalName: sanitizeFilename(f.filename || "file"),
+			storedKey: f.key,
+			mimeType: f.contentType || head.ContentType || "application/octet-stream",
+			size: actualSize,
+		});
+	}
+
+	const burnAfterDownload = parseBurnAfterDownload(rawBurn);
+	const passwordProtected = parseBooleanFlag(rawPasswordProtected);
+	const password = parsePassword(rawPassword);
+	const expiryMinutes = parseExpiryMinutes(rawExpiry);
+	const nearbyVisible = parseBooleanFlag(rawNearby, true);
+
+	if (passwordProtected && password && !isValidPassword(password)) {
+		return res.status(400).json(buildErrorResponse(ERROR_CODES.INVALID_REQUEST, "Invalid password format"));
+	}
+
+	if (expiryMinutes !== null && !isValidExpiryMinutes(expiryMinutes)) {
+		return res.status(400).json(buildErrorResponse(ERROR_CODES.INVALID_REQUEST, "Invalid expiry time"));
+	}
+
+	const response = await finalizeTransfer({
+		req,
+		code: transferCode,
+		files: verifiedFiles,
+		totalSize: totalBytes,
+		uploadStartedAt: Date.now(),
+		burnAfterDownload,
+		password,
+		passwordProtected,
+		expiryMinutes,
+		nearbyVisible,
+	});
+
+	return res.status(200).json(response);
+});
 
 // ── Streaming POST /api/upload ───────────────────────────────
 router.post("/", rateLimitUpload, sanitizeRequestBody, async (req, res) => {
